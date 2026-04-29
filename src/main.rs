@@ -28,6 +28,24 @@ struct Cli {
     max_turns: u32,
 }
 
+/// Build an API client based on the provider name.
+/// Known providers get specialized clients; others default to OpenAI-compatible.
+fn build_client(
+    provider_name: &str,
+    provider_config: &config::settings::ProviderConfig,
+) -> anyhow::Result<Box<dyn api::client::SupportsStreamingMessages>> {
+    let api_key = settings::resolve_api_key(provider_config)?;
+    let base_url = provider_config.base_url.clone();
+
+    let client: Box<dyn api::client::SupportsStreamingMessages> =
+        match provider_name {
+            "anthropic" => Box::new(api::anthropic::AnthropicClient::new(api_key, base_url)),
+            _ => Box::new(api::openai::OpenAIClient::new(api_key, base_url)),
+        };
+
+    Ok(client)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -48,17 +66,15 @@ async fn main() -> anyhow::Result<()> {
 
     let provider_config = settings.providers.get(provider_name).ok_or_else(|| {
         anyhow::anyhow!(
-            "Provider '{}' not configured. Add it to config.yaml",
+            "Provider '{}' not configured. Add it to ~/.config/rcode/config.yaml",
             provider_name
         )
     })?;
-    let api_key = settings::resolve_api_key(provider_config)?;
 
-    let client =
-        api::anthropic::AnthropicClient::new(api_key, provider_config.base_url.clone());
+    let client = build_client(provider_name, provider_config)?;
 
     let mut engine = QueryEngine::new(
-        Box::new(client),
+        client,
         model.to_string(),
         String::new(), // system prompt — Phase 4
         ConversationHistory::new(),
