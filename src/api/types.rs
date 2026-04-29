@@ -112,10 +112,12 @@ pub enum StreamEvent {
     /// Incremental text content from the assistant.
     TextDelta(String),
 
-    /// A tool use block started.
+    /// A tool use block started. `input_json` is populated when the provider
+    /// sends name and arguments in the same SSE chunk (e.g. Gemini via Groveer).
     ToolUseStart {
         id: String,
         name: String,
+        input_json: Option<String>,
     },
 
     /// Incremental JSON input for an ongoing tool use.

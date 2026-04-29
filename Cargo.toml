@@ -31,3 +31,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # 其他
 dirs = "6"
 async-trait = "0.1"
+
+# Tool dependencies
+walkdir = "2"
+regex = "1"
+which = "7"

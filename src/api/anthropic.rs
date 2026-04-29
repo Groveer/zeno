@@ -5,10 +5,11 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use futures::Stream;
 use reqwest::Client;
+use serde_json::json;
 
 use crate::api::client::SupportsStreamingMessages;
 use crate::api::sse;
-use crate::api::types::{ApiError, Message, Role, StreamEvent};
+use crate::api::types::{ApiError, ContentBlock, Message, Role, StreamEvent};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
@@ -27,6 +28,28 @@ impl AnthropicClient {
         }
     }
 
+    /// Convert tools from OpenAI format to Anthropic format.
+    ///
+    /// OpenAI: `{ "type": "function", "function": { "name": "...", "parameters": {...} } }`
+    /// Anthropic: `{ "name": "...", "description": "...", "input_schema": {...} }`
+    fn convert_tools(tools: &[serde_json::Value]) -> Vec<serde_json::Value> {
+        tools
+            .iter()
+            .filter_map(|t| {
+                let func = t.get("function")?;
+                let name = func.get("name")?.as_str()?;
+                let description = func.get("description").and_then(|d| d.as_str()).unwrap_or("");
+                let parameters = func.get("parameters").cloned().unwrap_or(json!({}));
+
+                Some(json!({
+                    "name": name,
+                    "description": description,
+                    "input_schema": parameters,
+                }))
+            })
+            .collect()
+    }
+
     fn build_request_body(
         &self,
         model: &str,
@@ -35,39 +58,42 @@ impl AnthropicClient {
         tools: &[serde_json::Value],
         max_tokens: u32,
     ) -> serde_json::Value {
-        let mut body = serde_json::json!({
+        let mut body = json!({
             "model": model,
             "max_tokens": max_tokens,
             "stream": true,
         });
 
         if !system.is_empty() {
-            body["system"] = serde_json::json!(system);
+            body["system"] = json!(system);
         }
 
+        // Anthropic accepts our ContentBlock format directly
+        // (type: "text", type: "tool_use", type: "tool_result")
         let api_messages: Vec<serde_json::Value> = messages
             .iter()
             .map(|m| {
                 let content: Vec<serde_json::Value> = m
                     .content
                     .iter()
-                    .map(|block| serde_json::to_value(block).unwrap_or_default())
+                    .filter_map(|block| serde_json::to_value(block).ok())
                     .collect();
                 let role_str = match m.role {
                     Role::User => "user",
                     Role::Assistant => "assistant",
                 };
-                serde_json::json!({
+                json!({
                     "role": role_str,
                     "content": content,
                 })
             })
             .collect();
 
-        body["messages"] = serde_json::json!(api_messages);
+        body["messages"] = json!(api_messages);
 
+        // Convert tools to Anthropic format
         if !tools.is_empty() {
-            body["tools"] = serde_json::json!(tools);
+            body["tools"] = json!(Self::convert_tools(tools));
         }
 
         body

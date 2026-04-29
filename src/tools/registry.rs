@@ -1,1 +1,2 @@
-// Phase 2
+//! Tool registry re-export.
+pub use super::base::ToolRegistry;

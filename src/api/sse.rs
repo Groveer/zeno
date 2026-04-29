@@ -94,7 +94,7 @@ fn parse_content_block_start(data: &str) -> Option<Result<StreamEvent, ApiError>
     if content_block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
         let id = content_block.get("id")?.as_str()?.to_string();
         let name = content_block.get("name")?.as_str()?.to_string();
-        return Some(Ok(StreamEvent::ToolUseStart { id, name }));
+        return Some(Ok(StreamEvent::ToolUseStart { id, name, input_json: None }));
     }
 
     None
