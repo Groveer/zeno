@@ -4,8 +4,6 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use super::paths;
-
 // ---------------------------------------------------------------------------
 // Top-level settings
 // ---------------------------------------------------------------------------
@@ -17,14 +15,30 @@ pub struct Settings {
     pub active_provider: String,
     pub model: String,
     pub tools: ToolsConfig,
+    pub role: RoleConfig,
+    pub web_search_config: WebSearchConfig,
     pub mcp: McpConfig,
     pub permissions: PermissionMode,
+    /// Paths that are exempt from permission checks.
+    /// Files under these paths bypass both the CWD boundary check and
+    /// the mode-based ask/deny behavior — operations are always allowed.
+    /// Configured via `zn.trusted_paths({"/home/user/proj"})` in init.lua.
+    #[serde(default)]
+    pub trusted_paths: Vec<String>,
     pub max_turns: u32,
     pub max_tokens: u32,
+    /// Model context window table: model name prefix → context window (tokens).
+    /// Used for auto-detecting context window from the model name.
+    /// Longer prefixes are tried first (most specific match wins).
+    /// Configured via `zn.model_context("prefix", n)` in init.lua.
+    #[serde(default)]
+    pub model_contexts: HashMap<String, u32>,
     pub theme: String,
     pub plugins: PluginConfig,
     pub memory: MemoryConfig,
     pub auxiliary: AuxiliaryConfig,
+    pub llm: LlmConfig,
+    pub log_retention_days: u64,
 }
 
 impl Default for Settings {
@@ -34,14 +48,20 @@ impl Default for Settings {
             active_provider: "anthropic".into(),
             model: "claude-sonnet-4-20250514".into(),
             tools: ToolsConfig::default(),
+            role: RoleConfig::default(),
+            web_search_config: WebSearchConfig::default(),
             mcp: McpConfig::default(),
             permissions: PermissionMode::Ask,
-            max_turns: 8,
-            max_tokens: 4096,
+            trusted_paths: Vec::new(),
+            max_turns: 200,
+            max_tokens: 0, // 0 = auto (derived from model context window)
+            model_contexts: HashMap::new(),
             theme: "default".into(),
             plugins: PluginConfig::default(),
             memory: MemoryConfig::default(),
             auxiliary: AuxiliaryConfig::default(),
+            llm: LlmConfig::default(),
+            log_retention_days: 3,
         }
     }
 }
@@ -50,32 +70,37 @@ impl Default for Settings {
 // Provider
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ProviderConfig {
     #[serde(default)]
     pub api_key_env: Option<String>,
     pub api_key: Option<String>,
-    #[serde(default = "default_anthropic_url")]
+    #[serde(default)]
     pub base_url: String,
     #[serde(default)]
     pub default_model: String,
-}
-
-fn default_anthropic_url() -> String {
-    "https://api.anthropic.com".into()
+    /// Optional: max output tokens per request.
+    /// If set, overrides the top-level `max_tokens` setting.
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
 // Tools
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ToolsConfig {
     pub bash: bool,
-    pub file_read: bool,
-    pub file_write: bool,
-    pub file_edit: bool,
+    pub use_rtk: bool,
+    /// Extra environment variables injected into every bash command execution.
+    /// Key-value pairs like `{"NODE_ENV": "development"}`.
+    #[serde(default)]
+    pub bash_env: HashMap<String, String>,
+    pub read: bool,
+    pub write: bool,
+    pub edit: bool,
     pub glob: bool,
     pub grep: bool,
     pub web_search: bool,
@@ -86,9 +111,11 @@ impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
             bash: true,
-            file_read: true,
-            file_write: true,
-            file_edit: true,
+            use_rtk: true,
+            bash_env: HashMap::new(),
+            read: true,
+            write: true,
+            edit: true,
             glob: true,
             grep: true,
             web_search: true,
@@ -98,24 +125,94 @@ impl Default for ToolsConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Role (identity/persona)
+// ---------------------------------------------------------------------------
+
+/// Customizable role sections for the system prompt.
+/// All fields are optional — `None` means use the built-in default text.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct RoleConfig {
+    /// Core identity and role declaration (replaces the default "You are zeno..." block).
+    pub identity: Option<String>,
+    /// Guidelines section (replaces the default guidelines block).
+    pub guidelines: Option<String>,
+}
+
+impl Default for RoleConfig {
+    fn default() -> Self {
+        Self {
+            identity: None,
+            guidelines: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Web Search
+// ---------------------------------------------------------------------------
+
+/// Configuration for the web search tool.
+/// Users can customize the search backend via `zn.web_search({...})` in init.lua.
+///
+/// Supported providers:
+/// - `searxng` (default): SearXNG meta-search engine, no API key required
+/// - `brave`: Brave Search API, requires API key
+/// - `tavily`: Tavily Search API, requires API key
+/// - `duckduckgo`: DuckDuckGo Lite (fallback, no API key)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct WebSearchConfig {
+    /// Search provider: "searxng", "brave", "tavily", or "duckduckgo".
+    pub provider: String,
+    /// Base URL for the search service.
+    /// For searxng: the instance URL (default: "https://searx.be")
+    /// For brave/tavily: usually not needed (uses official API endpoint)
+    pub url: String,
+    /// Environment variable name containing the API key.
+    pub api_key_env: Option<String>,
+    /// Direct API key (not recommended, prefer api_key_env).
+    pub api_key: Option<String>,
+}
+
+impl Default for WebSearchConfig {
+    fn default() -> Self {
+        Self {
+            provider: "searxng".into(),
+            url: String::new(), // empty = use provider default
+            api_key_env: None,
+            api_key: None,
+        }
+    }
+}
+
+impl WebSearchConfig {
+    /// Resolve the API key: prefer explicit key, then env var.
+    pub fn resolve_api_key(&self) -> Option<String> {
+        if let Some(ref key) = self.api_key {
+            if !key.is_empty() {
+                return Some(key.clone());
+            }
+        }
+        if let Some(ref env) = self.api_key_env {
+            return std::env::var(env).ok();
+        }
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MCP
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct McpConfig {
     pub servers: HashMap<String, McpServerConfig>,
 }
 
-impl Default for McpConfig {
-    fn default() -> Self {
-        Self {
-            servers: HashMap::new(),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct McpServerConfig {
     pub command: Option<Vec<String>>,
     pub url: Option<String>,
@@ -127,16 +224,12 @@ pub struct McpServerConfig {
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum PermissionMode {
     Allow,
     Deny,
+    #[default]
     Ask,
-}
-
-impl Default for PermissionMode {
-    fn default() -> Self {
-        Self::Ask
-    }
 }
 
 impl fmt::Display for PermissionMode {
@@ -175,7 +268,32 @@ pub struct PluginConfig {
 impl Default for PluginConfig {
     fn default() -> Self {
         Self {
-            dir: "~/.config/rcode/plugins".into(),
+            dir: "~/.config/zeno/plugins".into(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LLM
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct LlmConfig {
+    /// Maximum number of retries when the LLM returns an empty response
+    /// or the request times out / fails with a transient error.
+    pub max_retries: u32,
+    /// Fraction of the model context window (0.0–1.0) at which
+    /// auto-compaction triggers.  0.33 = compact when total tokens
+    /// exceed 33% of the context window.  Set to 0.0 to disable.
+    pub compact_threshold: f64,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            compact_threshold: 0.33,
         }
     }
 }
@@ -184,16 +302,42 @@ impl Default for PluginConfig {
 // Memory
 // ---------------------------------------------------------------------------
 
+/// Config for a single Lua memory provider entry.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+#[derive(Default)]
+pub struct MemoryProviderEntry {
+    /// Path to the Lua script (relative to config dir), or inline script source.
+    pub script: String,
+    /// Whether the script is inline (true) or a file path (false).
+    #[serde(default)]
+    pub inline: bool,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct MemoryConfig {
-    pub dir: String,
+    /// Character limit for MEMORY.md (agent notes). Default: 4000.
+    pub memory_char_limit: usize,
+    /// Character limit for USER.md (user profile). Default: 2500.
+    pub user_char_limit: usize,
+    /// Name of the active external memory provider (e.g. "mem0", "honcho").
+    /// Empty string means no external provider (built-in only).
+    /// Configured via `zn.memory_provider("name", {...})` in init.lua.
+    pub provider: String,
+    /// Registered memory provider configs (name → config).
+    /// Populated by `zn.memory_provider()` calls in init.lua.
+    #[serde(default)]
+    pub providers: HashMap<String, MemoryProviderEntry>,
 }
 
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
-            dir: ".rcode/memory".into(),
+            memory_char_limit: 4000,
+            user_char_limit: 2500,
+            provider: String::new(),
+            providers: HashMap::new(),
         }
     }
 }
@@ -208,6 +352,8 @@ pub struct AuxiliaryConfig {
     pub compression: AuxiliaryTaskConfig,
     pub vision: AuxiliaryTaskConfig,
     pub web_extract: AuxiliaryTaskConfig,
+    pub title_generation: AuxiliaryTaskConfig,
+    pub session_search: AuxiliaryTaskConfig,
 }
 
 impl Default for AuxiliaryConfig {
@@ -216,6 +362,8 @@ impl Default for AuxiliaryConfig {
             compression: AuxiliaryTaskConfig::default_with_timeout(30.0),
             vision: AuxiliaryTaskConfig::default_with_timeout(30.0),
             web_extract: AuxiliaryTaskConfig::default_with_timeout(60.0),
+            title_generation: AuxiliaryTaskConfig::default_with_timeout(30.0),
+            session_search: AuxiliaryTaskConfig::default_with_timeout(30.0),
         }
     }
 }
@@ -229,6 +377,15 @@ pub struct AuxiliaryTaskConfig {
     pub base_url: Option<String>,
     pub api_key: Option<String>,
     pub timeout: f64,
+    /// Per-task extra body fields (provider-specific request parameters).
+    /// E.g. `{"enable_thinking": false}` for providers that support it.
+    #[serde(default)]
+    pub extra_body: HashMap<String, serde_json::Value>,
+    /// Maximum output tokens for this task. 0 = use default (4096).
+    #[serde(default)]
+    pub max_tokens: u32,
+    /// Temperature override for this task. None = use task-specific default.
+    pub temperature: Option<f64>,
 }
 
 fn default_auto() -> String {
@@ -243,6 +400,9 @@ impl Default for AuxiliaryTaskConfig {
             base_url: None,
             api_key: None,
             timeout: 30.0,
+            extra_body: HashMap::new(),
+            max_tokens: 0,
+            temperature: None,
         }
     }
 }
@@ -260,18 +420,6 @@ impl AuxiliaryTaskConfig {
 // Load / resolve
 // ---------------------------------------------------------------------------
 
-/// Load settings from `~/.config/rcode/config.yaml`, or return defaults.
-pub fn load() -> anyhow::Result<Settings> {
-    let path = paths::config_path();
-    if !path.exists() {
-        tracing::info!("No config file at {}, using defaults", path.display());
-        return Ok(Settings::default());
-    }
-    let content = std::fs::read_to_string(&path)?;
-    let settings: Settings = serde_yaml::from_str(&content)?;
-    Ok(settings)
-}
-
 /// Resolve the API key for a provider: prefer explicit `api_key`, then env var.
 pub fn resolve_api_key(provider: &ProviderConfig) -> anyhow::Result<String> {
     if let Some(ref key) = provider.api_key {
@@ -285,25 +433,14 @@ pub fn resolve_api_key(provider: &ProviderConfig) -> anyhow::Result<String> {
     }
 }
 
-/// Save settings to the config file.
-pub fn save(settings: &Settings) -> anyhow::Result<()> {
-    paths::ensure_config_dir()?;
-    let path = paths::config_path();
-    let content = serde_yaml::to_string(settings)?;
-    std::fs::write(&path, content)?;
-    Ok(())
-}
-
 /// Get the effective model for a given provider.
+#[allow(dead_code, reason = "reserved for future provider-switching UI")]
 pub fn effective_model(settings: &Settings, provider_name: &str) -> Option<String> {
-    settings
-        .providers
-        .get(provider_name)
-        .map(|p| {
-            if p.default_model.is_empty() {
-                settings.model.clone()
-            } else {
-                p.default_model.clone()
-            }
-        })
+    settings.providers.get(provider_name).map(|p| {
+        if p.default_model.is_empty() {
+            settings.model.clone()
+        } else {
+            p.default_model.clone()
+        }
+    })
 }

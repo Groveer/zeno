@@ -4,7 +4,7 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use regex::Regex;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use walkdir::WalkDir;
 
 use super::base::{Tool, ToolContext, ToolError};
@@ -61,11 +61,7 @@ impl Tool for GrepTool {
         })
     }
 
-    async fn execute(
-        &self,
-        arguments: Value,
-        ctx: &ToolContext,
-    ) -> Result<String, ToolError> {
+    async fn execute(&self, arguments: Value, ctx: &ToolContext) -> Result<String, ToolError> {
         let pattern = arguments["pattern"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing 'pattern'".into()))?;
@@ -94,60 +90,104 @@ impl Tool for GrepTool {
         let re = Regex::new(pattern)
             .map_err(|e| ToolError::InvalidArguments(format!("Invalid regex: {}", e)))?;
 
-        let is_dir = base_path.is_dir();
-        let mut results = Vec::new();
-        let mut match_count = 0;
+        let pattern_owned = pattern.to_string();
+        let include_owned = include.map(String::from);
+        let base_path_display = base_path.display().to_string();
 
-        let entries: Vec<std::path::PathBuf> = if is_dir {
-            WalkDir::new(&base_path)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    if !e.file_type().is_file() {
-                        return false;
-                    }
-                    if let Some(glob) = include {
-                        simple_glob_match(glob, e.path())
-                    } else {
-                        true
-                    }
-                })
-                .map(|e| e.path().to_path_buf())
-                .collect()
-        } else {
-            vec![base_path.clone()]
-        };
+        // Offload all blocking filesystem I/O (WalkDir traversal, file reads,
+        // regex matching) to tokio's blocking thread pool so we don't starve
+        // the async worker threads.
+        let (match_count, results) = tokio::task::spawn_blocking(move || {
+            grep_sync(
+                &base_path,
+                &re,
+                &pattern_owned,
+                include_owned.as_deref(),
+                context,
+                limit,
+            )
+        })
+        .await
+        .map_err(|e| ToolError::Execution(format!("Task join error: {}", e)))?;
 
-        for path in &entries {
+        if results.is_empty() {
+            return Ok(format!(
+                "No matches for '{}' in {}",
+                pattern, base_path_display,
+            ));
+        }
+
+        Ok(format!(
+            "Found {} match(es):\n\n{}",
+            match_count,
+            results.join("\n\n")
+        ))
+    }
+
+    fn is_read_only(&self, _input: &Value) -> bool {
+        true
+    }
+}
+
+/// Purely synchronous grep implementation — safe to run on a blocking thread.
+fn grep_sync(
+    base_path: &Path,
+    re: &Regex,
+    _pattern: &str,
+    include: Option<&str>,
+    context: usize,
+    limit: usize,
+) -> (usize, Vec<String>) {
+    // Max number of file entries to scan (prevent OOM on huge repos)
+    const MAX_FILE_ENTRIES: usize = 10_000;
+
+    let mut results = Vec::new();
+    let mut match_count = 0;
+
+    if base_path.is_dir() {
+        for entry in WalkDir::new(base_path).into_iter().filter_map(|e| e.ok()) {
             if match_count >= limit {
                 break;
             }
 
-            let content = match tokio::fs::read_to_string(path).await {
+            // Skip common large/vendored directories
+            if entry.file_type().is_dir() && is_skipped_dir(entry.path()) {
+                continue;
+            }
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            if let Some(glob) = include
+                && !simple_glob_match(glob, entry.path())
+            {
+                continue;
+            }
+
+            let path = entry.path().to_path_buf();
+
+            // Skip binary files: read first 8KB and check for null bytes
+            if is_likely_binary_sync(&path) {
+                continue;
+            }
+
+            let content = match std::fs::read_to_string(&path) {
                 Ok(c) => c,
-                Err(_) => continue, // Skip unreadable files
+                Err(_) => continue,
             };
 
             let lines: Vec<&str> = content.lines().collect();
-            let relative = path
-                .strip_prefix(&base_path)
-                .unwrap_or(path);
+            let relative = path.strip_prefix(base_path).unwrap_or(&path);
 
             for (line_idx, line) in lines.iter().enumerate() {
                 if re.is_match(line) {
                     let line_num = line_idx + 1;
 
-                    // Build context
                     let mut context_lines = Vec::new();
-                    let start = line_num.saturating_sub(context);
+                    let start = line_num.saturating_sub(context).max(1);
                     let end = (line_num + context).min(lines.len());
 
                     for ctx_line_num in start..=end {
-                        let marker = if ctx_line_num == line_num {
-                            ">>>"
-                        } else {
-                            "   "
-                        };
+                        let marker = if ctx_line_num == line_num { ">>>" } else { " " };
                         context_lines.push(format!(
                             "{} {:>4} | {}",
                             marker,
@@ -169,31 +209,114 @@ impl Tool for GrepTool {
                     }
                 }
             }
-        }
 
-        if results.is_empty() {
-            return Ok(format!("No matches for '{}' in {}", pattern, base_path.display()));
+            // Safety limit: stop scanning after too many files
+            if results.len() >= MAX_FILE_ENTRIES {
+                break;
+            }
         }
+    } else {
+        // Single file mode
+        let content = match std::fs::read_to_string(base_path) {
+            Ok(c) => c,
+            Err(e) => {
+                // Return error via an error result — the caller formats a friendly message
+                results.push(format!("[error] Cannot read file: {}", e));
+                return (0, results);
+            }
+        };
 
-        Ok(format!(
-            "Found {} match(es):\n\n{}",
-            match_count,
-            results.join("\n\n")
-        ))
+        let lines: Vec<&str> = content.lines().collect();
+
+        for (line_idx, line) in lines.iter().enumerate() {
+            if re.is_match(line) {
+                let line_num = line_idx + 1;
+
+                let mut context_lines = Vec::new();
+                let start = line_num.saturating_sub(context).max(1);
+                let end = (line_num + context).min(lines.len());
+
+                for ctx_line_num in start..=end {
+                    let marker = if ctx_line_num == line_num { ">>>" } else { " " };
+                    context_lines.push(format!(
+                        "{} {:>4} | {}",
+                        marker,
+                        ctx_line_num,
+                        lines[ctx_line_num - 1]
+                    ));
+                }
+
+                results.push(format!(
+                    "{}:{}\n{}",
+                    base_path.display(),
+                    line_num,
+                    context_lines.join("\n")
+                ));
+
+                match_count += 1;
+                if match_count >= limit {
+                    break;
+                }
+            }
+        }
     }
+
+    (match_count, results)
 }
 
-/// Simple file glob matching for the include filter.
 fn simple_glob_match(pattern: &str, path: &Path) -> bool {
     let file_name = match path.file_name().and_then(|n| n.to_str()) {
         Some(n) => n,
         None => return false,
     };
-    // Support patterns like "*.rs", "*.py"
     if pattern.starts_with('*') && pattern.contains('.') && !pattern.contains('/') {
-        let ext = &pattern[1..]; // ".rs"
+        let ext = &pattern[1..];
         file_name.ends_with(ext)
     } else {
         file_name.contains(pattern)
     }
+}
+
+/// Directories that are commonly large, vendored, or not useful to search.
+const SKIPPED_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "vendor",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+    ".cache",
+];
+
+/// Check if a directory should be skipped during traversal.
+fn is_skipped_dir(path: &Path) -> bool {
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        SKIPPED_DIRS.contains(&name)
+    } else {
+        false
+    }
+}
+
+/// Synchronous version — safe to call from a blocking thread.
+/// Check if a file is likely binary by reading the first 8KB and looking for null bytes.
+fn is_likely_binary_sync(path: &Path) -> bool {
+    use std::io::Read;
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut buf = [0u8; 8192];
+    let n = match file.read(&mut buf) {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+    buf[..n].contains(&0)
 }

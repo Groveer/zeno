@@ -1,34 +1,89 @@
 //! Bash/shell command execution tool with optional rtk routing.
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::base::{Tool, ToolContext, ToolError};
 
-/// rtk supported command prefixes for auto-routing.
-const RTK_SUPPORTED_PREFIXES: &[&str] = &[
-    "git ", "gh ", "cargo ", "npm ", "pnpm ", "npx ",
-    "pytest ", "ruff ", "mypy ", "jest ", "vitest ",
-    "tsc ", "next ", "ls ", "tree ", "cat ", "grep ",
-    "docker ", "kubectl ", "aws ", "go ", "gcc ", "g++",
-    "rustc ", "make ", "cmake ",
+/// Commands that are known to be read-only (no side effects).
+/// Used by `is_read_only` to skip unnecessary permission confirmations
+/// in "ask" mode — e.g. `ls`, `cat`, `git status` don't modify anything.
+const READONLY_PREFIXES: &[&str] = &[
+    "ls ",
+    "cat ",
+    "head ",
+    "tail ",
+    "less ",
+    "more ",
+    "file ",
+    "which ",
+    "where ",
+    "type ",
+    "grep ",
+    "rg ",
+    "ag ",
+    "ack ",
+    "find ",
+    "fd ",
+    "locate ",
+    "git status",
+    "git diff",
+    "git log",
+    "git show",
+    "git branch",
+    "git tag",
+    "git remote",
+    "gh ", // GitHub CLI — read-only subcommands dominate
+    "echo ",
+    "printf ",
+    "pwd",
+    "whoami",
+    "hostname",
+    "uname",
+    "env ",
+    "printenv ",
+    "set ",
+    "cargo check",
+    "cargo test",
+    "cargo clippy",
+    "cargo doc",
+    "pytest ",
+    "ruff check",
+    "mypy ",
+    "test ",
+    "[ ",
+    "[[ ",
+    "wc ",
+    "sort ",
+    "uniq ",
+    "cut ",
+    "tr ",
+    "awk ",
+    "sed -n",
+    "xargs -n",
 ];
 
 pub struct BashTool {
     use_rtk: bool,
     timeout_secs: u64,
+    /// Extra environment variables injected into every bash command execution.
+    env: HashMap<String, String>,
 }
 
 impl BashTool {
-    pub fn new(use_rtk: bool) -> Self {
+    pub fn new(use_rtk: bool, env: HashMap<String, String>) -> Self {
         Self {
             use_rtk,
             timeout_secs: 120,
+            env,
         }
     }
 
-    /// Check if rtk is available and the command is in the supported list.
-    fn maybe_rtk_route(&self, cmd: &str) -> Option<Vec<String>> {
+    /// Check if rtk can route this command. Uses `rtk rewrite` as the single
+    /// source of truth — no hardcoded prefix lists to maintain.
+    async fn maybe_rtk_route(&self, cmd: &str) -> Option<String> {
         if !self.use_rtk {
             return None;
         }
@@ -36,10 +91,29 @@ impl BashTool {
             return None;
         }
         let trimmed = cmd.trim();
-        RTK_SUPPORTED_PREFIXES
-            .iter()
-            .find(|prefix| trimmed.starts_with(*prefix))
-            .map(|_| trimmed.split_whitespace().map(String::from).collect())
+        if trimmed.is_empty() {
+            return None;
+        }
+        // Skip compound commands (pipes, chains) — rtk proxy can't handle them
+        if trimmed.contains('|') || trimmed.contains("&&") || trimmed.contains("||") {
+            return None;
+        }
+        // Ask rtk to rewrite — this is the authoritative check
+        let Ok(output) = tokio::process::Command::new("rtk")
+            .arg("rewrite")
+            .args(trimmed.split_whitespace())
+            .output()
+            .await
+        else {
+            return None;
+        };
+        if output.status.code() == Some(3) {
+            let rewritten = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !rewritten.is_empty() {
+                return Some(rewritten);
+            }
+        }
+        None
     }
 }
 
@@ -74,11 +148,86 @@ impl Tool for BashTool {
         })
     }
 
-    async fn execute(
-        &self,
-        arguments: Value,
-        ctx: &ToolContext,
-    ) -> Result<String, ToolError> {
+    /// Dynamically determine if a bash command is read-only based on its content.
+    /// Matches the command string against a list of known read-only prefixes.
+    /// This avoids unnecessary "ask" permission prompts for harmless commands
+    /// like `ls`, `cat`, `git status`, etc.
+    fn is_read_only(&self, input: &Value) -> bool {
+        let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
+        let trimmed = cmd.trim();
+
+        // Empty commands are not read-only
+        if trimmed.is_empty() {
+            return false;
+        }
+        // Reject commands containing shell injection / dangerous constructs.
+        // This prevents bypasses like `ls $(rm -rf /)` or `cat `wget evil.sh``
+        // where a "read-only" prefix hides a destructive sub-command.
+        for danger in &[
+            "$(", // command substitution
+            "${", // variable expansion (can contain commands in some forms)
+            "`",  // backtick command substitution
+            "|",  // pipe (can chain to destructive commands)
+            "&&", // chain
+            "||", // chain
+            ";",  // sequential separator
+            ">>", // append redirect
+            ">",  // redirect (must check before readonly prefix)
+        ] {
+            if trimmed.contains(danger) {
+                return false;
+            }
+        }
+        // Commands that are always destructive — not read-only regardless of flags
+        for destructive in &[
+            "rm ",
+            "mv ",
+            "cp ",
+            "mkdir ",
+            "touch ",
+            "chmod ",
+            "chown ",
+            "kill ",
+            "pkill ",
+            "killall ",
+            "dd ",
+            "mkfs ",
+            "fdisk ",
+            "mount ",
+            "umount ",
+            "sudo ",
+            "doas ",
+            "su ",
+            "apt ",
+            "yum ",
+            "dnf ",
+            "pacman ",
+            "brew install",
+            "brew uninstall",
+            "pip install",
+            "pip uninstall",
+            "npm install",
+            "npm uninstall",
+            "cargo install",
+            "cargo uninstall",
+            "systemctl ",
+            "service ",
+        ] {
+            if trimmed.contains(destructive) {
+                return false;
+            }
+        }
+
+        // Check if the command starts with a known read-only prefix.
+        // We verify the *first token* (before any whitespace) matches a known
+        // prefix, to prevent tricks like embedding dangerous constructs after
+        // a safe prefix on the same line.
+        READONLY_PREFIXES
+            .iter()
+            .any(|prefix| trimmed.starts_with(prefix))
+    }
+
+    async fn execute(&self, arguments: Value, ctx: &ToolContext) -> Result<String, ToolError> {
         let cmd = arguments["command"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing 'command'".into()))?;
@@ -89,43 +238,67 @@ impl Tool for BashTool {
             .unwrap_or(self.timeout_secs);
 
         // Try rtk routing first
-        if let Some(rtk_parts) = self.maybe_rtk_route(cmd) {
-            tracing::debug!("Routing through rtk: {:?}", rtk_parts);
-            let output = tokio::time::timeout(
-                std::time::Duration::from_secs(timeout),
-                tokio::process::Command::new("rtk")
-                    .args(&rtk_parts)
-                    .current_dir(&ctx.cwd)
-                    .output(),
-            )
-            .await
-            .map_err(|_| ToolError::Timeout(format!("rtk command timed out after {}s", timeout)))?
-            .map_err(ToolError::Io)?;
+        if let Some(rtk_cmd_str) = self.maybe_rtk_route(cmd).await {
+            tracing::debug!(rtk_command = %rtk_cmd_str, "Routing through rtk");
+            let parts: Vec<&str> = rtk_cmd_str.split_whitespace().collect();
+            if let Some((program, args)) = parts.split_first() {
+                let mut rtk_cmd = tokio::process::Command::new(program);
+                rtk_cmd.args(args).current_dir(&ctx.cwd);
+                for (k, v) in &self.env {
+                    rtk_cmd.env(k, v);
+                }
+                rtk_cmd
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true);
+                let child = rtk_cmd.spawn().map_err(ToolError::Io)?;
+                let output = tokio::time::timeout(
+                    std::time::Duration::from_secs(timeout),
+                    child.wait_with_output(),
+                )
+                .await
+                .map_err(|_| {
+                    ToolError::Timeout(format!("rtk command timed out after {}s", timeout))
+                })?
+                .map_err(ToolError::Io)?;
 
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                let mut result = stdout;
-                if !stderr.is_empty() {
-                    result.push_str("\n[stderr]\n");
-                    result.push_str(&stderr);
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                    let mut result = stdout;
+                    if !stderr.is_empty() {
+                        result.push_str("\n[stderr]\n");
+                        result.push_str(&stderr);
+                    }
+                    if result.is_empty() {
+                        result = "(no output)".into();
+                    }
+                    return Ok(result);
                 }
-                if result.is_empty() {
-                    result = "(no output)".into();
-                }
-                return Ok(result);
+                tracing::debug!(
+                    event = "rtk_fallback",
+                    "rtk proxy failed, falling back to raw command"
+                );
             }
-            tracing::debug!("rtk proxy failed, falling back to raw command");
         }
 
         // Normal execution via bash
+        // Use spawn() + kill_on_drop(true) so that if this future is
+        // cancelled (e.g. by tokio::select! on Ctrl+C), the child process
+        // is killed immediately instead of becoming an orphan.
+        let mut bash_cmd = tokio::process::Command::new("bash");
+        bash_cmd.arg("-c").arg(cmd).current_dir(&ctx.cwd);
+        for (k, v) in &self.env {
+            bash_cmd.env(k, v);
+        }
+        bash_cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        let child = bash_cmd.spawn().map_err(ToolError::Io)?;
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(timeout),
-            tokio::process::Command::new("bash")
-                .arg("-c")
-                .arg(cmd)
-                .current_dir(&ctx.cwd)
-                .output(),
+            child.wait_with_output(),
         )
         .await
         .map_err(|_| ToolError::Timeout(format!("command timed out after {}s", timeout)))?

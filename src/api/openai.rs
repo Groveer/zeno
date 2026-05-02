@@ -11,10 +11,10 @@ use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::{Stream, StreamExt};
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::api::client::SupportsStreamingMessages;
-use crate::api::types::{ApiError, ContentBlock, Message, Role, StreamEvent, StopReason, Usage};
+use crate::api::types::{ApiError, ContentBlock, Message, Role, StopReason, StreamEvent, Usage};
 
 pub struct OpenAIClient {
     http: Client,
@@ -37,7 +37,7 @@ impl OpenAIClient {
         system: &str,
         messages: &[Message],
         tools: &[Value],
-        max_tokens: u32,
+        max_tokens: Option<u32>,
     ) -> Value {
         let mut api_messages = Vec::new();
 
@@ -60,6 +60,10 @@ impl OpenAIClient {
                 .any(|b| matches!(b, ContentBlock::ToolResult { .. }));
 
             if has_tool_result {
+                // OpenAI requires each tool_result as a separate "tool" role message.
+                // Text blocks in the same user message are steer/guidance text —
+                // emit them as a separate user message after all tool results.
+                let mut has_text_blocks = false;
                 for block in &m.content {
                     if let ContentBlock::ToolResult {
                         tool_use_id,
@@ -76,6 +80,29 @@ impl OpenAIClient {
                             msg["metadata"] = json!({ "is_error": true });
                         }
                         api_messages.push(msg);
+                    } else if matches!(block, ContentBlock::Text { .. }) {
+                        has_text_blocks = true;
+                    }
+                }
+                // Emit any text blocks (steer/guidance) as a separate user
+                // message so the model can see them. Without this, steer text
+                // appended via append_steer_to_last_tool_result() would be
+                // silently dropped.
+                if has_text_blocks {
+                    let text: String = m
+                        .content
+                        .iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    if !text.is_empty() {
+                        api_messages.push(json!({
+                            "role": "user",
+                            "content": text,
+                        }));
                     }
                 }
             } else if role_str == "assistant" {
@@ -146,14 +173,23 @@ impl OpenAIClient {
             "model": model,
             "messages": api_messages,
             "stream": true,
+            "stream_options": { "include_usage": true },
         });
 
-        if max_tokens > 0 {
-            body["max_completion_tokens"] = json!(max_tokens);
+        // Only include max_completion_tokens when explicitly set.
+        // When None (auto mode), omit it entirely — the provider's
+        // default output limit applies, matching Hermes behavior.
+        if let Some(mt) = max_tokens {
+            body["max_completion_tokens"] = json!(mt);
         }
 
         if !tools.is_empty() {
             body["tools"] = json!(tools);
+            // Allow the model to return multiple tool calls in a single response.
+            // Without this, some OpenAI-compatible providers default to sequential
+            // tool calls, forcing the agent to wait one turn per tool and
+            // dramatically increasing latency for multi-tool turns.
+            body["parallel_tool_calls"] = json!(true);
         }
 
         body
@@ -168,7 +204,7 @@ impl SupportsStreamingMessages for OpenAIClient {
         system: &str,
         messages: &[Message],
         tools: &[Value],
-        max_tokens: u32,
+        max_tokens: Option<u32>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ApiError>> + Send>>, ApiError> {
         let url = format!("{}/chat/completions", self.base_url);
         let body = self.build_request_body(model, system, messages, tools, max_tokens);
@@ -181,7 +217,7 @@ impl SupportsStreamingMessages for OpenAIClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ApiError::Request(e))?;
+            .map_err(ApiError::Request)?;
 
         let status = response.status();
         if status.is_client_error() || status.is_server_error() {
@@ -190,9 +226,19 @@ impl SupportsStreamingMessages for OpenAIClient {
             if status_code == 402 {
                 return Err(ApiError::PaymentRequired);
             }
+            let body = if body_text.is_empty() && status.is_server_error() {
+                format!(
+                    "(empty response body — server error {status_code}. \
+                     Possible causes: reverse proxy cannot reach upstream, \
+                     or the API endpoint URL is incorrect.)"
+                )
+            } else {
+                body_text
+            };
             return Err(ApiError::Http {
                 status: status_code,
-                body: body_text,
+                body,
+                headers: None,
             });
         }
 
@@ -202,15 +248,25 @@ impl SupportsStreamingMessages for OpenAIClient {
 
 /// Parse OpenAI-format SSE stream into StreamEvents.
 /// Uses Arc<Mutex<>> to track tool call index -> id mapping across chunks (Send-safe).
+///
+/// Handles providers that send `usage` and `finish_reason` in separate chunks
+/// (e.g. DeepSeek: finish_reason in one chunk, usage in the next). A pending
+/// finish_reason is buffered until usage arrives or the stream ends.
 fn parse_openai_sse_stream(
     response: reqwest::Response,
 ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent, ApiError>> + Send>> {
     let event_stream = response.bytes_stream().eventsource();
     let id_map: Arc<Mutex<HashMap<u64, String>>> = Arc::new(Mutex::new(HashMap::new()));
     let id_map_clone = id_map.clone();
+    // Buffer a finish_reason from a chunk that has it but no usage, so it can
+    // be merged with a later usage chunk. Stores the reason string and the
+    // choice index for later emission.
+    let pending_reason: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
+    let pending_reason_clone = pending_reason.clone();
 
     let mapped = event_stream.filter_map(move |event| {
         let id_map = id_map_clone.clone();
+        let pending_reason = pending_reason_clone.clone();
         async move {
             let event = match event {
                 Ok(evt) => evt,
@@ -223,19 +279,26 @@ fn parse_openai_sse_stream(
                 if let Ok(mut m) = id_map.lock() {
                     m.clear();
                 }
-                return Some(Ok(StreamEvent::MessageComplete {
-                    stop_reason: StopReason::EndTurn,
-                    usage: Usage::default(),
-                }));
+                // Flush any pending finish_reason (provider never sent usage)
+                if let Ok(mut pr) = pending_reason.lock()
+                    && let Some((reason, _idx)) = pr.take()
+                {
+                    let stop_reason = parse_stop_reason(&reason);
+                    return Some(Ok(StreamEvent::MessageComplete {
+                        stop_reason,
+                        usage: Usage::default(),
+                    }));
+                }
+                return None;
             }
             if event.data.is_empty() {
                 return None;
             }
 
-            tracing::trace!("SSE chunk: {}", &event.data[..event.data.len().min(500)]);
+            tracing::trace!(chunk_len = event.data.len().min(500), "SSE chunk received");
 
             match id_map.lock() {
-                Ok(mut m) => parse_openai_chunk(&event.data, &mut m),
+                Ok(mut m) => parse_openai_chunk(&event.data, &mut m, &pending_reason),
                 Err(e) => Some(Err(ApiError::Stream(format!("lock error: {}", e)))),
             }
         }
@@ -244,40 +307,108 @@ fn parse_openai_sse_stream(
     Box::pin(mapped)
 }
 
+/// Convert an OpenAI finish_reason string to StopReason.
+fn parse_stop_reason(reason: &str) -> StopReason {
+    match reason {
+        "stop" => StopReason::EndTurn,
+        "tool_calls" => StopReason::ToolUse,
+        "length" => StopReason::MaxTokens,
+        s => StopReason::StopSequence(s.to_string()),
+    }
+}
+
 fn parse_openai_chunk(
     data: &str,
     id_map: &mut HashMap<u64, String>,
+    pending_reason: &Mutex<Option<(String, String)>>,
 ) -> Option<Result<StreamEvent, ApiError>> {
     let v: serde_json::Value = match serde_json::from_str(data) {
         Ok(v) => v,
         Err(e) => return Some(Err(ApiError::Json(e))),
     };
 
+    // Extract finish_reason from choices[0] if present (used both for
+    // emitting MessageComplete and for caching when usage is separate).
+    let finish_reason = v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("finish_reason"))
+        .and_then(|f| f.as_str());
+
     // Extract usage if present (final chunk)
     if let Some(usage) = v.get("usage") {
-        let input = usage.get("prompt_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
-        let output = usage.get("completion_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
-        if input > 0 || output > 0 {
-            let finish = v
-                .get("choices")
-                .and_then(|c| c.get(0))
-                .and_then(|c| c.get("finish_reason"))
-                .and_then(|f| f.as_str());
-            let stop_reason = match finish {
+        let prompt = usage
+            .get("prompt_tokens")
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0);
+        let output = usage
+            .get("completion_tokens")
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0);
+        if prompt > 0 || output > 0 {
+            // Extract cache details from prompt_tokens_details
+            let (cached_read, cached_write) = usage
+                .get("prompt_tokens_details")
+                .map(|d| {
+                    let cr = d.get("cached_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                    let cw = d
+                        .get("cache_write_tokens")
+                        .and_then(|t| t.as_u64())
+                        .unwrap_or(0);
+                    (cr, cw)
+                })
+                .unwrap_or((0, 0));
+
+            // Extract reasoning tokens from completion_tokens_details
+            let reasoning = usage
+                .get("completion_tokens_details")
+                .and_then(|d| d.get("reasoning_tokens"))
+                .and_then(|t| t.as_u64())
+                .unwrap_or(0);
+
+            // OpenAI's prompt_tokens includes cached tokens AND cache writes.
+            // Subtract both to get the non-cached input portion.
+            // Matches hermes-agent normalize_usage() behavior.
+            let input_non_cached = prompt.saturating_sub(cached_read + cached_write);
+
+            // output_tokens is the raw completion_tokens — reasoning_tokens
+            // is a *subset* of output for display purposes only (no split).
+            // Matches hermes-agent where output_tokens = completion_tokens.
+            let output_total = output;
+
+            // Use finish_reason from this chunk if present, otherwise drain
+            // the pending_reason cache (providers like DeepSeek send
+            // finish_reason in a prior chunk and usage in a later one).
+            let stop_reason = match finish_reason {
                 Some("stop") => StopReason::EndTurn,
                 Some("tool_calls") => StopReason::ToolUse,
                 Some("length") => StopReason::MaxTokens,
-                _ => StopReason::EndTurn,
+                _ => {
+                    // Try pending_reason cache
+                    match pending_reason.lock() {
+                        Ok(mut pr) => pr.take().map(|(r, _)| parse_stop_reason(&r)),
+                        Err(_) => None,
+                    }
+                    .unwrap_or(StopReason::EndTurn)
+                }
             };
             return Some(Ok(StreamEvent::MessageComplete {
                 stop_reason,
-                usage: Usage { input_tokens: input, output_tokens: output },
+                usage: Usage {
+                    input_tokens: input_non_cached,
+                    output_tokens: output_total,
+                    cache_read_input_tokens: cached_read,
+                    cache_creation_input_tokens: cached_write,
+                    reasoning_tokens: reasoning,
+                },
             }));
         }
     }
 
     let choices = v.get("choices")?.as_array()?;
     if choices.is_empty() {
+        // Choices-empty chunk with usage=null — skip (DeepSeek sends this
+        // between finish_reason and [DONE]).
         return None;
     }
 
@@ -285,20 +416,42 @@ fn parse_openai_chunk(
     let delta = choice.get("delta")?;
 
     // Tool calls — handle the case where name AND arguments arrive in one chunk
+    // NOTE: if the chunk also has content, we can only return one event.
+    // Prefer tool_use events (they are time-sensitive for tool execution),
+    // but log a warning so we can detect non-standard provider behavior.
     if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+        // Check for co-occurring content (non-standard but possible)
+        let content_also = delta
+            .get("content")
+            .and_then(|c| c.as_str())
+            .is_some_and(|s| !s.is_empty());
+        if content_also {
+            tracing::warn!(
+                event = "nonstandard_sse_chunk",
+                "SSE chunk has both tool_calls and content — content will be emitted in a separate event. \
+                This is non-standard; provider should send them in separate chunks."
+            );
+        }
+
         for tc in tool_calls {
             let index = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
 
             // Track ID from first chunk
-            if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
-                if !id.is_empty() {
-                    id_map.insert(index, id.to_string());
-                }
+            if let Some(id) = tc.get("id").and_then(|i| i.as_str())
+                && !id.is_empty()
+            {
+                id_map.insert(index, id.to_string());
             }
 
             let func = tc.get("function");
-            let name = func.and_then(|f| f.get("name")).and_then(|n| n.as_str()).unwrap_or("");
-            let arguments = func.and_then(|f| f.get("arguments")).and_then(|a| a.as_str()).unwrap_or("");
+            let name = func
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("");
+            let arguments = func
+                .and_then(|f| f.get("arguments"))
+                .and_then(|a| a.as_str())
+                .unwrap_or("");
 
             // ToolUseStart — with optional input_json when args come in same chunk
             if !name.is_empty() {
@@ -330,35 +483,20 @@ fn parse_openai_chunk(
     }
 
     // Text content
-    if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
-        if !content.is_empty() {
-            return Some(Ok(StreamEvent::TextDelta(content.to_string())));
-        }
+    if let Some(content) = delta.get("content").and_then(|c| c.as_str())
+        && !content.is_empty()
+    {
+        return Some(Ok(StreamEvent::TextDelta(content.to_string())));
     }
 
-    // Check finish_reason (without usage, as fallback)
-    if let Some(finish_reason) = choice.get("finish_reason").and_then(|f| f.as_str()) {
-        match finish_reason {
-            "stop" => {
-                return Some(Ok(StreamEvent::MessageComplete {
-                    stop_reason: StopReason::EndTurn,
-                    usage: Usage::default(),
-                }));
-            }
-            "tool_calls" => {
-                return Some(Ok(StreamEvent::MessageComplete {
-                    stop_reason: StopReason::ToolUse,
-                    usage: Usage::default(),
-                }));
-            }
-            "length" => {
-                return Some(Ok(StreamEvent::MessageComplete {
-                    stop_reason: StopReason::MaxTokens,
-                    usage: Usage::default(),
-                }));
-            }
-            _ => {}
-        }
+    // Finish reason without usage — cache it for later merging with usage
+    // chunk. Providers like DeepSeek send finish_reason in one chunk and
+    // usage in a separate subsequent chunk.
+    if let Some(reason) = finish_reason
+        && !reason.is_empty()
+        && let Ok(mut pr) = pending_reason.lock()
+    {
+        *pr = Some((reason.to_string(), "0".to_string()));
     }
 
     None
