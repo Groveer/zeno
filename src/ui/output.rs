@@ -473,12 +473,37 @@ fn segment_to_lines(seg: &OutputSegment) -> Vec<Line<'static>> {
                 Span::styled(reason.clone(), Style::new().fg(theme::TEXT)),
             ]));
 
-            // Detail line (formatted tool input — not raw JSON)
+            // Detail lines (formatted tool input — not raw JSON).
+            // Supports multi-line content (e.g. edit old_string/new_string).
+            // Each line is indented to align with the header.
             if !detail.is_empty() {
-                lines.push(Line::from(vec![
-                    Span::styled("    ".to_string(), Style::default()),
-                    Span::styled(detail.clone(), Style::new().fg(theme::TEXT_DIM)),
-                ]));
+                for (i, detail_line) in detail.lines().enumerate() {
+                    if detail_line.starts_with("  - ") {
+                        // Old string (removal) — red tint
+                        lines.push(Line::from(vec![
+                            Span::styled("    ".to_string(), Style::default()),
+                            Span::styled(detail_line.to_string(), Style::new().fg(theme::DIFF_DEL)),
+                        ]));
+                    } else if detail_line.starts_with("  + ") {
+                        // New string (addition) — green tint
+                        lines.push(Line::from(vec![
+                            Span::styled("    ".to_string(), Style::default()),
+                            Span::styled(detail_line.to_string(), Style::new().fg(theme::DIFF_ADD)),
+                        ]));
+                    } else if i == 0 && detail.lines().count() == 1 {
+                        // Single-line detail: render inline
+                        lines.push(Line::from(vec![
+                            Span::styled("    ".to_string(), Style::default()),
+                            Span::styled(detail_line.to_string(), Style::new().fg(theme::TEXT_DIM)),
+                        ]));
+                    } else {
+                        // Multi-line detail (continuation or plain)
+                        lines.push(Line::from(vec![
+                            Span::styled("    ".to_string(), Style::default()),
+                            Span::styled(detail_line.to_string(), Style::new().fg(theme::TEXT_DIM)),
+                        ]));
+                    }
+                }
             }
 
             // Prompt line

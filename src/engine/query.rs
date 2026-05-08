@@ -1711,6 +1711,7 @@ fn summarize_tool_output(tool_name: &str, output: &str, input_json: &str) -> Str
 /// Build a human-readable detail line for permission prompts.
 /// Unlike `format_tool_input_summary` (which is a compact one-liner),
 /// this shows the key parameters so the user can make an informed decision.
+/// Commands are NOT truncated — the user must see the full command to judge safety.
 fn format_permission_detail(tool_name: &str, input_json: &str) -> String {
     let input = parse_tool_input(input_json);
 
@@ -1718,15 +1719,7 @@ fn format_permission_detail(tool_name: &str, input_json: &str) -> String {
         "bash" => input
             .get("command")
             .and_then(|v| v.as_str())
-            .map(|s| {
-                let s = s.trim();
-                if s.chars().count() > 120 {
-                    let truncated: String = s.chars().take(117).collect();
-                    format!("$ {}…", truncated)
-                } else {
-                    format!("$ {}", s)
-                }
-            })
+            .map(|s| format!("$ {}", s.trim()))
             .unwrap_or_else(|| "bash command".into()),
         "read" | "read_file" => input
             .get("path")
@@ -1757,11 +1750,36 @@ fn format_permission_detail(tool_name: &str, input_json: &str) -> String {
                 .get("replace_all")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            if replace_all {
+            let mut detail = if replace_all {
                 format!("Editing: {} (replace all)", path)
             } else {
                 format!("Editing: {}", path)
+            };
+            // Show what will be replaced so the user can judge the edit
+            if let Some(old_str) = input.get("old_string").and_then(|v| v.as_str()) {
+                let old_preview: String = old_str.lines().take(3).collect::<Vec<_>>().join("\n");
+                let old_truncated = old_str.lines().count() > 3;
+                detail.push_str(&format!(
+                    "\n  - {}\n  + ",
+                    if old_truncated {
+                        format!("{}…", old_preview)
+                    } else {
+                        old_preview
+                    }
+                ));
+                if let Some(new_str) = input.get("new_string").and_then(|v| v.as_str()) {
+                    let new_preview: String =
+                        new_str.lines().take(3).collect::<Vec<_>>().join("\n");
+                    let new_truncated = new_str.lines().count() > 3;
+                    let display = if new_truncated {
+                        format!("{}…", new_preview)
+                    } else {
+                        new_preview
+                    };
+                    detail.push_str(&display);
+                }
             }
+            detail
         }
         "grep" => {
             let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("?");
@@ -1783,7 +1801,7 @@ fn format_permission_detail(tool_name: &str, input_json: &str) -> String {
             .and_then(|v| v.as_str())
             .map(|s| format!("Fetching: {}", s))
             .unwrap_or_else(|| "Web fetch".into()),
-        _ => input_json.chars().take(120).collect(),
+        _ => input_json.chars().take(500).collect(),
     }
 }
 
