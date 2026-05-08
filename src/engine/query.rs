@@ -37,7 +37,7 @@ use crate::engine::compact::{auto_compact_if_needed, is_prompt_too_long_error};
 use crate::engine::query_engine::QueryEngine;
 use crate::engine::tui_events::UiEvent;
 use crate::hooks::executor::HookExecutor;
-use crate::hooks::types::{HookContext, HookEvent};
+use crate::hooks::types::HookEvent;
 use crate::permissions::checker;
 use crate::tools::base::ToolContext;
 use std::sync::{Arc, Mutex};
@@ -199,7 +199,34 @@ impl QueryEngine {
         sender: &tokio::sync::mpsc::UnboundedSender<UiEvent>,
         cancel: CancellationToken,
     ) -> Result<(), ApiError> {
-        self.history.push_user(user_input);
+        // --- UserMessage hook: may transform the input ---
+        let effective_input = if let Some(he) = &self.hook_executor {
+            if he.has_hooks_for(HookEvent::UserMessage) {
+                if let Ok(ctx) = he.build_context() {
+                    let _ = ctx.set("input", user_input);
+                    let _ = ctx.set("cwd", self.cwd.to_string_lossy().to_string());
+                    match he.execute_user_message(&ctx).await {
+                        Some(modified) => {
+                            tracing::info!(
+                                original_len = user_input.len(),
+                                modified_len = modified.len(),
+                                "UserMessage hook modified input"
+                            );
+                            modified
+                        }
+                        None => user_input.to_string(),
+                    }
+                } else {
+                    user_input.to_string()
+                }
+            } else {
+                user_input.to_string()
+            }
+        } else {
+            user_input.to_string()
+        };
+
+        self.history.push_user(&effective_input);
 
         // Record user goal in carryover for context preservation
         self.carryover.remember_user_goal(user_input);
@@ -327,6 +354,24 @@ impl QueryEngine {
                 // have been mutated by reactive compact on a prior attempt).
                 self.history.sanitize();
                 let messages = self.history.to_api_messages();
+
+                // --- PreLlmCall hook: may inject extra context ---
+                let mut effective_system_prompt = self.system_prompt.clone();
+                if let Some(he) = &self.hook_executor {
+                    if he.has_hooks_for(HookEvent::PreLlmCall) {
+                        if let Ok(ctx) = he.build_context() {
+                            let _ = ctx.set("model", self.model.as_str());
+                            let _ = ctx.set("turn", turn as i64);
+                            let _ = ctx.set("cwd", self.cwd.to_string_lossy().to_string());
+                            let _ = ctx.set("message_count", messages.len() as i64);
+                            let injected = he.execute_pre_llm(&ctx).await;
+                            for text in injected {
+                                effective_system_prompt.push_str("\n\n");
+                                effective_system_prompt.push_str(&text);
+                            }
+                        }
+                    }
+                }
 
                 // ── Acquire stream (with reactive compact on prompt-too-long) ──
                 let stream = match tokio::select! {
@@ -486,6 +531,30 @@ impl QueryEngine {
                                 turn_count: self.cost_tracker.turn_count,
                             });
                             last_stop_reason = Some(stop_reason);
+
+                            // --- PostLlmCall hook ---
+                            if let Some(he) = &self.hook_executor {
+                                if he.has_hooks_for(HookEvent::PostLlmCall) {
+                                    if let Ok(ctx) = he.build_context() {
+                                        let _ = ctx.set("model", self.model.as_str());
+                                        let _ = ctx.set("turn", turn as i64);
+                                        let _ = ctx
+                                            .set("input_tokens", final_usage.input_tokens as i64);
+                                        let _ = ctx
+                                            .set("output_tokens", final_usage.output_tokens as i64);
+                                        let _ = ctx.set(
+                                            "total_tokens",
+                                            (final_usage.input_tokens + final_usage.output_tokens)
+                                                as i64,
+                                        );
+                                        let _ = ctx
+                                            .set("stop_reason", format!("{:?}", last_stop_reason));
+                                        let _ =
+                                            ctx.set("cwd", self.cwd.to_string_lossy().to_string());
+                                        he.execute_post_llm(&ctx).await;
+                                    }
+                                }
+                            }
                         }
                         Ok(StreamEvent::Error(e)) => {
                             tracing::warn!(error = %e, "Stream event error");
@@ -966,26 +1035,29 @@ async fn execute_single_tool_tui(
 
     // --- Pre-tool-use hook ---
     if let Some(he) = hook_executor {
-        let mut hook_ctx: HookContext = serde_json::Map::new();
-        hook_ctx.insert(
-            "tool_name".into(),
-            serde_json::Value::String(tu.name.clone()),
-        );
-        hook_ctx.insert("tool_input".into(), input.clone());
-        let result = he.execute(HookEvent::PreToolUse, &mut hook_ctx).await;
-        if result.blocked {
-            let reason = result
-                .reason
-                .unwrap_or_else(|| format!("Hook blocked tool '{}'", tu.name));
-            let _ = sender.send(UiEvent::ToolError {
-                name: tu.name.clone(),
-                error: reason.clone(),
-            });
-            return Some(ContentBlock::ToolResult {
-                tool_use_id: tu.id.clone(),
-                content: reason,
-                is_error: Some(true),
-            });
+        if he.has_hooks_for(HookEvent::PreToolUse) {
+            if let Ok(hook_ctx) = he.build_context() {
+                let _ = hook_ctx.set("tool_name", tu.name.as_str());
+                let _ = hook_ctx.set(
+                    "tool_input",
+                    crate::hooks::executor::json_to_lua_value(he.lua(), &input),
+                );
+                let _ = hook_ctx.set("cwd", ctx.cwd.to_string_lossy().to_string());
+                if let Some(block_reason) = he
+                    .execute_first_block(HookEvent::PreToolUse, &hook_ctx)
+                    .await
+                {
+                    let _ = sender.send(UiEvent::ToolError {
+                        name: tu.name.clone(),
+                        error: block_reason.clone(),
+                    });
+                    return Some(ContentBlock::ToolResult {
+                        tool_use_id: tu.id.clone(),
+                        content: block_reason,
+                        is_error: Some(true),
+                    });
+                }
+            }
         }
     }
 
@@ -1144,18 +1216,18 @@ async fn execute_single_tool_tui(
 
             // --- Post-tool-use hook ---
             if let Some(he) = hook_executor {
-                let mut hook_ctx: HookContext = serde_json::Map::new();
-                hook_ctx.insert(
-                    "tool_name".into(),
-                    serde_json::Value::String(tu.name.clone()),
-                );
-                hook_ctx.insert("tool_input".into(), input);
-                hook_ctx.insert(
-                    "tool_output".into(),
-                    serde_json::Value::String(result.clone()),
-                );
-                hook_ctx.insert("tool_is_error".into(), serde_json::Value::Bool(false));
-                he.execute(HookEvent::PostToolUse, &mut hook_ctx).await;
+                if he.has_hooks_for(HookEvent::PostToolUse) {
+                    let hook_ctx = he.build_context().unwrap();
+                    let _ = hook_ctx.set("tool_name", tu.name.as_str());
+                    let _ = hook_ctx.set(
+                        "tool_input",
+                        crate::hooks::executor::json_to_lua_value(he.lua(), &input),
+                    );
+                    let _ = hook_ctx.set("tool_output", result.clone());
+                    let _ = hook_ctx.set("tool_is_error", false);
+                    let _ = hook_ctx.set("cwd", ctx.cwd.to_string_lossy().to_string());
+                    he.execute(HookEvent::PostToolUse, &hook_ctx).await;
+                }
             }
 
             Some(ContentBlock::ToolResult {
@@ -1179,18 +1251,18 @@ async fn execute_single_tool_tui(
 
             // --- Post-tool-use hook (error case) ---
             if let Some(he) = hook_executor {
-                let mut hook_ctx: HookContext = serde_json::Map::new();
-                hook_ctx.insert(
-                    "tool_name".into(),
-                    serde_json::Value::String(tu.name.clone()),
-                );
-                hook_ctx.insert("tool_input".into(), input);
-                hook_ctx.insert(
-                    "tool_output".into(),
-                    serde_json::Value::String(e.to_string()),
-                );
-                hook_ctx.insert("tool_is_error".into(), serde_json::Value::Bool(true));
-                he.execute(HookEvent::PostToolUse, &mut hook_ctx).await;
+                if he.has_hooks_for(HookEvent::PostToolUse) {
+                    let hook_ctx = he.build_context().unwrap();
+                    let _ = hook_ctx.set("tool_name", tu.name.as_str());
+                    let _ = hook_ctx.set(
+                        "tool_input",
+                        crate::hooks::executor::json_to_lua_value(he.lua(), &input),
+                    );
+                    let _ = hook_ctx.set("tool_output", e.to_string());
+                    let _ = hook_ctx.set("tool_is_error", true);
+                    let _ = hook_ctx.set("cwd", ctx.cwd.to_string_lossy().to_string());
+                    he.execute(HookEvent::PostToolUse, &hook_ctx).await;
+                }
             }
 
             Some(ContentBlock::ToolResult {

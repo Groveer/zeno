@@ -279,6 +279,93 @@ zn.user_char_limit(2500)    -- USER.md character limit (default: 2500)
 -- zn.guidelines("- Validate all inputs.\n- Prefer SQL for data queries.")
 
 -- ═══════════════════════════════════════════════
+-- Hooks (Lua callbacks at lifecycle points)
+-- ═══════════════════════════════════════════════
+-- Hooks let you run Lua code at key lifecycle events to block dangerous
+-- operations, inject project context, transform user input, log API usage,
+-- and more.  Hook errors are logged but never crash the agent.
+--
+-- The hook VM has: table, string, math, utf8, coroutine, os.getenv, json
+-- There is NO io, os.execute, dofile, or print — hooks are sandboxed.
+--
+-- Event                     Can return
+-- ────────────────────────────────────────────────────────
+-- pre_tool_use              { block = "reason" } — prevent tool execution
+-- post_tool_use             (observe-only)
+-- session_start             (observe-only)
+-- session_end               (observe-only)
+-- pre_llm_call              { inject_context = "text" } — append to system prompt
+-- post_llm_call             (observe-only)
+-- user_message              { modified_input = "text" } — rewrite user input
+--
+-- Context fields by event:
+--   pre_tool_use / post_tool_use:   tool_name, tool_input (Lua table), cwd
+--                                    post_tool_use adds: tool_output, tool_is_error
+--   pre_llm_call / post_llm_call:   model, turn, cwd
+--                                    pre_llm_call adds: message_count
+--                                    post_llm_call adds: input_tokens, output_tokens, total_tokens, stop_reason
+--   session_start / session_end:    cwd, model, provider
+--   user_message:                   input, cwd
+
+-- ── Block dangerous shell commands ──────────────────
+-- zn.hook("pre_tool_use", function(ctx)
+--   if ctx.tool_name == "bash" then
+--     local cmd = ctx.tool_input.command or ""
+--     if cmd:find("rm %-rf /") or cmd:find("sudo rm") then
+--       return { block = "Refusing to run destructive command: " .. cmd }
+--     end
+--     if cmd:find("git push %-%-force") then
+--       return { block = "Refusing to force-push. Use --force-with-lease instead." }
+--     end
+--   end
+-- end)
+
+-- ── Block writes outside the project tree ───────────
+-- zn.hook("pre_tool_use", function(ctx)
+--   if ctx.tool_name == "write" or ctx.tool_name == "edit" then
+--     local path = ctx.tool_input.path or ""
+--     -- Only allow writes under cwd
+--     if not path:find("^" .. ctx.cwd) and not path:find("^~/") then
+--       return { block = "Write outside project tree blocked." }
+--     end
+--   end
+-- end)
+
+-- ── Block tool use at night (conditional) ────────────
+-- zn.hook("pre_tool_use", function(ctx)
+--   if ctx.tool_name == "write" and os.getenv("ALLOW_NIGHT_WRITES") ~= "1" then
+--     -- Hour check requires timestamps; note os.date is NOT available.
+--     -- You could record start time in session_start and compare later.
+--   end
+-- end)
+
+-- ── Inject static project context ───────────────────
+-- zn.hook("pre_llm_call", function(ctx)
+--   return { inject_context = "Project: zeno | Language: Rust | Always add tests." }
+-- end)
+
+-- ── Inject context conditionally by model ────────────
+-- zn.hook("pre_llm_call", function(ctx)
+--   if ctx.model:find("^claude") then
+--     return { inject_context = "Use Anthropic-style XML tool calling." }
+--   end
+--   -- return nil → no injection
+-- end)
+
+-- ── Transform user input ────────────────────────────
+-- zn.hook("user_message", function(ctx)
+--   -- Automatically prepend task context
+--   return { modified_input = "[Task] " .. ctx.input }
+-- end)
+
+-- ── Session boundary hooks ──────────────────────────
+-- zn.hook("session_start", function(ctx)
+--   -- Can log to external service via coroutine resume or just observe.
+--   -- The ctx table contains cwd, model, provider.
+-- end)
+-- zn.hook("session_end", function(ctx) end)
+
+-- ═══════════════════════════════════════════════
 -- Conditional configuration (examples)
 -- ═══════════════════════════════════════════════
 

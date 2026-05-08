@@ -37,28 +37,33 @@ fn safe_stdlibs() -> StdLib {
 
 /// Load settings from `~/.config/zeno/init.lua`.
 ///
-/// If the file does not exist, returns `Settings::default()`.
-pub fn load() -> anyhow::Result<Settings> {
+/// If the file does not exist, returns `Settings::default()` and `None` hooks.
+pub fn load() -> anyhow::Result<(Settings, Option<crate::hooks::executor::HookExecutor>)> {
     let init_path = paths::config_path();
     if !init_path.exists() {
         tracing::info!(path = %init_path.display(), event = "no_init_lua", "No init.lua found, using defaults");
-        return Ok(Settings::default());
+        return Ok((Settings::default(), None));
     }
     load_lua(&init_path, &paths::config_dir())
 }
 
 /// Load settings from a custom config directory (for testing).
 #[cfg(test)]
-pub fn load_from_dir(config_dir: &Path) -> anyhow::Result<Settings> {
+pub fn load_from_dir(
+    config_dir: &std::path::Path,
+) -> anyhow::Result<(Settings, Option<crate::hooks::executor::HookExecutor>)> {
     let init_path = config_dir.join("init.lua");
     if !init_path.exists() {
         tracing::info!(path = %init_path.display(), event = "no_init_lua", "No init.lua found, using defaults");
-        return Ok(Settings::default());
+        return Ok((Settings::default(), None));
     }
     load_lua(&init_path, config_dir)
 }
 
-fn load_lua(path: &Path, config_dir: &Path) -> anyhow::Result<Settings> {
+fn load_lua(
+    path: &Path,
+    config_dir: &Path,
+) -> anyhow::Result<(Settings, Option<crate::hooks::executor::HookExecutor>)> {
     // 1. Create sandboxed Lua VM
     let lua = Lua::new_with(safe_stdlibs(), LuaOptions::new()).context("creating Lua VM")?;
 
@@ -162,7 +167,10 @@ fn load_lua(path: &Path, config_dir: &Path) -> anyhow::Result<Settings> {
     // 7. Validate
     validate(&settings)?;
 
-    Ok(settings)
+    // 8. Load hook registrations from Lua (takes ownership of the VM)
+    let hooks = crate::hooks::loader::load_hooks(lua)?;
+
+    Ok((settings, hooks))
 }
 
 // ---------------------------------------------------------------------------
@@ -697,6 +705,23 @@ fn register_zeno_api(lua: &Lua, table: &mlua::Table) -> anyhow::Result<()> {
         })?,
     )?;
 
+    // --- Hooks ---
+    // zn.hook("pre_tool_use", function(ctx) ... end)
+    table.set(
+        "hook",
+        lua.create_function(move |lua, (event_name, func): (String, mlua::Function)| {
+            let hooks: mlua::Table = lua
+                .named_registry_value::<mlua::Table>("_rc_hooks")
+                .unwrap_or_else(|_| lua.create_table().unwrap());
+            let entry = lua.create_table()?;
+            entry.set("event", event_name)?;
+            entry.set("fn", func)?;
+            hooks.set(hooks.len()? + 1, entry)?;
+            lua.set_named_registry_value("_rc_hooks", hooks)?;
+            Ok(())
+        })?,
+    )?;
+
     // --- Finalize: zn.config() marks the config as ready ---
     // Users call `return zn.config()` at the end of init.lua.
     // We don't actually use the return value — build_settings() in load_lua
@@ -868,7 +893,8 @@ mod tests {
     fn load_from_tmpdir(init_lua_content: &str) -> anyhow::Result<Settings> {
         let dir = tempfile::tempdir()?;
         std::fs::write(dir.path().join("init.lua"), init_lua_content)?;
-        load_from_dir(dir.path())
+        let (settings, _hooks) = load_from_dir(dir.path())?;
+        Ok(settings)
     }
 
     const MINIMAL_INIT_LUA: &str = r#"
@@ -1069,7 +1095,7 @@ mod tests {
     fn test_no_init_lua_returns_defaults() {
         let dir = tempfile::tempdir().unwrap();
         // No init.lua created — should return defaults
-        let settings = load_from_dir(dir.path()).unwrap();
+        let (settings, _hooks) = load_from_dir(dir.path()).unwrap();
         assert!(settings.providers.is_empty());
         assert_eq!(settings.max_turns, 200);
     }
@@ -1364,5 +1390,163 @@ return zn.config()
         assert_eq!(settings.mcp.servers.len(), 2);
         assert!(settings.mcp.servers.contains_key("filesystem"));
         assert!(settings.mcp.servers.contains_key("git"));
+    }
+
+    // --- Hook integration tests ---
+
+    /// Helper: load settings AND hooks from a temp dir.
+    fn load_full_from_tmpdir(
+        init_lua_content: &str,
+    ) -> anyhow::Result<(Settings, Option<crate::hooks::executor::HookExecutor>)> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join("init.lua"), init_lua_content)?;
+        load_from_dir(dir.path())
+    }
+
+    #[test]
+    fn test_no_hooks_when_none_registered() {
+        let (_settings, hooks) = load_full_from_tmpdir(MINIMAL_INIT_LUA).unwrap();
+        assert!(hooks.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_hook_pre_tool_use_from_lua() {
+        let init_lua = r#"
+            local zn = require 'zeno'
+            zn.provider("anthropic", {
+                api_key_env = "ANTHROPIC_API_KEY",
+                base_url = "https://api.anthropic.com",
+            })
+            zn.set_provider("anthropic")
+            zn.hook("pre_tool_use", function(ctx)
+                if ctx.tool_name == "bash" then
+                    return { block = "bash is forbidden" }
+                end
+            end)
+            return zn.config()
+        "#;
+        let (settings, hooks) = load_full_from_tmpdir(init_lua).unwrap();
+        assert_eq!(settings.active_provider, "anthropic");
+        let he = hooks.expect("hooks should be registered");
+        assert_eq!(he.hook_count(), 1);
+        assert!(he.has_hooks_for(crate::hooks::types::HookEvent::PreToolUse));
+
+        // Test firing the hook
+        let ctx = he.build_context().unwrap();
+        ctx.set("tool_name", "bash").unwrap();
+        let result = he
+            .execute_first_block(crate::hooks::types::HookEvent::PreToolUse, &ctx)
+            .await;
+        assert_eq!(result, Some("bash is forbidden".into()));
+    }
+
+    #[tokio::test]
+    async fn test_hook_pre_llm_call_inject_context() {
+        let init_lua = r#"
+            local zn = require 'zeno'
+            zn.provider("anthropic", {
+                api_key_env = "ANTHROPIC_API_KEY",
+                base_url = "https://api.anthropic.com",
+            })
+            zn.set_provider("anthropic")
+            zn.hook("pre_llm_call", function(ctx)
+                return { inject_context = "Extra context from hook" }
+            end)
+            return zn.config()
+        "#;
+        let (_settings, hooks) = load_full_from_tmpdir(init_lua).unwrap();
+        let he = hooks.unwrap();
+        let ctx = he.build_context().unwrap();
+        let results = he.execute_pre_llm(&ctx).await;
+        assert_eq!(results, vec!["Extra context from hook".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_hook_user_message_modify() {
+        let init_lua = r#"
+            local zn = require 'zeno'
+            zn.provider("anthropic", {
+                api_key_env = "ANTHROPIC_API_KEY",
+                base_url = "https://api.anthropic.com",
+            })
+            zn.set_provider("anthropic")
+            zn.hook("user_message", function(ctx)
+                return { modified_input = "prefix: " .. ctx.input }
+            end)
+            return zn.config()
+        "#;
+        let (_settings, hooks) = load_full_from_tmpdir(init_lua).unwrap();
+        let he = hooks.unwrap();
+        let ctx = he.build_context().unwrap();
+        ctx.set("input", "hello").unwrap();
+        let result = he.execute_user_message(&ctx).await;
+        assert_eq!(result, Some("prefix: hello".into()));
+    }
+
+    #[test]
+    fn test_hook_unknown_event_warns_and_skips() {
+        let init_lua = r#"
+            local zn = require 'zeno'
+            zn.provider("anthropic", {
+                api_key_env = "ANTHROPIC_API_KEY",
+                base_url = "https://api.anthropic.com",
+            })
+            zn.set_provider("anthropic")
+            zn.hook("nonexistent_event", function() end)
+            return zn.config()
+        "#;
+        let (_settings, hooks) = load_full_from_tmpdir(init_lua).unwrap();
+        // Unknown events are silently skipped; no hooks should be registered
+        assert!(hooks.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_hook_multiple_same_event() {
+        let init_lua = r#"
+            local zn = require 'zeno'
+            zn.provider("anthropic", {
+                api_key_env = "ANTHROPIC_API_KEY",
+                base_url = "https://api.anthropic.com",
+            })
+            zn.set_provider("anthropic")
+            -- First hook: returns nil (continue)
+            zn.hook("pre_tool_use", function(ctx) end)
+            -- Second hook: blocks
+            zn.hook("pre_tool_use", function(ctx)
+                return { block = "blocked by second hook" }
+            end)
+            return zn.config()
+        "#;
+        let (_settings, hooks) = load_full_from_tmpdir(init_lua).unwrap();
+        let he = hooks.unwrap();
+        assert_eq!(he.hook_count(), 2);
+        let ctx = he.build_context().unwrap();
+        let result = he
+            .execute_first_block(crate::hooks::types::HookEvent::PreToolUse, &ctx)
+            .await;
+        assert_eq!(result, Some("blocked by second hook".into()));
+    }
+
+    #[test]
+    fn test_hook_json_library_available() {
+        let init_lua = r#"
+            local zn = require 'zeno'
+            zn.provider("anthropic", {
+                api_key_env = "ANTHROPIC_API_KEY",
+                base_url = "https://api.anthropic.com",
+            })
+            zn.set_provider("anthropic")
+            zn.hook("pre_tool_use", function(ctx)
+                local encoded = "ok"
+                if json ~= nil then
+                    encoded = json.encode({a=1})
+                end
+                return nil
+            end)
+            return zn.config()
+        "#;
+        let (_settings, hooks) = load_full_from_tmpdir(init_lua).unwrap();
+        let he = hooks.unwrap();
+        assert!(he.has_hooks_for(crate::hooks::types::HookEvent::PreToolUse));
     }
 }

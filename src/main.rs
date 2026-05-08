@@ -63,6 +63,7 @@ fn dispatch_command(input: &str) -> CommandAction {
         "/config" => CommandAction::Done,
         "/memory" => CommandAction::Done,
         "/mcp" => CommandAction::Done,
+        "/hooks" => CommandAction::NeedEngine("hooks", String::new()),
         s if s.starts_with("/goal") => {
             let arg = s.strip_prefix("/goal").unwrap_or("").trim().to_string();
             CommandAction::NeedEngine("goal", arg)
@@ -84,7 +85,7 @@ Available commands:
 /tools — List tools
 /config — Show config
 /memory — Memory files
-/mcp — MCP servers
+/hooks — List hooks
 /resume — Restore the last session (conversation history + output)
 /resume N — Restore session #N (use /resume to list all)
 /goal [text] — Set/show/clear auto-continue goal
@@ -175,7 +176,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let settings = config_load()?;
+    let (settings, hook_executor) = config_load()?;
     config::paths::cleanup_old_logs(settings.log_retention_days);
     let settings = Arc::new(settings);
 
@@ -405,6 +406,20 @@ async fn main() -> anyhow::Result<()> {
         cwd.clone(),
     );
     engine.mcp_manager = Some(mcp_manager.clone());
+    engine.hook_executor = hook_executor;
+
+    // Fire session_start hook
+    if let Some(he) = &engine.hook_executor {
+        if he.has_hooks_for(crate::hooks::types::HookEvent::SessionStart) {
+            if let Ok(ctx) = he.build_context() {
+                let _ = ctx.set("cwd", cwd.to_string_lossy().to_string());
+                let _ = ctx.set("model", model.as_str());
+                let _ = ctx.set("provider", provider_name.as_str());
+                he.execute_session_event(crate::hooks::types::HookEvent::SessionStart, &ctx)
+                    .await;
+            }
+        }
+    }
 
     // TUI setup
     use std::time::Duration;
@@ -611,6 +626,26 @@ async fn main() -> anyhow::Result<()> {
                     "goal" => {
                         let mut eng = engine.lock().await;
                         let msg = handle_goal(&mut eng, &arg);
+                        drop(eng);
+                        send_text_response(&sender, &msg);
+                    }
+                    "hooks" => {
+                        let eng = engine.lock().await;
+                        let msg = if let Some(he) = &eng.hook_executor {
+                            let events = he.registered_events();
+                            if events.is_empty() {
+                                "No hooks registered. Use zn.hook(event, fn) in init.lua to register hooks.".to_string()
+                            } else {
+                                let mut lines =
+                                    vec![format!("Registered hooks ({} total):", he.hook_count())];
+                                for (event, count) in &events {
+                                    lines.push(format!("  {} — {} handler(s)", event, count));
+                                }
+                                lines.join("\n")
+                            }
+                        } else {
+                            "No hooks registered. Use zn.hook(event, fn) in init.lua to register hooks.".to_string()
+                        };
                         drop(eng);
                         send_text_response(&sender, &msg);
                     }
