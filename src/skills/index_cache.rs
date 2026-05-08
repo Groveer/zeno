@@ -17,7 +17,7 @@ use crate::skills::types::{CategoryInfo, SkillDefinition};
 // ---------------------------------------------------------------------------
 
 /// Bump this when the cache format changes — invalidates old caches automatically.
-const CACHE_VERSION: u32 = 3;
+const CACHE_VERSION: u32 = 4;
 
 /// Serialized cache structure.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -41,8 +41,6 @@ struct SkillDefinitionSer {
     source: String,
     path: Option<String>,
     category: String,
-    #[serde(default)]
-    always_inject: bool,
 }
 
 /// Ser/de shim for CategoryInfo.
@@ -65,7 +63,6 @@ impl From<&SkillDefinition> for SkillDefinitionSer {
             source: s.source.clone(),
             path: s.path.clone(),
             category: s.category.clone(),
-            always_inject: s.always_inject,
         }
     }
 }
@@ -79,7 +76,6 @@ impl From<SkillDefinitionSer> for SkillDefinition {
             source: s.source,
             path: s.path,
             category: s.category,
-            always_inject: s.always_inject,
         }
     }
 }
@@ -270,31 +266,12 @@ mod tests {
             source: "user".into(),
             path: Some("/skills/tdd/SKILL.md".into()),
             category: "software-development".into(),
-            always_inject: false,
         };
 
         let ser: SkillDefinitionSer = (&skill).into();
         let de: SkillDefinition = ser.into();
         assert_eq!(de.name, "tdd");
         assert_eq!(de.category, "software-development");
-        assert!(!de.always_inject);
-    }
-
-    #[test]
-    fn test_always_inject_roundtrip() {
-        let skill = SkillDefinition {
-            name: "core".into(),
-            description: "Core guidelines".into(),
-            content: "# Core".into(),
-            source: "builtin".into(),
-            path: None,
-            category: "builtin".into(),
-            always_inject: true,
-        };
-
-        let ser: SkillDefinitionSer = (&skill).into();
-        let de: SkillDefinition = ser.into();
-        assert!(de.always_inject);
     }
 
     #[test]

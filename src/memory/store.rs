@@ -481,29 +481,15 @@ impl MemoryStore {
             return String::new();
         }
 
-        let limit = self.char_limit(target);
         let content = entries.join(ENTRY_DELIMITER);
-        let current = content.len();
-        let pct = if limit > 0 {
-            (current * 100 / limit).min(100)
-        } else {
-            0
-        };
 
         let header = if target == "user" {
-            format!(
-                "USER PROFILE (who the user is) [{}% — {}/{} chars]",
-                pct, current, limit
-            )
+            "USER PROFILE"
         } else {
-            format!(
-                "MEMORY (your personal notes) [{}% — {}/{} chars]",
-                pct, current, limit
-            )
+            "MEMORY"
         };
 
-        let separator = "═".repeat(46);
-        format!("{}\n{}\n{}\n{}", separator, header, separator, content)
+        format!("{}:\n{}", header, content)
     }
 
     fn success_response(&self, target: &str, message: Option<&str>) -> serde_json::Value {

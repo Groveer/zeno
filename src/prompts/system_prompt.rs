@@ -4,13 +4,11 @@
 //! 1. Core identity & role declaration (always present)
 //! 2. Key principles (always present)
 //! 3. Tool list with descriptions
-//! 4. Skills Tier 0 category index + always-inject behavioral guidelines
+//! 4. Skills Tier 0 category index
 //! 5. Runtime context (cwd, OS, git branch)
 //! 6. Project instructions (CLAUDE.md / AGENTS.md)
 //!
-//! Skills with `always_inject: true` in their frontmatter have their full content
-//! injected into the system prompt. All other skills show only name + description
-//! in the Tier 0 category index and are loaded on-demand via `skill_view`.
+//! All skills are loaded lazily via `skill_view`. The Tier 0 category index
 
 use std::path::Path;
 
@@ -97,11 +95,12 @@ fn guidelines(role: &RoleConfig) -> String {
 ## Guidelines
 
 - Be concise and direct. Prefer showing results over lengthy explanations.
-- **Think aloud**: Before and between tool calls, explain your reasoning — what you're looking for, what you've found so far, and what you plan to do next. Don't just emit one-line transitions; instead, briefly share your analysis at each step so the user can follow your thought process.
-- Use your tools proactively to read files, run commands, search information, and verify changes when the task requires it.
-- When the user is just chatting, testing connectivity, or asking a question — respond with text only, no tool calls.
+- **Think aloud**: Before and between tool calls, briefly explain what you're looking for and what you've found so the user can follow your reasoning.
+- Use tools proactively to read files, run commands, search information, and verify changes when needed.
+- When the user is just chatting or asking a question — respond with text only, no tool calls.
 - Follow the user's project conventions (CLAUDE.md / AGENTS.md) if present.
-- **Batch independent tool calls**: When multiple tools can be called in parallel (e.g., reading different files, running a search while also reading a file, or calling `glob` + `grep` together), issue ALL of them in a single response. The system executes independent calls concurrently, so batching dramatically reduces wait time. Only sequence calls that have data dependencies (where one call's result is needed as another's input) or target the same file for writes.
+- **Batch independent tool calls**: Issue all independent calls in one response (e.g. `glob` + `grep` together). Only sequence calls with data dependencies.
+- **Load skills for non-trivial tasks** (skip for greetings, simple questions): direct match → `skill_view` immediately; unknown → `skill_list` to browse → `skill_view`. Err on the side of loading.
 "#
  .trim()
  .to_string()
@@ -129,8 +128,6 @@ fn tools_block(summaries: &[ToolSummary]) -> String {
 ///
 /// This includes:
 /// 1. **Tier 0 category index**: Compact listing of categories with skill names.
-/// 2. **Always-inject behavioral guidelines**: Skills with `always_inject = true`
-///    have their full content injected (frontmatter stripped).
 fn skills_block(registry: &SkillRegistry) -> String {
     let mut parts = Vec::new();
 
@@ -184,86 +181,7 @@ fn skills_block(registry: &SkillRegistry) -> String {
 
     parts.push(lines.join("\n"));
 
-    // Always-inject behavioral guidelines
-    let core = registry.always_inject_skills();
-    if !core.is_empty() {
-        let blocks: Vec<String> = core
-            .iter()
-            .map(|s| {
-                // Strip YAML frontmatter from content before injection
-                let content = strip_frontmatter(&s.content);
-                format!("### {}\n{}", s.name, content.trim())
-            })
-            .collect();
-        parts.push(format!(
-            "## Active Behavioral Guidelines\n{}",
-            blocks.join("\n\n")
-        ));
-    }
-
     parts.join("\n\n")
-}
-
-/// Strip YAML frontmatter (--- ... ---) from skill content.
-/// Uses a lightweight heuristic to validate the frontmatter: every non-empty
-/// line must contain a `:` (YAML key-value marker). This avoids false matches
-/// when `---` appears in body content (e.g. Markdown horizontal rules), while
-/// eliminating the runtime dependency on serde_yaml for this single call.
-/// Returns the markdown content after the closing `---`, trimmed.
-fn strip_frontmatter(content: &str) -> String {
-    if !content.starts_with("---") {
-        return content.to_string();
-    }
-    // Skip the opening --- and optional newline (handle both \n and \r\n)
-    let rest = content[3..].trim_start_matches(['\r', '\n']);
-    // Find the closing --- on its own line
-    let sep = rest.find("\n---").or_else(|| rest.find("\r\n---"));
-    let Some(sep) = sep else {
-        // No closing --- found, return as-is
-        return content.to_string();
-    };
-    let frontmatter_text = &rest[..sep];
-    // Heuristic validation: every non-empty line in the frontmatter must look
-    // like YAML (contain a colon). This rejects false matches where `---` in
-    // body content is mistaken for a frontmatter delimiter. The heuristic is
-    // sufficient for skill files where frontmatter is simple `key: value` pairs.
-    if !looks_like_yaml_frontmatter(frontmatter_text) {
-        return content.to_string();
-    }
-    // Skip past the closing --- and any trailing whitespace/newline
-    // The fallback to original content is a safety net — in practice,
-    // one of the strip_prefix calls should always succeed since `sep`
-    // was found by `.find("\n---")` or `.find("\r\n---")`.
-    let after = rest[sep..]
-        .strip_prefix("\r\n---")
-        .or_else(|| rest[sep..].strip_prefix("\n---"));
-    let Some(after) = after else {
-        return content.to_string();
-    };
-    after.trim_start_matches(['\r', '\n']).to_string()
-}
-
-/// Lightweight heuristic to check if text looks like YAML frontmatter.
-/// Every non-empty line must contain a `:` (YAML key-value marker).
-/// This is sufficient for skill files where frontmatter is simple `key: value` pairs.
-fn looks_like_yaml_frontmatter(text: &str) -> bool {
-    let mut has_yaml_line = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        // Skip nested YAML lines (indented, may not have a colon at the top level)
-        if trimmed.starts_with('-') || line.starts_with(char::is_whitespace) {
-            has_yaml_line = true;
-            continue;
-        }
-        if !trimmed.contains(':') {
-            return false;
-        }
-        has_yaml_line = true;
-    }
-    has_yaml_line
 }
 
 /// Truncate a description to the first sentence (or 120 chars), whichever is shorter.
@@ -361,7 +279,6 @@ mod tests {
             source: "user".into(),
             path: None,
             category: "software-development".into(),
-            always_inject: false,
         });
 
         let mut categories = indexmap::IndexMap::new();
@@ -384,9 +301,8 @@ mod tests {
     }
 
     #[test]
-    fn test_skills_block_non_inject_not_in_guidelines() {
-        // A non-always_inject skill should appear in the category index
-        // but NOT in Active Behavioral Guidelines
+    fn test_skills_block_appears_in_index() {
+        // Every skill should appear in the category index
         let skill = SkillDefinition {
             name: "git-workflow".into(),
             description: "Git branch and PR workflow.".into(),
@@ -394,7 +310,6 @@ mod tests {
             source: "user".into(),
             path: None,
             category: "devops".into(),
-            always_inject: false,
         };
         let mut categories = indexmap::IndexMap::new();
         categories.insert(
@@ -408,37 +323,6 @@ mod tests {
 
         let block = skills_block(&registry);
         assert!(block.contains("git-workflow"));
-        assert!(!block.contains("Active Behavioral Guidelines"));
-    }
-
-    #[test]
-    fn test_skills_block_core_behavioral_full_injection() {
-        let skill = SkillDefinition {
-            name: "skill-usage-workflow".into(),
-            description: "How to discover and load skills.".into(),
-            content: "---\nname: skill-usage-workflow\n---\n# Skill Usage\nAlways load skills before tasks.".into(),
-            source: "builtin".into(),
-            path: None,
-            category: "builtin".into(),
-            always_inject: true,
-        };
-        let mut categories = indexmap::IndexMap::new();
-        categories.insert(
-            "builtin".into(),
-            crate::skills::types::CategoryInfo {
-                description: "Core behavioral guidelines".into(),
-                skill_names: vec!["skill-usage-workflow".into()],
-            },
-        );
-        let registry = SkillRegistry::from_parts(vec![skill], categories);
-
-        let block = skills_block(&registry);
-        // Core skill should be in Behavioral Guidelines with full content
-        assert!(block.contains("Active Behavioral Guidelines"));
-        assert!(block.contains("skill-usage-workflow"));
-        // Frontmatter should be stripped
-        assert!(!block.contains("---"));
-        assert!(block.contains("Always load skills before tasks"));
     }
 
     #[test]
@@ -460,52 +344,6 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_frontmatter() {
-        let with_frontmatter =
-            "---\nname: test\ndescription: A test\n---\n# Real Content\nBody here";
-        let stripped = strip_frontmatter(with_frontmatter);
-        assert!(!stripped.contains("---"));
-        assert!(!stripped.contains("name: test"));
-        assert!(stripped.contains("# Real Content"));
-        assert!(stripped.contains("Body here"));
-    }
-
-    #[test]
-    fn test_strip_frontmatter_no_frontmatter() {
-        let no_frontmatter = "# Just Content\nNo frontmatter here";
-        let stripped = strip_frontmatter(no_frontmatter);
-        assert_eq!(stripped, no_frontmatter);
-    }
-
-    #[test]
-    fn test_strip_frontmatter_crlf() {
-        let with_frontmatter = "---\r\nname: test\r\n---\r\n# Real Content\r\nBody here";
-        let stripped = strip_frontmatter(with_frontmatter);
-        assert!(!stripped.contains("---"));
-        assert!(stripped.contains("# Real Content"));
-    }
-
-    #[test]
-    fn test_strip_frontmatter_body_contains_delimiter() {
-        // Body content with --- should not cause false split
-        let content = "---\nname: test\n---\n# Title\nSome --- text\nMore content";
-        let stripped = strip_frontmatter(content);
-        assert!(stripped.contains("Some --- text"));
-        assert!(stripped.contains("More content"));
-        assert!(!stripped.contains("name: test"));
-    }
-
-    #[test]
-    fn test_strip_frontmatter_invalid_yaml() {
-        // If frontmatter doesn't look like YAML (no colon on a non-empty line),
-        // return content as-is to avoid false splits
-        let content = "---\nnot yaml at all\n---\n# Content";
-        let stripped = strip_frontmatter(content);
-        // Should return original since validation failed
-        assert!(stripped.contains("---"));
-    }
-
-    #[test]
     fn test_core_identity_no_skill_usage() {
         let id = core_identity(&RoleConfig::default());
         assert!(id.contains("zeno"));
@@ -520,30 +358,6 @@ mod tests {
         // File reading strategy should NOT be in core identity
         assert!(!id.contains("File Reading Strategy"));
         assert!(!id.contains("offset"));
-    }
-
-    #[test]
-    fn test_looks_like_yaml_frontmatter_valid() {
-        assert!(looks_like_yaml_frontmatter(
-            "name: test\ndescription: A test"
-        ));
-    }
-
-    #[test]
-    fn test_looks_like_yaml_frontmatter_with_empty_lines() {
-        assert!(looks_like_yaml_frontmatter(
-            "name: test\n\ndescription: A test"
-        ));
-    }
-
-    #[test]
-    fn test_looks_like_yaml_frontmatter_not_yaml() {
-        assert!(!looks_like_yaml_frontmatter("not yaml at all"));
-    }
-
-    #[test]
-    fn test_looks_like_yaml_frontmatter_empty() {
-        assert!(!looks_like_yaml_frontmatter(""));
     }
 
     #[test]

@@ -125,11 +125,6 @@ impl SkillRegistry {
             .collect()
     }
 
-    /// Get all skills with `always_inject = true`.
-    pub fn always_inject_skills(&self) -> Vec<&SkillDefinition> {
-        self.skills.iter().filter(|s| s.always_inject).collect()
-    }
-
     /// Number of registered skills.
     pub fn len(&self) -> usize {
         self.skills.len()
@@ -187,7 +182,7 @@ impl Default for SkillRegistry {
 mod tests {
     use super::*;
 
-    fn make_skill(name: &str, desc: &str, category: &str, always_inject: bool) -> SkillDefinition {
+    fn make_skill(name: &str, desc: &str, category: &str) -> SkillDefinition {
         SkillDefinition {
             name: name.into(),
             description: desc.into(),
@@ -195,19 +190,13 @@ mod tests {
             source: "test".into(),
             path: None,
             category: category.into(),
-            always_inject,
         }
     }
 
     #[test]
     fn test_register_and_get() {
         let mut registry = SkillRegistry::new();
-        registry.register(make_skill(
-            "tdd",
-            "TDD workflow",
-            "software-development",
-            false,
-        ));
+        registry.register(make_skill("tdd", "TDD workflow", "software-development"));
         assert!(registry.get("tdd").is_some());
         assert_eq!(registry.len(), 1);
     }
@@ -215,18 +204,8 @@ mod tests {
     #[test]
     fn test_register_overwrite() {
         let mut registry = SkillRegistry::new();
-        registry.register(make_skill(
-            "tdd",
-            "Version 1",
-            "software-development",
-            false,
-        ));
-        registry.register(make_skill(
-            "tdd",
-            "Version 2",
-            "software-development",
-            false,
-        ));
+        registry.register(make_skill("tdd", "Version 1", "software-development"));
+        registry.register(make_skill("tdd", "Version 2", "software-development"));
         assert_eq!(registry.get("tdd").unwrap().description, "Version 2");
         assert_eq!(registry.len(), 1);
     }
@@ -238,7 +217,6 @@ mod tests {
             "TDD-Guide",
             "Test skill",
             "software-development",
-            false,
         ));
         assert!(registry.get_insensitive("tdd-guide").is_some());
     }
@@ -246,21 +224,16 @@ mod tests {
     #[test]
     fn test_get_fuzzy() {
         let mut registry = SkillRegistry::new();
-        registry.register(make_skill(
-            "tdd-workflow",
-            "Test",
-            "software-development",
-            false,
-        ));
+        registry.register(make_skill("tdd-workflow", "Test", "software-development"));
         assert!(registry.get_fuzzy("tdd").is_some());
     }
 
     #[test]
     fn test_list_by_category() {
         let mut registry = SkillRegistry::new();
-        registry.register(make_skill("tdd", "TDD", "devops", false));
-        registry.register(make_skill("deploy", "Deploy", "devops", false));
-        registry.register(make_skill("arxiv", "Search", "research", false));
+        registry.register(make_skill("tdd", "TDD", "devops"));
+        registry.register(make_skill("deploy", "Deploy", "devops"));
+        registry.register(make_skill("arxiv", "Search", "research"));
 
         let devops = registry.list_by_category("devops");
         assert_eq!(devops.len(), 2);
@@ -270,24 +243,12 @@ mod tests {
     }
 
     #[test]
-    fn test_always_inject_skills() {
-        let mut registry = SkillRegistry::new();
-        registry.register(make_skill("tdd", "TDD", "dev", false));
-        registry.register(make_skill("core", "Core guidelines", "builtin", true));
-        registry.register(make_skill("deploy", "Deploy", "devops", false));
-
-        let core = registry.always_inject_skills();
-        assert_eq!(core.len(), 1);
-        assert_eq!(core[0].name, "core");
-    }
-
-    #[test]
     fn test_merge() {
         let mut r1 = SkillRegistry::new();
-        r1.register(make_skill("tdd", "TDD", "dev", false));
+        r1.register(make_skill("tdd", "TDD", "dev"));
 
         let mut r2 = SkillRegistry::new();
-        r2.register(make_skill("deploy", "Deploy", "devops", false));
+        r2.register(make_skill("deploy", "Deploy", "devops"));
 
         r1.merge(r2);
         assert_eq!(r1.len(), 2);
@@ -296,9 +257,9 @@ mod tests {
     #[test]
     fn test_list_skills_sorted() {
         let mut registry = SkillRegistry::new();
-        registry.register(make_skill("zebra", "Z", "general", false));
-        registry.register(make_skill("alpha", "A", "general", false));
-        registry.register(make_skill("middle", "M", "general", false));
+        registry.register(make_skill("zebra", "Z", "general"));
+        registry.register(make_skill("alpha", "A", "general"));
+        registry.register(make_skill("middle", "M", "general"));
 
         let names: Vec<&str> = registry
             .list_skills()
@@ -310,7 +271,7 @@ mod tests {
 
     #[test]
     fn test_from_parts() {
-        let skills = vec![make_skill("tdd", "TDD", "dev", false)];
+        let skills = vec![make_skill("tdd", "TDD", "dev")];
         let mut categories = IndexMap::new();
         categories.insert(
             "dev".into(),

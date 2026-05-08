@@ -36,8 +36,7 @@ pub struct SkillDefinition {
     pub name: String,
     /// Short description (≤120 chars, truncated to first sentence).
     pub description: String,
-    /// Full markdown content of the SKILL.md file. Empty for non-always_inject
-    /// skills (loaded on demand via `skill_view`).
+    /// Full markdown content of the SKILL.md file (loaded on demand via `skill_view`).
     pub content: String,
     /// Where this skill was loaded from: "bundled", "user", "project".
     pub source: String,
@@ -47,12 +46,6 @@ pub struct SkillDefinition {
     // --- Category ---
     /// Category derived from directory hierarchy (e.g. "software-development").
     pub category: String,
-
-    // --- Injection control ---
-    /// When true, this skill's full content is injected into the system prompt
-    /// when its tool dependencies are met. Used for core behavioral guidelines
-    /// that must be present without manual `skill_view` calls.
-    pub always_inject: bool,
 }
 
 impl SkillDefinition {
@@ -73,7 +66,6 @@ impl SkillDefinition {
             source,
             path,
             category,
-            always_inject: false,
         }
     }
 }
@@ -94,7 +86,6 @@ mod tests {
         );
         assert_eq!(skill.name, "tdd");
         assert_eq!(skill.category, "software-development");
-        assert!(!skill.always_inject);
     }
 
     #[test]

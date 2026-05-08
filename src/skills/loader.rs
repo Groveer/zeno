@@ -123,21 +123,15 @@ pub fn load_skills_from_dirs(
                         .to_string();
 
                     if let Ok(content) = std::fs::read_to_string(&skill_path) {
-                        let (name, description, always_inject) =
-                            parse_skill_markdown(&default_name, &content);
+                        let (name, description) = parse_skill_markdown(&default_name, &content);
 
                         skills.push(SkillDefinition {
                             name,
                             description,
-                            content: if always_inject {
-                                content
-                            } else {
-                                String::new()
-                            },
+                            content: String::new(),
                             source: source.to_string(),
                             path: Some(skill_path.display().to_string()),
                             category: "general".into(),
-                            always_inject,
                         });
                     }
                 }
@@ -243,7 +237,7 @@ fn load_skills_from_category(
             }
         };
 
-        let (name, description, always_inject) = parse_skill_markdown(&default_name, &content);
+        let (name, description) = parse_skill_markdown(&default_name, &content);
 
         // Update category info
         let cat_entry = categories
@@ -257,15 +251,10 @@ fn load_skills_from_category(
         skills.push(SkillDefinition {
             name,
             description,
-            content: if always_inject {
-                content
-            } else {
-                String::new()
-            },
+            content: String::new(),
             source: source.to_string(),
             path: Some(path.display().to_string()),
             category: category.to_string(),
-            always_inject,
         });
     }
 }
@@ -300,18 +289,16 @@ fn parse_description_md(content: &str) -> String {
     String::new()
 }
 
-/// Parse a SKILL.md: name, description, always_inject.
+/// Parse a SKILL.md: name, description.
 ///
 /// Supported frontmatter fields:
 /// - `name` (string): Skill name override
 /// - `description` (string): Short description
-/// - `always_inject` (bool): When true, content is loaded at startup for system prompt injection
 ///
-/// Returns `(name, description, always_inject)`.
-pub fn parse_skill_markdown(default_name: &str, content: &str) -> (String, String, bool) {
+/// Returns `(name, description)`.
+pub fn parse_skill_markdown(default_name: &str, content: &str) -> (String, String) {
     let mut name = default_name.to_string();
     let mut description = String::new();
-    let mut always_inject = false;
 
     // Try YAML frontmatter
     if content.starts_with("---\n")
@@ -331,14 +318,6 @@ pub fn parse_skill_markdown(default_name: &str, content: &str) -> (String, Strin
                 let trimmed = d.trim();
                 if !trimmed.is_empty() {
                     description = trimmed.to_string();
-                }
-            }
-            // Always-inject flag (top-level frontmatter field)
-            if let Some(v) = metadata.get("always_inject") {
-                if let Some(b) = v.as_bool() {
-                    always_inject = b;
-                } else if let Some(s) = v.as_str() {
-                    always_inject = s.trim().eq_ignore_ascii_case("true");
                 }
             }
         }
@@ -368,7 +347,7 @@ pub fn parse_skill_markdown(default_name: &str, content: &str) -> (String, Strin
         description = format!("Skill: {}", name);
     }
 
-    (name, description, always_inject)
+    (name, description)
 }
 
 /// Truncate a description to the first sentence (or 120 chars), whichever is shorter.
@@ -404,31 +383,15 @@ mod tests {
     fn test_parse_frontmatter_basic() {
         let content =
             "---\nname: my-skill\ndescription: A test skill\n---\n# My Skill\nContent here";
-        let (name, desc, always_inject) = parse_skill_markdown("default", content);
+        let (name, desc) = parse_skill_markdown("default", content);
         assert_eq!(name, "my-skill");
         assert_eq!(desc, "A test skill");
-        assert!(!always_inject);
-    }
-
-    #[test]
-    fn test_parse_always_inject_true() {
-        let content = "---\nname: core-skill\nalways_inject: true\n---\n# Core\nContent";
-        let (name, _, always_inject) = parse_skill_markdown("default", content);
-        assert_eq!(name, "core-skill");
-        assert!(always_inject);
-    }
-
-    #[test]
-    fn test_parse_always_inject_false_by_default() {
-        let content = "---\nname: normal-skill\ndescription: A skill\n---\n# Normal\nContent";
-        let (_, _, always_inject) = parse_skill_markdown("default", content);
-        assert!(!always_inject);
     }
 
     #[test]
     fn test_parse_no_frontmatter() {
         let content = "# TDD Guide\nWrite tests first, then code.";
-        let (name, desc, _) = parse_skill_markdown("default-name", content);
+        let (name, desc) = parse_skill_markdown("default-name", content);
         assert_eq!(name, "TDD Guide");
         assert!(desc.contains("Write tests"));
     }
@@ -436,14 +399,14 @@ mod tests {
     #[test]
     fn test_parse_empty_frontmatter() {
         let content = "---\n---\n# Hello\nSome content";
-        let (name, _, _) = parse_skill_markdown("fallback", content);
+        let (name, _) = parse_skill_markdown("fallback", content);
         assert_eq!(name, "Hello");
     }
 
     #[test]
     fn test_parse_invalid_yaml() {
         let content = "---\n: invalid yaml : [\n---\n# Fallback\nDescription here";
-        let (name, _, _) = parse_skill_markdown("default", content);
+        let (name, _) = parse_skill_markdown("default", content);
         assert!(!name.is_empty());
     }
 
@@ -451,7 +414,7 @@ mod tests {
     fn test_parse_legacy_compat() {
         let content =
             "---\nname: my-skill\ndescription: A test skill\n---\n# My Skill\nContent here";
-        let (name, desc, _) = parse_skill_markdown("default", content);
+        let (name, desc) = parse_skill_markdown("default", content);
         assert_eq!(name, "my-skill");
         assert_eq!(desc, "A test skill");
     }
@@ -555,7 +518,7 @@ mod tests {
 
     #[test]
     fn test_lazy_content_loading() {
-        // always_inject=false → content should be empty (lazy)
+        // All skills use lazy loading — content should be empty
         let dir = tempfile::tempdir().unwrap();
         let cat_dir = dir.path().join("general").join("lazy-skill");
         std::fs::create_dir_all(&cat_dir).unwrap();
@@ -570,39 +533,15 @@ mod tests {
         assert_eq!(skills[0].name, "lazy-skill");
         assert!(
             skills[0].content.is_empty(),
-            "non-always_inject skill should have empty content"
+            "skill content should be empty (lazy loaded via skill_view)"
         );
-        assert!(!skills[0].always_inject);
-    }
-
-    #[test]
-    fn test_always_inject_content_loaded() {
-        // always_inject=true → content should be populated
-        let dir = tempfile::tempdir().unwrap();
-        let cat_dir = dir.path().join("builtin").join("core-skill");
-        std::fs::create_dir_all(&cat_dir).unwrap();
-        std::fs::write(
-            cat_dir.join("SKILL.md"),
-            "---\nname: core-skill\nalways_inject: true\n---\n# Core Content",
-        )
-        .unwrap();
-
-        let (skills, _) = load_skills_from_dirs(&[dir.path().to_path_buf()], "test");
-        assert_eq!(skills.len(), 1);
-        assert_eq!(skills[0].name, "core-skill");
-        assert!(
-            !skills[0].content.is_empty(),
-            "always_inject skill should have content loaded"
-        );
-        assert!(skills[0].content.contains("Core Content"));
-        assert!(skills[0].always_inject);
     }
 
     #[test]
     fn test_description_truncated_at_200() {
         let long_desc = "x".repeat(300);
         let content = format!("---\n---\n# Skill\n{}", long_desc);
-        let (_, desc, _) = parse_skill_markdown("default", &content);
+        let (_, desc) = parse_skill_markdown("default", &content);
         assert!(desc.len() <= 123);
     }
 }
