@@ -34,6 +34,13 @@ pub enum OutputSegment {
     ToolError(String),
     /// Status message.
     Status(String),
+    /// Permission prompt — requires user confirmation (y/n/a).
+    /// Rendered with distinct styling to stand out from normal output.
+    PermissionPrompt {
+        tool_name: String,
+        reason: String,
+        detail: String,
+    },
     /// Error message.
     Error(String),
 }
@@ -137,6 +144,10 @@ fn segment_lines(seg: &OutputSegment) -> usize {
         OutputSegment::ToolError(_) => 1,
         OutputSegment::Status(_) => 1,
         OutputSegment::Error(_) => 1,
+        OutputSegment::PermissionPrompt { detail, .. } => {
+            // Header + reason + optional detail + prompt
+            if detail.is_empty() { 2 } else { 3 }
+        }
     }
 }
 
@@ -441,6 +452,44 @@ fn segment_to_lines(seg: &OutputSegment) -> Vec<Line<'static>> {
                     Style::new().fg(theme::TEXT_DIM),
                 )));
             }
+            lines
+        }
+        OutputSegment::PermissionPrompt {
+            tool_name,
+            reason,
+            detail,
+        } => {
+            // Render a visually distinct permission prompt block.
+            // Uses WARNING color to draw attention without being alarming.
+            let mut lines: Vec<Line<'static>> = Vec::new();
+
+            // Header line: icon + [tool_name] reason
+            lines.push(Line::from(vec![
+                Span::styled("  ⚠ ".to_string(), Style::new().fg(theme::WARNING)),
+                Span::styled(
+                    format!("[{}] ", tool_name),
+                    Style::new().fg(theme::WARNING).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(reason.clone(), Style::new().fg(theme::TEXT)),
+            ]));
+
+            // Detail line (formatted tool input — not raw JSON)
+            if !detail.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("    ".to_string(), Style::default()),
+                    Span::styled(detail.clone(), Style::new().fg(theme::TEXT_DIM)),
+                ]));
+            }
+
+            // Prompt line
+            lines.push(Line::from(vec![
+                Span::styled("    ".to_string(), Style::default()),
+                Span::styled(
+                    "Allow? (y/n/a = yes to all)".to_string(),
+                    Style::new().fg(theme::WARNING).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+
             lines
         }
         OutputSegment::Error(err) => {

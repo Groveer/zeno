@@ -1354,13 +1354,13 @@ async fn execute_single_tool_tui(
             true
         } else if decision.requires_confirmation {
             // Send permission request through TUI channel
-            let display_input = safe_truncate_str(&tu.input_json, 200);
+            let display_detail = format_permission_detail(&tu.name, &tu.input_json);
             let (tx, rx) = tokio::sync::oneshot::channel();
             let response_tx = Arc::new(Mutex::new(Some(tx)));
             let _ = sender.send(UiEvent::PermissionAsk {
                 tool_name: tu.name.clone(),
                 reason: decision.reason.clone(),
-                input: display_input,
+                input: display_detail,
                 response_tx,
             });
             match tokio::select! {
@@ -1705,6 +1705,85 @@ fn summarize_tool_output(tool_name: &str, output: &str, input_json: &str) -> Str
             let line_count = output.lines().count();
             format!("{} lines", line_count)
         }
+    }
+}
+
+/// Build a human-readable detail line for permission prompts.
+/// Unlike `format_tool_input_summary` (which is a compact one-liner),
+/// this shows the key parameters so the user can make an informed decision.
+fn format_permission_detail(tool_name: &str, input_json: &str) -> String {
+    let input = parse_tool_input(input_json);
+
+    match tool_name {
+        "bash" => input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(|s| {
+                let s = s.trim();
+                if s.chars().count() > 120 {
+                    let truncated: String = s.chars().take(117).collect();
+                    format!("$ {}…", truncated)
+                } else {
+                    format!("$ {}", s)
+                }
+            })
+            .unwrap_or_else(|| "bash command".into()),
+        "read" | "read_file" => input
+            .get("path")
+            .or_else(|| input.get("file_path"))
+            .and_then(|v| v.as_str())
+            .map(|s| format!("Reading: {}", s))
+            .unwrap_or_else(|| "Reading file".into()),
+        "write" => {
+            let path = input
+                .get("path")
+                .or_else(|| input.get("file_path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let lines = input
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(|c| c.lines().count())
+                .unwrap_or(0);
+            format!("Writing: {} ({} lines)", path, lines)
+        }
+        "edit" => {
+            let path = input
+                .get("path")
+                .or_else(|| input.get("file_path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("file");
+            let replace_all = input
+                .get("replace_all")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if replace_all {
+                format!("Editing: {} (replace all)", path)
+            } else {
+                format!("Editing: {}", path)
+            }
+        }
+        "grep" => {
+            let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("?");
+            let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("cwd");
+            format!("grep {} in {}", pattern, path)
+        }
+        "glob" => {
+            let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("?");
+            let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("cwd");
+            format!("glob {} in {}", pattern, path)
+        }
+        "web_search" => input
+            .get("query")
+            .and_then(|v| v.as_str())
+            .map(|s| format!("Searching: {}", s))
+            .unwrap_or_else(|| "Web search".into()),
+        "web_fetch" => input
+            .get("url")
+            .and_then(|v| v.as_str())
+            .map(|s| format!("Fetching: {}", s))
+            .unwrap_or_else(|| "Web fetch".into()),
+        _ => input_json.chars().take(120).collect(),
     }
 }
 

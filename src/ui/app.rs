@@ -483,12 +483,11 @@ impl App {
                             });
                         } else {
                             // Display permission prompt in TUI
-                            let mut msg = format!("󰌾 [{}] {}", tool_name, reason);
-                            if !input.is_empty() {
-                                msg.push_str(&format!("\n  Input: {}", input));
-                            }
-                            msg.push_str("\n  Allow? (y/n/a = yes to all): ");
-                            self.output.push(OutputSegment::Status(msg));
+                            self.output.push(OutputSegment::PermissionPrompt {
+                                tool_name: tool_name.clone(),
+                                reason: reason.clone(),
+                                detail: input.clone(),
+                            });
                             self.ask_response_tx = Some(tx);
                             self.ask_question =
                                 Some(format!("[permission] {} — allow?", tool_name));
@@ -703,12 +702,11 @@ impl App {
         // Not allow-all: promote the next queued request to active
         if !self.permission_queue.is_empty() {
             let next = self.permission_queue.remove(0); // FIFO
-            let mut msg = format!("󰌾 [{}] {}", next.tool_name, next.reason);
-            if !next.input.is_empty() {
-                msg.push_str(&format!("\n  Input: {}", next.input));
-            }
-            msg.push_str("\n  Allow? (y/n/a = yes to all): ");
-            self.output.push(OutputSegment::Status(msg));
+            self.output.push(OutputSegment::PermissionPrompt {
+                tool_name: next.tool_name.clone(),
+                reason: next.reason.clone(),
+                detail: next.input.clone(),
+            });
             self.ask_response_tx = Some(next.response_tx);
             self.ask_question = Some(format!("[permission] {} — allow?", next.tool_name));
             return true;
