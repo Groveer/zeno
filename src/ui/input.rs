@@ -237,9 +237,9 @@ impl InputState {
                 modifiers: KeyModifiers::NONE,
                 ..
             } => {
-                // If multi-line text, move cursor up one line instead of history
-                if self.text.contains('\n') {
-                    self.move_cursor_up();
+                // If multi-line text, move cursor up one line.
+                // If already on the first line, fall through to history navigation.
+                if self.text.contains('\n') && self.move_cursor_up() {
                     return true;
                 }
                 if self.input_history.is_empty() {
@@ -272,9 +272,9 @@ impl InputState {
                 modifiers: KeyModifiers::NONE,
                 ..
             } => {
-                // If multi-line text, move cursor down one line instead of history
-                if self.text.contains('\n') {
-                    self.move_cursor_down();
+                // If multi-line text, move cursor down one line.
+                // If already on the last line, fall through to history navigation.
+                if self.text.contains('\n') && self.move_cursor_down() {
                     return true;
                 }
                 match self.history_index {
@@ -364,9 +364,12 @@ impl InputState {
 
     /// Clear after submission. Saves the current text to input history.
     pub fn reset(&mut self) {
-        // Save to history (skip empty and duplicates of the most recent entry)
+        // Save to history (skip empty, slash commands, and duplicates of the most recent entry)
         let trimmed = self.text.trim().to_string();
-        if !trimmed.is_empty() && self.input_history.first().map(|s| s.as_str()) != Some(&trimmed) {
+        if !trimmed.is_empty()
+            && !trimmed.starts_with('/')
+            && self.input_history.first().map(|s| s.as_str()) != Some(&trimmed)
+        {
             self.input_history.insert(0, trimmed);
         }
 
@@ -447,32 +450,34 @@ impl InputState {
     }
 
     /// Move cursor up one line (multi-line navigation).
-    fn move_cursor_up(&mut self) {
+    /// Returns false if the cursor was already on the first line (caller should fall through).
+    fn move_cursor_up(&mut self) -> bool {
         let (row, col) = self.cursor_row_col();
         if row == 0 {
-            self.cursor = 0;
-            return;
+            return false;
         }
         let target_col_byte = col;
         let prev_line_start = self.line_start_byte(row - 1);
         let prev_line_end = self.line_end_byte(row - 1);
         let prev_line_len = prev_line_end - prev_line_start;
         self.cursor = prev_line_start + target_col_byte.min(prev_line_len);
+        true
     }
 
     /// Move cursor down one line (multi-line navigation).
-    fn move_cursor_down(&mut self) {
+    /// Returns false if the cursor was already on the last line (caller should fall through).
+    fn move_cursor_down(&mut self) -> bool {
         let (row, col) = self.cursor_row_col();
         let total_rows = self.line_count();
         if row + 1 >= total_rows {
-            self.cursor = self.text.len();
-            return;
+            return false;
         }
         let target_col_byte = col;
         let next_line_start = self.line_start_byte(row + 1);
         let next_line_end = self.line_end_byte(row + 1);
         let next_line_len = next_line_end - next_line_start;
         self.cursor = next_line_start + target_col_byte.min(next_line_len);
+        true
     }
 
     /// Move cursor to the start of the current line (Home).
