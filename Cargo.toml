@@ -8,7 +8,7 @@ edition = "2024"
 tokio = { version = "1", features = ["full"] }
 
 # HTTP + SSE
-reqwest = { version = "0.12", features = ["stream", "json"] }
+reqwest = { version = "0.13", features = ["stream", "json"] }
 eventsource-stream = "0.2"
 futures = "0.3"
 
@@ -44,6 +44,10 @@ walkdir = "2"
 regex = "1"
 which = "7"
 urlencoding = "2"
+
+# MCP client (Model Context Protocol)
+rmcp = { version = "1.6", features = ["client", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "which-command"] }
+tokio-stream = "0.1"
 
 # TUI
 ratatui = "0.30"

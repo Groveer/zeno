@@ -371,6 +371,15 @@ async fn main() -> anyhow::Result<()> {
         skill_registry.clone(),
     )))?;
 
+    // Initialize MCP manager (lazy — no servers started yet)
+    let mcp_manager = std::sync::Arc::new(tokio::sync::Mutex::new(
+        mcp::manager::McpManager::from_config(&settings.mcp.servers),
+    ));
+    registry.register(Box::new(mcp::tools::McpListServersTool::new()))?;
+    registry.register(Box::new(mcp::tools::McpListToolsTool::new()))?;
+    registry.register(Box::new(mcp::tools::McpDescribeToolTool::new()))?;
+    registry.register(Box::new(mcp::tools::McpCallToolTool::new()))?;
+
     // Build system prompt — use memory manager for built-in + external provider content
     let memory_prompt = memory_manager.lock().await.build_system_prompt();
     let system_prompt = crate::prompts::system_prompt::build(
@@ -383,7 +392,7 @@ async fn main() -> anyhow::Result<()> {
     drop(memory_prompt);
     tracing::debug!(prompt_len = system_prompt.len(), "System prompt assembled");
 
-    let engine = QueryEngine::new(
+    let mut engine = QueryEngine::new(
         client,
         model.to_string(),
         system_prompt,
@@ -395,6 +404,7 @@ async fn main() -> anyhow::Result<()> {
         settings.clone(),
         cwd.clone(),
     );
+    engine.mcp_manager = Some(mcp_manager.clone());
 
     // TUI setup
     use std::time::Duration;
@@ -506,10 +516,13 @@ async fn main() -> anyhow::Result<()> {
                             };
                             send_text_response(&sender, &summary);
                         }
-                        "/mcp" => send_text_response(
-                            &sender,
-                            "MCP: (not yet connected — rmcp integration pending)",
-                        ),
+                        "/mcp" => {
+                            let summary = {
+                                let mgr = mcp_manager.lock().await;
+                                mgr.summary()
+                            };
+                            send_text_response(&sender, &summary);
+                        }
                         _ => {} // shouldn't reach here
                     }
                 }

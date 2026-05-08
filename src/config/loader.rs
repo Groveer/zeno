@@ -503,6 +503,22 @@ fn register_zeno_api(lua: &Lua, table: &mlua::Table) -> anyhow::Result<()> {
             Ok(())
         })?,
     )?;
+    // Bulk version: zn.mcp_servers({ name1 = {...}, name2 = {...} })
+    table.set(
+        "mcp_servers",
+        lua.create_function(move |lua, opts: mlua::Table| {
+            let existing: mlua::Table = get_overrides(lua)?
+                .get::<mlua::Table>("mcp_servers")
+                .unwrap_or_else(|_| lua.create_table().unwrap());
+            // Merge: bulk table entries are added/overridden on top of existing
+            for pair in opts.pairs::<String, mlua::Value>() {
+                let (name, val) = pair?;
+                existing.set(name, val)?;
+            }
+            get_overrides(lua)?.set("mcp_servers", existing)?;
+            Ok(())
+        })?,
+    )?;
 
     // --- Auxiliary ---
     table.set(
@@ -1273,5 +1289,80 @@ return zn.config()
             settings.role.identity.is_none(),
             "empty string should result in None"
         );
+    }
+
+    #[test]
+    fn test_mcp_servers_bulk_table() {
+        let init_lua = r#"
+            local zn = require 'zeno'
+            zn.provider("anthropic", {
+                api_key_env = "ANTHROPIC_API_KEY",
+                base_url = "https://api.anthropic.com",
+            })
+            zn.set_provider("anthropic")
+            zn.mcp_servers({
+                ["filesystem"] = { command = { "npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp" } },
+                ["git"] = { command = { "npx", "-y", "@modelcontextprotocol/server-git" } },
+            })
+            return zn.config()
+        "#;
+        let settings = load_from_tmpdir(init_lua).unwrap();
+        assert_eq!(settings.mcp.servers.len(), 2);
+        assert!(settings.mcp.servers.contains_key("filesystem"));
+        assert!(settings.mcp.servers.contains_key("git"));
+        assert!(settings.mcp.servers["filesystem"].command.is_some());
+    }
+
+    #[test]
+    fn test_mcp_servers_bulk_with_headers() {
+        let init_lua = r#"
+            local zn = require 'zeno'
+            zn.provider("anthropic", {
+                api_key_env = "ANTHROPIC_API_KEY",
+                base_url = "https://api.anthropic.com",
+            })
+            zn.set_provider("anthropic")
+            zn.mcp_servers({
+                ["remote"] = {
+                    url = "https://api.example.com/mcp",
+                    headers = {
+                        ["Authorization"] = "Bearer sk-test",
+                        ["X-API-Key"] = "my-key",
+                    },
+                },
+            })
+            return zn.config()
+        "#;
+        let settings = load_from_tmpdir(init_lua).unwrap();
+        let remote = settings.mcp.servers.get("remote").unwrap();
+        assert_eq!(remote.url.as_deref(), Some("https://api.example.com/mcp"));
+        assert_eq!(
+            remote.headers.get("Authorization").unwrap(),
+            "Bearer sk-test"
+        );
+        assert_eq!(remote.headers.get("X-API-Key").unwrap(), "my-key");
+    }
+
+    #[test]
+    fn test_mcp_servers_mixed_bulk_and_individual() {
+        let init_lua = r#"
+            local zn = require 'zeno'
+            zn.provider("anthropic", {
+                api_key_env = "ANTHROPIC_API_KEY",
+                base_url = "https://api.anthropic.com",
+            })
+            zn.set_provider("anthropic")
+            zn.mcp_servers({
+                ["filesystem"] = { command = { "npx", "-y", "server-filesystem", "/tmp" } },
+            })
+            zn.mcp_server("git", {
+                command = { "npx", "-y", "server-git" },
+            })
+            return zn.config()
+        "#;
+        let settings = load_from_tmpdir(init_lua).unwrap();
+        assert_eq!(settings.mcp.servers.len(), 2);
+        assert!(settings.mcp.servers.contains_key("filesystem"));
+        assert!(settings.mcp.servers.contains_key("git"));
     }
 }

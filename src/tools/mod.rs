@@ -7,7 +7,6 @@ pub mod config_tool;
 pub mod edit;
 pub mod glob;
 pub mod grep;
-pub mod mcp;
 pub mod memory;
 pub mod memory_provider_tool;
 pub mod read;

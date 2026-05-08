@@ -42,6 +42,8 @@ pub struct ToolContext {
     pub cwd: PathBuf,
     /// For ask_user tool: channel to send the question to the TUI and receive the answer.
     pub ask_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::engine::tui_events::UiEvent>>,
+    /// Shared MCP manager for lazy MCP server connections.
+    pub mcp_manager: Option<std::sync::Arc<tokio::sync::Mutex<crate::mcp::manager::McpManager>>>,
 }
 
 impl ToolContext {
@@ -50,6 +52,7 @@ impl ToolContext {
         Self {
             cwd,
             ask_sender: None,
+            mcp_manager: None,
         }
     }
 
@@ -57,10 +60,12 @@ impl ToolContext {
     pub fn with_ask_sender(
         cwd: PathBuf,
         sender: tokio::sync::mpsc::UnboundedSender<crate::engine::tui_events::UiEvent>,
+        mcp_manager: Option<std::sync::Arc<tokio::sync::Mutex<crate::mcp::manager::McpManager>>>,
     ) -> Self {
         Self {
             cwd,
             ask_sender: Some(sender),
+            mcp_manager,
         }
     }
 

@@ -715,7 +715,11 @@ impl QueryEngine {
                 return Ok(());
             }
 
-            let ctx = ToolContext::with_ask_sender(self.cwd.clone(), sender.clone());
+            let ctx = ToolContext::with_ask_sender(
+                self.cwd.clone(),
+                sender.clone(),
+                self.mcp_manager.clone(),
+            );
             let mut tool_results: Vec<ContentBlock> = Vec::new();
 
             for tu in &tool_uses {

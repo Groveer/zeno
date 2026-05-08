@@ -216,6 +216,9 @@ pub struct McpConfig {
 pub struct McpServerConfig {
     pub command: Option<Vec<String>>,
     pub url: Option<String>,
+    /// Custom HTTP headers for url-based MCP servers (e.g. Authorization, API keys).
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
 }
 
 // ---------------------------------------------------------------------------

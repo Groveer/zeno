@@ -43,6 +43,8 @@ pub struct QueryEngine {
     /// and the engine drains it after tool results are appended (before
     /// the next API call). Multiple steers concatenate with newlines.
     pub(crate) pending_steer: Arc<Mutex<Option<String>>>,
+    /// Shared MCP manager for lazy MCP server connections.
+    pub mcp_manager: Option<Arc<tokio::sync::Mutex<crate::mcp::manager::McpManager>>>,
 }
 
 /// Inject user text into a steer slot without interrupting the agent.
@@ -106,6 +108,7 @@ impl QueryEngine {
             hook_executor: None,
             permission_allow_all: Arc::new(Mutex::new(false)),
             pending_steer: Arc::new(Mutex::new(None)),
+            mcp_manager: None,
         }
     }
 

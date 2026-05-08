@@ -75,15 +75,58 @@ zn.provider("openai", {
 -- zn.web_search({ provider = "duckduckgo" })
 
 -- ═══════════════════════════════════════════════
--- MCP Servers
+-- MCP Servers (lazy-loaded — zero startup cost)
 -- ═══════════════════════════════════════════════
-
--- zn.mcp_server("context7", {
---   command = { "npx", "-y", "@upstreamapi/context7" },
+--
+-- MCP servers are connected on-demand: the server process starts only
+-- when the LLM first calls mcp_list_tools or mcp_call_tool on it.
+-- This keeps zeno startup instant regardless of how many servers are configured.
+--
+-- Usage flow (LLM sees these 4 meta-tools automatically):
+--   1. mcp_list_servers   — see configured servers & status
+--   2. mcp_list_tools     — discover tools on a server (triggers connection)
+--   3. mcp_describe_tool  — get a tool's parameter schema
+--   4. mcp_call_tool      — execute a tool with arguments
+--
+-- ── Style 1: Bulk table (recommended for multiple servers) ──────
+--
+-- zn.mcp_servers({
+--   ["filesystem"] = { command = { "npx", "-y", "@modelcontextprotocol/server-filesystem", "/home/user/documents" } },
+--   ["github"]     = { command = { "npx", "-y", "@modelcontextprotocol/server-github" } },
+--   ["git"]        = { command = { "npx", "-y", "@modelcontextprotocol/server-git", "--repository", "." } },
+--   ["postgres"]   = { command = { "npx", "-y", "@modelcontextprotocol/server-postgres", "postgresql://localhost/mydb" } },
+--   ["sqlite"]     = { command = { "npx", "-y", "mcp-server-sqlite", "--db-path", "/path/to/database.db" } },
+--   ["fetch"]      = { command = { "npx", "-y", "@modelcontextprotocol/server-fetch" } },
 -- })
-
--- zn.mcp_server("my-server", {
+--
+-- ── Style 2: Individual calls (also works, can mix with bulk) ──
+--
+-- zn.mcp_server("filesystem", {
+--   command = { "npx", "-y", "@modelcontextprotocol/server-filesystem", "/home/user/documents" },
+-- })
+--
+-- ── HTTP Transport ─────────────────────────────
+--
+-- Remote MCP server via HTTP:
+-- zn.mcp_server("remote-api", {
 --   url = "http://localhost:3000",
+-- })
+--
+-- HTTP with custom headers (API key, Bearer token, etc.):
+-- zn.mcp_server("remote-api", {
+--   url = "https://api.example.com/mcp",
+--   headers = {
+--     ["Authorization"] = "Bearer sk-your-token-here",
+--     ["X-API-Key"] = "your-api-key",
+--   },
+-- })
+--
+-- GitLab MCP:
+-- zn.mcp_server("gitlab", {
+--   url = "https://gitlab.com/api/v4/mcp",
+--   headers = {
+--     ["PRIVATE-TOKEN"] = "glpat-xxxxxxxxxxxx",
+--   },
 -- })
 
 -- ═══════════════════════════════════════════════

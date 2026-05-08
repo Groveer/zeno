@@ -203,6 +203,10 @@ zn.set_provider("anthropic")
 zn.tool("web_fetch", false)
 zn.bash_env({ NODE_ENV = "development" })
 zn.mcp_server("context7", { command = { "npx", "-y", "@upstreamapi/context7" } })
+zn.mcp_servers({  -- bulk style
+  ["context7"] = { command = { "npx", "-y", "@upstreamapi/context7" } },
+  ["filesystem"] = { command = { "npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp" } },
+})
 zn.auxiliary("vision", { provider = "auto", model = "", timeout = 30 })
 zn.web_search({ provider = "brave", api_key_env = "BRAVE_API_KEY" })
 zn.model_context({ ["claude"] = 200000, ["gpt-4"] = 128000 })
@@ -964,7 +968,9 @@ zn.web_search({ provider=, url=, api_key_env=, api_key= })
 -- provider: "searxng"(默认) | "brave" | "tavily" | "duckduckgo"
 
 -- MCP
-zn.mcp_server(name, { command= } | { url= })
+zn.mcp_server(name, { command= } | { url=, headers= })
+zn.mcp_servers({ name1 = {...}, name2 = {...} })  -- bulk style
+-- headers: { ["key"] = "value" } — 自定义 HTTP 头，用于 API 认证等
 
 -- Auxiliary
 zn.auxiliary(task, { provider=, model=, base_url=, api_key=, timeout=, extra_body={}, max_tokens=, temperature= })
