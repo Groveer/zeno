@@ -213,9 +213,6 @@ impl App {
                             self.ask_question.take();
                             self.permission_queue.clear();
                         }
-                        self.output.push(OutputSegment::Status(
-                            "󰊥 Interrupted — press Ctrl+C again to quit.".into(),
-                        ));
                     }
                     _ => {
                         self.should_quit = true;
@@ -518,8 +515,9 @@ impl App {
                     self.mode = AppMode::Idle;
                 }
                 UiEvent::Interrupted => {
-                    self.output
-                        .push(OutputSegment::Status("󰊥 Interrupted.".into()));
+                    self.output.push(OutputSegment::Status(
+                        "⏸  Interrupted — press Ctrl+C again to quit.".into(),
+                    ));
                     self.mode = AppMode::Idle;
                     self.steer_queue.clear();
                     self.status.steer_count = 0;
