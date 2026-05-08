@@ -22,6 +22,8 @@ use super::theme;
 pub enum OutputSegment {
     /// User input echo.
     UserInput(String),
+    /// Response to ask_user tool — visually indented under the question.
+    AskResponse(String),
     /// Assistant text (LLM response).
     Text(String),
     /// Tool invocation — executing (spinner).
@@ -127,6 +129,7 @@ impl OutputState {
 fn segment_lines(seg: &OutputSegment) -> usize {
     match seg {
         OutputSegment::UserInput(_) => 1,
+        OutputSegment::AskResponse(_) => 1,
         OutputSegment::Text(t) => t.lines().count().max(1),
         OutputSegment::ToolExecuting(_) => 1,
         // ToolComplete may contain multi-line diff output (\n-separated)
@@ -314,8 +317,14 @@ fn segment_to_lines(seg: &OutputSegment) -> Vec<Line<'static>> {
     match seg {
         OutputSegment::UserInput(text) => {
             vec![Line::from(vec![
-                Span::styled(" ".to_string(), Style::new().fg(theme::ACCENT_DIM)),
+                Span::styled("◆ ".to_string(), Style::new().fg(theme::ACCENT_DIM)),
                 Span::styled(text.clone(), Style::new().fg(theme::TEXT_BRIGHT)),
+            ])]
+        }
+        OutputSegment::AskResponse(text) => {
+            vec![Line::from(vec![
+                Span::styled("  ↳ ".to_string(), Style::new().fg(theme::ACCENT)),
+                Span::styled(text.clone(), Style::new().fg(theme::TEXT)),
             ])]
         }
         OutputSegment::Text(text) => {

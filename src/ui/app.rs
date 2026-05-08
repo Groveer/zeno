@@ -314,19 +314,31 @@ impl App {
 
         if self.input.submitted {
             let text = self.input.text.trim().to_string();
-            self.input.reset();
 
             if text.is_empty() {
+                self.input.reset();
                 return;
             }
 
             // If we were waiting for an ask_user or permission response, send it back
             if self.mode == AppMode::WaitingInput {
+                // Don't save ask_user / permission responses to input history
+                self.input.reset_without_history();
+
                 // Let the query engine handle the "allow all" status message
                 // (it sends UiEvent::Status back to us), so avoid duplication here.
                 let lower = text.trim().to_lowercase();
                 if matches!(lower.as_str(), "a" | "all" | "always") {
                     self.permission_allow_all = true;
+                }
+
+                // Show the user's response in the output area.
+                // Use AskResponse if we have a pending ask question (ask_user tool),
+                // otherwise UserInput for permission responses.
+                if self.ask_question.is_some() {
+                    self.output.push(OutputSegment::AskResponse(text.clone()));
+                } else {
+                    self.output.push(OutputSegment::UserInput(text.clone()));
                 }
 
                 if let Some(tx) = self.ask_response_tx.take() {
@@ -341,6 +353,9 @@ impl App {
                 }
                 return;
             }
+
+            // Regular user input — save to history
+            self.input.reset();
 
             if text == "/exit" || text == "/quit" {
                 self.should_quit = true;
@@ -430,8 +445,8 @@ impl App {
                     question,
                     response_tx,
                 } => {
-                    self.output
-                        .push(OutputSegment::Status(format!(" {}", question)));
+                    // The question is already shown via ToolExecuting from format_tool_input_summary
+                    // — no need for a duplicate Status line here.
                     // Extract the oneshot sender from the Arc<Mutex>
                     let tx = {
                         let mut guard = response_tx.lock().unwrap();

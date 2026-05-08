@@ -381,6 +381,18 @@ impl InputState {
         save_history(&self.input_history);
     }
 
+    /// Reset input state without saving to history.
+    /// Used for ask_user responses and other non-user-initiated inputs
+    /// that should not pollute the history navigation (Up/Down).
+    pub fn reset_without_history(&mut self) {
+        self.text.clear();
+        self.cursor = 0;
+        self.submitted = false;
+        self.popup = None;
+        self.history_index = None;
+        self.draft = None;
+    }
+
     // ── Multi-line cursor helpers ──
 
     /// Return (row, col_bytes) of the cursor position in the text.

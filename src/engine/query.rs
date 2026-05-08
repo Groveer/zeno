@@ -1813,13 +1813,12 @@ fn format_tool_input_summary(tool_name: &str, input_json: &str) -> String {
             .get("question")
             .and_then(|v| v.as_str())
             .map(|q| {
-                // Truncate long questions for the one-line summary
-                let display = if q.len() > 80 {
-                    format!("{}…", &q[..q.floor_char_boundary(80)])
+                let preview: String = q.chars().take(60).collect();
+                if q.chars().count() > 60 {
+                    format!("\u{f059} Asking: {}…", preview)
                 } else {
-                    q.to_string()
-                };
-                format!("\u{f059} Asking: {}", display)
+                    format!("\u{f059} Asking: {}", q)
+                }
             })
             .unwrap_or_else(|| "\u{f059} Asking user".into()),
         "config" => input
