@@ -3,11 +3,11 @@
 //! Supports multi-content-block messages (text + tool_use + tool_result + image).
 
 use crate::api::types::{ContentBlock, Message, Role};
-
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 /// A single entry in the conversation history.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationEntry {
     pub role: Role,
     pub content: Vec<ContentBlock>,
@@ -16,7 +16,7 @@ pub struct ConversationEntry {
 impl ConversationEntry {}
 
 /// Manages conversation history.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConversationHistory {
     entries: Vec<ConversationEntry>,
 }

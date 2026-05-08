@@ -14,16 +14,21 @@ use ratatui::{
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
+use crate::config::paths;
+
 use super::theme;
 
 /// All slash commands supported by the TUI, with short aliases first.
 const COMMANDS: &[&str] = &[
     "/clear", "/compact", "/config", "/cost", "/exit", "/goal", "/help", "/mcp", "/memory",
-    "/model", "/quit", "/tools",
+    "/model", "/quit", "/resume", "/tools",
 ];
 
 /// Maximum number of items shown in the completion popup.
 const MAX_POPUP_ITEMS: usize = 5;
+
+/// Maximum number of history entries to persist to disk.
+const MAX_PERSISTED_HISTORY: usize = 2000;
 
 // ── Completion popup state ──
 
@@ -132,13 +137,14 @@ pub struct InputState {
 
 impl InputState {
     pub fn new() -> Self {
+        let history = load_history();
         Self {
             text: String::new(),
             cursor: 0,
             submitted: false,
             active: true,
             popup: None,
-            input_history: Vec::new(),
+            input_history: history,
             history_index: None,
             draft: None,
         }
@@ -370,6 +376,9 @@ impl InputState {
         self.popup = None;
         self.history_index = None;
         self.draft = None;
+
+        // Persist history to disk after each submission
+        save_history(&self.input_history);
     }
 
     // ── Multi-line cursor helpers ──
@@ -1110,6 +1119,50 @@ fn draw_border(frame: &mut Frame, area: Rect, color: Color) {
         Paragraph::new(Line::from("─".repeat(area.width as usize))).style(style),
         top,
     );
+}
+
+// ── Session history persistence ──
+
+/// Load input history from disk. Returns an empty Vec if the file doesn't
+/// exist or is corrupted, so the user never loses the ability to type.
+fn load_history() -> Vec<String> {
+    let path = paths::session_history_path();
+    if !path.exists() {
+        return Vec::new();
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(json) => match serde_json::from_str::<Vec<String>>(&json) {
+            Ok(history) => history,
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path.display(), "Failed to parse session history, starting fresh");
+                Vec::new()
+            }
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "Failed to read session history, starting fresh");
+            Vec::new()
+        }
+    }
+}
+
+/// Save input history to disk. Truncates to MAX_PERSISTED_HISTORY entries.
+fn save_history(history: &[String]) {
+    let path = paths::session_history_path();
+    let truncated: Vec<&str> = history
+        .iter()
+        .take(MAX_PERSISTED_HISTORY)
+        .map(|s| s.as_str())
+        .collect();
+    match serde_json::to_string(&truncated) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, &json) {
+                tracing::warn!(error = %e, path = %path.display(), "Failed to save session history");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to serialize session history");
+        }
+    }
 }
 
 #[cfg(test)]

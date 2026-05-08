@@ -46,6 +46,28 @@ pub fn data_dir() -> PathBuf {
         .join("zeno")
 }
 
+/// Returns the path to the session input history file.
+/// Stores the last N submitted inputs for persistence across sessions.
+pub fn session_history_path() -> PathBuf {
+    let dir = config_dir();
+    std::fs::create_dir_all(&dir).ok();
+    dir.join("session_history.json")
+}
+
+/// Returns the sessions directory for multi-session storage.
+/// Each session is saved as `{id}.json` inside this directory.
+pub fn sessions_dir() -> PathBuf {
+    let dir = data_dir().join("sessions");
+    std::fs::create_dir_all(&dir).ok();
+    dir
+}
+
+/// Returns the path to the session index file.
+/// A JSON array of `SessionIndexEntry` for quick listing without parsing full sessions.
+pub fn session_index_path() -> PathBuf {
+    sessions_dir().join("index.json")
+}
+
 /// Ensures the config directory exists, returns its path.
 pub fn ensure_config_dir() -> anyhow::Result<PathBuf> {
     let dir = config_dir();

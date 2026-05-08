@@ -19,6 +19,7 @@ use engine::messages::ConversationHistory;
 use engine::query_engine::QueryEngine;
 use memory::provider::MemoryProvider;
 use std::sync::Arc;
+use std::time::SystemTime;
 use tools::base::ToolRegistry;
 use ui::status_bar::AppMode;
 
@@ -49,6 +50,11 @@ fn dispatch_command(input: &str) -> CommandAction {
         "/cost" => CommandAction::NeedEngine("cost", String::new()),
         "/clear" => CommandAction::NeedEngine("clear", String::new()),
         "/compact" => CommandAction::Compact,
+        "/resume" => CommandAction::NeedEngine("resume", String::new()),
+        s if s.starts_with("/resume") => {
+            let arg = s.strip_prefix("/resume").unwrap_or("").trim().to_string();
+            CommandAction::NeedEngine("resume", arg)
+        }
         s if s.starts_with("/model") => {
             let arg = s.strip_prefix("/model").unwrap_or("").trim().to_string();
             CommandAction::NeedEngine("model", arg)
@@ -79,6 +85,8 @@ Available commands:
 /config — Show config
 /memory — Memory files
 /mcp — MCP servers
+/resume — Restore the last session (conversation history + output)
+/resume N — Restore session #N (use /resume to list all)
 /goal [text] — Set/show/clear auto-continue goal
 /goal clear — Clear goal
 /goal pause — Pause goal
@@ -416,6 +424,19 @@ async fn main() -> anyhow::Result<()> {
 
     let mut terminal = ui::app::init_terminal()?;
 
+    // Auto-detect saved session on startup
+    if let Some(saved) = engine::session::load_latest_session() {
+        let one_liner = engine::session::build_one_liner(&saved);
+        app.output.push(ui::output::OutputSegment::Status(
+            "󰄘 Previous session found. Type `/resume` to restore it.".to_string(),
+        ));
+        app.output.push(ui::output::OutputSegment::Status(format!(
+            "   {}",
+            one_liner
+        )));
+        app.mark_dirty();
+    }
+
     // Main TUI event loop
     // Use longer poll timeout when idle (100ms ≈ 10fps) vs short when running (16ms ≈ 60fps).
     // This dramatically reduces CPU when the user isn't interacting.
@@ -598,6 +619,86 @@ async fn main() -> anyhow::Result<()> {
                             );
                         }
                     }
+                    "resume" => {
+                        // Parse optional index argument: "/resume" or "/resume 2"
+                        let session_data = {
+                            if arg.trim().is_empty() {
+                                engine::session::load_latest_session()
+                            } else if let Ok(n) = arg.trim().parse::<usize>() {
+                                let index = engine::session::load_session_index();
+                                if n == 0 || n > index.len() {
+                                    let list = engine::session::format_session_list(&index);
+                                    send_text_response(
+                                        &sender,
+                                        &format!(
+                                            "Invalid session number: {}. {}\n\n{}",
+                                            n,
+                                            if index.is_empty() {
+                                                "No sessions available."
+                                            } else {
+                                                ""
+                                            },
+                                            list,
+                                        ),
+                                    );
+                                    None // handled
+                                } else {
+                                    engine::session::load_session_by_id(&index[n - 1].id)
+                                }
+                            } else {
+                                let index = engine::session::load_session_index();
+                                let list = engine::session::format_session_list(&index);
+                                send_text_response(&sender, &list);
+                                None // handled
+                            }
+                        };
+
+                        if let Some(data) = session_data {
+                            let mut eng = engine.lock().await;
+                            // Rebuild conversation history from saved entries
+                            let hist = ConversationHistory::from_entries(data.entries.clone());
+                            eng.history = hist;
+                            eng.cost_tracker = crate::engine::cost_tracker::CostTracker::default();
+                            let one_liner = engine::session::build_one_liner(&data);
+                            let summary = data.summary.clone();
+                            drop(eng);
+
+                            // Also rebuild the TUI output area with the saved summary
+                            let _ = sender.send(engine::tui_events::UiEvent::ClearOutput);
+                            let _ = sender.send(engine::tui_events::UiEvent::Status(format!(
+                                "󰄘 Resumed: {}",
+                                one_liner
+                            )));
+                            let _ = sender.send(engine::tui_events::UiEvent::TextDelta(format!(
+                                "━━━ Session Resume ━━━\n\
+                                     Saved: {}\n\
+                                     Model: {} | Provider: {}\n\
+                                     Total tokens: {}\n\n\
+                                     {}\n\
+                                     ━━━ End of Session ━━━\n\n\
+                                     Ready to continue — type your next message.",
+                                &data
+                                    .saved_at
+                                    .get(..19)
+                                    .unwrap_or(&data.saved_at)
+                                    .replace('T', " "),
+                                data.model,
+                                data.provider,
+                                data.total_tokens,
+                                summary,
+                            )));
+                            let _ = sender.send(engine::tui_events::UiEvent::QueryDone {
+                                text: String::new(),
+                                tool_calls: 0,
+                                tokens: data.total_tokens,
+                            });
+                        } else {
+                            // No session data available — the handler above already sent
+                            // the appropriate message, or there was nothing to resume.
+                            // Ensure we always return to Idle.
+                            send_text_response(&sender, "No saved session to resume.");
+                        }
+                    }
                     _ => {}
                 },
                 CommandAction::Compact => {
@@ -695,8 +796,41 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        // 5. Check quit
+        // 5. Check quit — auto-save session before exiting
         if app.should_quit() {
+            // Capture engine state for session persistence
+            let (entries, total_tokens, current_model) = {
+                let eng = engine.lock().await;
+                let entries = eng.history.entries_raw().to_vec();
+                let tokens = eng.cost_tracker.total_tokens();
+                let m = eng.model.clone();
+                (entries, tokens, m)
+            };
+
+            if !entries.is_empty() {
+                let now = SystemTime::now();
+                let summary = engine::session::build_summary(&entries);
+                let final_response =
+                    engine::session::extract_final_response(&entries).unwrap_or_default();
+                let data = engine::session::SessionData {
+                    id: engine::session::generate_session_id(),
+                    saved_at: engine::session::format_timestamp(now),
+                    model: current_model,
+                    provider: provider_name.to_string(),
+                    cwd: cwd.to_string_lossy().to_string(),
+                    entries,
+                    total_tokens,
+                    summary,
+                    final_response,
+                };
+                engine::session::save_session(&data);
+            } else {
+                // Empty session — remove stale session index if it exists
+                let idx = config::paths::session_index_path();
+                if idx.exists() {
+                    let _ = std::fs::remove_file(&idx);
+                }
+            }
             break;
         }
     }
