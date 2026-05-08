@@ -1424,8 +1424,8 @@ fn format_permission_detail(tool_name: &str, input_json: &str) -> String {
             .get("path")
             .or_else(|| input.get("file_path"))
             .and_then(|v| v.as_str())
-            .map(|s| format!("Reading: {}", s))
-            .unwrap_or_else(|| "Reading file".into()),
+            .map(|s| format!("read {}", s))
+            .unwrap_or_else(|| "read".into()),
         "write" => {
             let path = input
                 .get("path")
@@ -1437,7 +1437,7 @@ fn format_permission_detail(tool_name: &str, input_json: &str) -> String {
                 .and_then(|v| v.as_str())
                 .map(|c| c.lines().count())
                 .unwrap_or(0);
-            format!("Writing: {} ({} lines)", path, lines)
+            format!("write {} ({} lines)", path, lines)
         }
         "edit" => {
             let path = input
@@ -1450,9 +1450,9 @@ fn format_permission_detail(tool_name: &str, input_json: &str) -> String {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let mut detail = if replace_all {
-                format!("Editing: {} (replace all)", path)
+                format!("edit {} (replace all)", path)
             } else {
-                format!("Editing: {}", path)
+                format!("edit {}", path)
             };
             // Show what will be replaced so the user can judge the edit
             if let Some(old_str) = input.get("old_string").and_then(|v| v.as_str()) {
@@ -1493,13 +1493,13 @@ fn format_permission_detail(tool_name: &str, input_json: &str) -> String {
         "web_search" => input
             .get("query")
             .and_then(|v| v.as_str())
-            .map(|s| format!("Searching: {}", s))
-            .unwrap_or_else(|| "Web search".into()),
+            .map(|s| format!("web_search: {}", s))
+            .unwrap_or_else(|| "web_search".into()),
         "web_fetch" => input
             .get("url")
             .and_then(|v| v.as_str())
-            .map(|s| format!("Fetching: {}", s))
-            .unwrap_or_else(|| "Web fetch".into()),
+            .map(|s| format!("web_fetch {}", s))
+            .unwrap_or_else(|| "web_fetch".into()),
         _ => input_json.chars().take(500).collect(),
     }
 }
@@ -1526,8 +1526,8 @@ fn format_tool_input_summary(tool_name: &str, input_json: &str) -> String {
             .get("path")
             .or_else(|| input.get("file_path"))
             .and_then(|v| v.as_str())
-            .map(|s| format!("\u{f15c} Reading {}", s))
-            .unwrap_or_else(|| "\u{f15c} Reading file".into()),
+            .map(|s| format!("\u{f15c} read {}", s))
+            .unwrap_or_else(|| "\u{f15c} read".into()),
         "write" => input
             .get("path")
             .or_else(|| input.get("file_path"))
@@ -1539,12 +1539,12 @@ fn format_tool_input_summary(tool_name: &str, input_json: &str) -> String {
                     .map(|c| c.lines().count())
                     .unwrap_or(0);
                 if lines > 0 {
-                    format!("\u{f0c7} Writing {} ({} lines)", s, lines)
+                    format!("\u{f0c7} write {} ({} lines)", s, lines)
                 } else {
-                    format!("\u{f0c7} Writing {}", s)
+                    format!("\u{f0c7} write {}", s)
                 }
             })
-            .unwrap_or_else(|| "\u{f0c7} Writing file".into()),
+            .unwrap_or_else(|| "\u{f0c7} write".into()),
         "edit" => {
             let path = input
                 .get("path")
@@ -1556,9 +1556,9 @@ fn format_tool_input_summary(tool_name: &str, input_json: &str) -> String {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             if replace_all {
-                format!("\u{f044} Editing {} (replace all)", path)
+                format!("\u{f044} edit {} (replace all)", path)
             } else {
-                format!("\u{f044} Editing {}", path)
+                format!("\u{f044} edit {}", path)
             }
         }
         "grep" => {
@@ -1582,46 +1582,46 @@ fn format_tool_input_summary(tool_name: &str, input_json: &str) -> String {
         "web_search" => input
             .get("query")
             .and_then(|v| v.as_str())
-            .map(|s| format!("\u{f0ac} Searching: {}", s))
-            .unwrap_or_else(|| "\u{f0ac} Web search".into()),
+            .map(|s| format!("\u{f0ac} web_search: {}", s))
+            .unwrap_or_else(|| "\u{f0ac} web_search".into()),
         "web_fetch" => input
             .get("url")
             .and_then(|v| v.as_str())
-            .map(|s| format!("\u{f0c1} Fetching {}", s))
-            .unwrap_or_else(|| "\u{f0c1} Web fetch".into()),
+            .map(|s| format!("\u{f0c1} web_fetch {}", s))
+            .unwrap_or_else(|| "\u{f0c1} web_fetch".into()),
         "skill_list" => {
             let cat = input.get("category").and_then(|v| v.as_str()).unwrap_or("");
             let tag = input.get("tag").and_then(|v| v.as_str()).unwrap_or("");
             if !cat.is_empty() {
-                format!("\u{f03a} Skills by category: {}", cat)
+                format!("\u{f03a} skill_list category: {}", cat)
             } else if !tag.is_empty() {
-                format!("\u{f03a} Skills by tag: {}", tag)
+                format!("\u{f03a} skill_list tag: {}", tag)
             } else {
-                "\u{f03a} Listing skills".into()
+                "\u{f03a} skill_list".into()
             }
         }
         "skill_view" => input
             .get("name")
             .and_then(|v| v.as_str())
-            .map(|s| format!("\u{f06e} Viewing skill: {}", s))
-            .unwrap_or_else(|| "\u{f06e} Viewing skill".into()),
+            .map(|s| format!("\u{f06e} skill_view {}", s))
+            .unwrap_or_else(|| "\u{f06e} skill_view".into()),
         "ask_user" => input
             .get("question")
             .and_then(|v| v.as_str())
             .map(|q| {
                 let preview: String = q.chars().take(60).collect();
                 if q.chars().count() > 60 {
-                    format!("\u{f059} Asking: {}…", preview)
+                    format!("\u{f059} ask_user: {}…", preview)
                 } else {
-                    format!("\u{f059} Asking: {}", q)
+                    format!("\u{f059} ask_user: {}", q)
                 }
             })
-            .unwrap_or_else(|| "\u{f059} Asking user".into()),
+            .unwrap_or_else(|| "\u{f059} ask_user".into()),
         "config" => input
             .get("action")
             .and_then(|v| v.as_str())
-            .map(|s| format!("\u{f013} Config: {}", s))
-            .unwrap_or_else(|| "\u{f013} Config".into()),
+            .map(|s| format!("\u{f013} config {}", s))
+            .unwrap_or_else(|| "\u{f013} config".into()),
         "memory" => {
             let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("?");
             let target = input
@@ -1633,9 +1633,9 @@ fn format_tool_input_summary(tool_name: &str, input_json: &str) -> String {
                     let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
                     let preview: String = content.chars().take(60).collect();
                     if content.len() > preview.len() {
-                        format!("\u{f0e0} Memorizing {}: {}…", target, preview)
+                        format!("\u{f0e0} memory {} add: {}…", target, preview)
                     } else {
-                        format!("\u{f0e0} Memorizing {}: {}", target, preview)
+                        format!("\u{f0e0} memory {} add: {}", target, preview)
                     }
                 }
                 "replace" => {
@@ -1644,16 +1644,16 @@ fn format_tool_input_summary(tool_name: &str, input_json: &str) -> String {
                     let old_preview: String = old.chars().take(30).collect();
                     let new_preview: String = content.chars().take(30).collect();
                     format!(
-                        "\u{f044} Updating {}: {} → {}",
+                        "\u{f044} memory {} replace: {} → {}",
                         target, old_preview, new_preview
                     )
                 }
                 "remove" => {
                     let old = input.get("old_text").and_then(|v| v.as_str()).unwrap_or("");
                     let preview: String = old.chars().take(40).collect();
-                    format!("\u{f014} Forgetting {}: {}", target, preview)
+                    format!("\u{f014} memory {} remove: {}", target, preview)
                 }
-                _ => format!("\u{f0e0} Memory {}", action),
+                _ => format!("\u{f0e0} memory {}", action),
             }
         }
         _ => format!("\u{f05a} {}", tool_name),
