@@ -135,8 +135,8 @@ impl OutputState {
 
 fn segment_lines(seg: &OutputSegment) -> usize {
     match seg {
-        OutputSegment::UserInput(_) => 1,
-        OutputSegment::AskResponse(_) => 1,
+        OutputSegment::UserInput(t) => t.lines().count().max(1),
+        OutputSegment::AskResponse(t) => t.lines().count().max(1),
         OutputSegment::Text(t) => t.lines().count().max(1),
         OutputSegment::ToolExecuting(_) => 1,
         // ToolComplete may contain multi-line diff output (\n-separated)
@@ -327,16 +327,52 @@ fn wrap_line(line: Line<'static>, max_width: usize) -> Vec<Line<'static>> {
 fn segment_to_lines(seg: &OutputSegment) -> Vec<Line<'static>> {
     match seg {
         OutputSegment::UserInput(text) => {
-            vec![Line::from(vec![
-                Span::styled("◆ ".to_string(), Style::new().fg(theme::ACCENT_DIM)),
-                Span::styled(text.clone(), Style::new().fg(theme::TEXT_BRIGHT)),
-            ])]
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            for (i, line) in text.lines().enumerate() {
+                if i == 0 {
+                    lines.push(Line::from(vec![
+                        Span::styled("◆ ".to_string(), Style::new().fg(theme::ACCENT_DIM)),
+                        Span::styled(line.to_string(), Style::new().fg(theme::TEXT_BRIGHT)),
+                    ]));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::styled("│ ".to_string(), Style::new().fg(theme::ACCENT_DIM)),
+                        Span::styled(line.to_string(), Style::new().fg(theme::TEXT_BRIGHT)),
+                    ]));
+                }
+            }
+            if lines.is_empty() {
+                vec![Line::from(vec![
+                    Span::styled("◆ ".to_string(), Style::new().fg(theme::ACCENT_DIM)),
+                    Span::styled(text.clone(), Style::new().fg(theme::TEXT_BRIGHT)),
+                ])]
+            } else {
+                lines
+            }
         }
         OutputSegment::AskResponse(text) => {
-            vec![Line::from(vec![
-                Span::styled("  ↳ ".to_string(), Style::new().fg(theme::ACCENT)),
-                Span::styled(text.clone(), Style::new().fg(theme::TEXT)),
-            ])]
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            for (i, line) in text.lines().enumerate() {
+                if i == 0 {
+                    lines.push(Line::from(vec![
+                        Span::styled("  ↳ ".to_string(), Style::new().fg(theme::ACCENT)),
+                        Span::styled(line.to_string(), Style::new().fg(theme::TEXT)),
+                    ]));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::styled("    ".to_string(), Style::default()),
+                        Span::styled(line.to_string(), Style::new().fg(theme::TEXT)),
+                    ]));
+                }
+            }
+            if lines.is_empty() {
+                vec![Line::from(vec![
+                    Span::styled("  ↳ ".to_string(), Style::new().fg(theme::ACCENT)),
+                    Span::styled(text.clone(), Style::new().fg(theme::TEXT)),
+                ])]
+            } else {
+                lines
+            }
         }
         OutputSegment::Text(text) => {
             // Render markdown to styled lines
