@@ -292,15 +292,7 @@ fn resolve_explicit(
         AuxiliaryError::ApiCall(format!("Provider '{}' not found in config", provider_name))
     })?;
 
-    let api_key = provider
-        .api_key
-        .clone()
-        .or_else(|| {
-            provider
-                .api_key_env
-                .as_ref()
-                .and_then(|env_var| std::env::var(env_var).ok())
-        })
+    let api_key = crate::config::settings::resolve_api_key_opt(provider.api_key.as_deref())
         .ok_or_else(|| AuxiliaryError::NoApiKey(provider_name.to_string()))?;
 
     let model = if task_config.model.is_empty() {
@@ -351,15 +343,7 @@ pub fn try_resolve_candidate(
         .get(provider_name)
         .ok_or_else(|| AuxiliaryError::NoApiKey(provider_name.to_string()))?;
 
-    let api_key = provider
-        .api_key
-        .clone()
-        .or_else(|| {
-            provider
-                .api_key_env
-                .as_ref()
-                .and_then(|env_var| std::env::var(env_var).ok())
-        })
+    let api_key = crate::config::settings::resolve_api_key_opt(provider.api_key.as_deref())
         .ok_or_else(|| AuxiliaryError::NoApiKey(provider_name.to_string()))?;
 
     let model = if task_config.model.is_empty() {
@@ -446,7 +430,6 @@ mod tests {
             "custom".into(),
             ProviderConfig {
                 api_key: Some("test-key".into()),
-                api_key_env: None,
                 base_url: "https://api.example.com/v1".into(),
                 default_model: "test-model".into(),
                 max_output_tokens: None,
@@ -456,7 +439,6 @@ mod tests {
             "fallback".into(),
             ProviderConfig {
                 api_key: Some("fallback-key".into()),
-                api_key_env: None,
                 base_url: "https://fallback.example.com/v1".into(),
                 default_model: "fallback-model".into(),
                 max_output_tokens: None,

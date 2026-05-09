@@ -70,10 +70,20 @@ impl Default for Settings {
 // Provider
 // ---------------------------------------------------------------------------
 
+/// Configuration for an LLM provider (e.g. "anthropic", "openai").
+///
+/// The `api_key` field supports auto-detection:
+/// - UPPER_SNAKE_CASE values (e.g. `"ANTHROPIC_API_KEY"`) are treated as
+///   environment variable names first; if the env var doesn't exist, the
+///   value is used as a literal key.
+/// - Other patterns (e.g. `"sk-abc123"`) are used as literal API keys directly.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ProviderConfig {
-    #[serde(default)]
-    pub api_key_env: Option<String>,
+    /// API key or environment variable name (auto-detected).
+    ///
+    /// Examples:
+    /// - `"ANTHROPIC_API_KEY"` → resolve from env var, fallback to literal
+    /// - `"sk-ant-xxxx"` → used directly as literal API key
     pub api_key: Option<String>,
     #[serde(default)]
     pub base_url: String,
@@ -169,9 +179,10 @@ pub struct WebSearchConfig {
     /// For searxng: the instance URL (default: "https://searx.be")
     /// For brave/tavily: usually not needed (uses official API endpoint)
     pub url: String,
-    /// Environment variable name containing the API key.
-    pub api_key_env: Option<String>,
-    /// Direct API key (not recommended, prefer api_key_env).
+    /// API key or environment variable name (auto-detected).
+    ///
+    /// - UPPER_SNAKE_CASE → treated as env var name first, fallback to literal
+    /// - Other patterns (e.g. `"BSA-xxxx"`) → used directly as literal key
     pub api_key: Option<String>,
 }
 
@@ -180,27 +191,133 @@ impl Default for WebSearchConfig {
         Self {
             provider: "searxng".into(),
             url: String::new(), // empty = use provider default
-            api_key_env: None,
             api_key: None,
         }
     }
 }
 
 impl WebSearchConfig {
-    /// Resolve the API key: prefer explicit key, then env var.
+    /// Resolve the API key with auto-detection.
     pub fn resolve_api_key(&self) -> Option<String> {
-        if let Some(ref key) = self.api_key {
-            if !key.is_empty() {
-                return Some(key.clone());
-            }
-        }
-        if let Some(ref env) = self.api_key_env {
-            return std::env::var(env).ok();
-        }
-        None
+        resolve_api_key_opt(self.api_key.as_deref())
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_looks_like_env_var() {
+        // Standard env var names → true
+        assert!(looks_like_env_var("BRAVE_API_KEY"));
+        assert!(looks_like_env_var("API_KEY"));
+        assert!(looks_like_env_var("MY_VAR_123"));
+        assert!(looks_like_env_var("A_"));
+        assert!(looks_like_env_var("X2"));
+
+        // Literal API keys → false (use raw strings to avoid Rust 2024 edition prefix parsing)
+        assert!(!looks_like_env_var(r#"BSA-xxxx-yyyy"#));
+        assert!(!looks_like_env_var(r#"sk-abc123def456"#));
+        assert!(!looks_like_env_var(r#"tvly-xxxxxxxx"#));
+        assert!(!looks_like_env_var("lower_case_key"));
+
+        // Edge cases → false
+        assert!(!looks_like_env_var("A")); // too short
+        assert!(!looks_like_env_var("123")); // no letters
+        assert!(!looks_like_env_var("has spaces"));
+        assert!(!looks_like_env_var("has.dots"));
+        assert!(!looks_like_env_var(""));
+    }
+
+    #[test]
+    fn test_web_search_resolve_api_key_literal() {
+        // Literal key (not UPPER_SNAKE_CASE) → used directly
+        let cfg = WebSearchConfig {
+            provider: "brave".into(),
+            url: String::new(),
+            api_key: Some(r#"BSA-xxxx-yyyy"#.into()),
+        };
+        assert_eq!(cfg.resolve_api_key(), Some(r#"BSA-xxxx-yyyy"#.into()));
+    }
+
+    #[test]
+    fn test_web_search_resolve_api_key_env_name_exists() {
+        // UPPER_SNAKE_CASE → try env var first
+        unsafe { std::env::set_var("ZENO_TEST_WEB_KEY", "test-key-123") };
+        let cfg = WebSearchConfig {
+            provider: "brave".into(),
+            url: String::new(),
+            api_key: Some("ZENO_TEST_WEB_KEY".into()),
+        };
+        assert_eq!(cfg.resolve_api_key(), Some("test-key-123".into()));
+        unsafe { std::env::remove_var("ZENO_TEST_WEB_KEY") };
+    }
+
+    #[test]
+    fn test_web_search_resolve_api_key_env_name_fallback() {
+        // UPPER_SNAKE_CASE but env var doesn't exist → fallback to literal
+        let cfg = WebSearchConfig {
+            provider: "brave".into(),
+            url: String::new(),
+            api_key: Some("NONEXISTENT_KEY_XYZ".into()),
+        };
+        // Env var doesn't exist → use the string itself as literal key
+        assert_eq!(cfg.resolve_api_key(), Some("NONEXISTENT_KEY_XYZ".into()));
+    }
+
+    #[test]
+    fn test_web_search_resolve_api_key_none() {
+        let cfg = WebSearchConfig::default();
+        assert!(cfg.resolve_api_key().is_none());
+    }
+
+    #[test]
+    fn test_resolve_api_key_opt_literal() {
+        assert_eq!(
+            resolve_api_key_opt(Some(r#"sk-abc123"#)),
+            Some(r#"sk-abc123"#.to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_api_key_opt_env_var() {
+        unsafe { std::env::set_var("ZENO_TEST_PROVIDER_KEY", "provider-key-456") };
+        assert_eq!(
+            resolve_api_key_opt(Some("ZENO_TEST_PROVIDER_KEY")),
+            Some("provider-key-456".to_string())
+        );
+        unsafe { std::env::remove_var("ZENO_TEST_PROVIDER_KEY") };
+    }
+
+    #[test]
+    fn test_resolve_api_key_opt_none() {
+        assert_eq!(resolve_api_key_opt(None), None);
+    }
+
+    #[test]
+    fn test_resolve_api_key_opt_empty() {
+        assert_eq!(resolve_api_key_opt(Some("")), None);
+    }
+
+    #[test]
+    fn test_resolve_provider_api_key() {
+        let provider = ProviderConfig {
+            api_key: Some("ANTHROPIC_API_KEY".into()),
+            base_url: String::new(),
+            default_model: String::new(),
+            max_output_tokens: None,
+        };
+        // env var doesn't exist → fallback to literal
+        assert_eq!(resolve_api_key(&provider).unwrap(), "ANTHROPIC_API_KEY");
+    }
+
+    #[test]
+    fn test_resolve_provider_api_key_missing() {
+        let provider = ProviderConfig::default();
+        assert!(resolve_api_key(&provider).is_err());
+    }
+}
 // ---------------------------------------------------------------------------
 // MCP
 // ---------------------------------------------------------------------------
@@ -378,6 +495,8 @@ pub struct AuxiliaryTaskConfig {
     #[serde(default)]
     pub model: String,
     pub base_url: Option<String>,
+    /// API key or environment variable name (auto-detected).
+    /// Same logic as `ProviderConfig.api_key` and `WebSearchConfig.api_key`.
     pub api_key: Option<String>,
     pub timeout: f64,
     /// Per-task extra body fields (provider-specific request parameters).
@@ -423,15 +542,49 @@ impl AuxiliaryTaskConfig {
 // Load / resolve
 // ---------------------------------------------------------------------------
 
-/// Resolve the API key for a provider: prefer explicit `api_key`, then env var.
+/// Returns true if the string looks like an environment variable name:
+/// UPPER_SNAKE_CASE — only ASCII uppercase letters, digits, and underscores,
+/// must start with a letter or underscore, at least 2 characters.
+pub fn looks_like_env_var(s: &str) -> bool {
+    if s.len() < 2 {
+        return false;
+    }
+    let mut has_letter = false;
+    for (i, c) in s.chars().enumerate() {
+        match c {
+            'A'..='Z' => has_letter = true,
+            '0'..='9' => {}
+            '_' => {
+                if i == 0 {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    has_letter
+}
+
+/// Resolve an optional `api_key` value with auto-detection.
+///
+/// - If the value looks like an env var name (UPPER_SNAKE_CASE),
+///   try reading from the environment first; fall back to using it as a literal key.
+/// - Otherwise, use it as a literal key directly.
+pub fn resolve_api_key_opt(value: Option<&str>) -> Option<String> {
+    value.and_then(|key| {
+        if key.is_empty() {
+            return None;
+        }
+        if looks_like_env_var(key) {
+            Some(std::env::var(key).unwrap_or_else(|_| key.to_string()))
+        } else {
+            Some(key.to_string())
+        }
+    })
+}
+
+/// Resolve the API key for a `ProviderConfig` with auto-detection.
 pub fn resolve_api_key(provider: &ProviderConfig) -> anyhow::Result<String> {
-    if let Some(ref key) = provider.api_key {
-        return Ok(key.clone());
-    }
-    if let Some(ref env_var) = provider.api_key_env {
-        std::env::var(env_var)
-            .map_err(|_| anyhow::anyhow!("Environment variable {} not set", env_var))
-    } else {
-        anyhow::bail!("No api_key or api_key_env configured for provider")
-    }
+    resolve_api_key_opt(provider.api_key.as_deref())
+        .ok_or_else(|| anyhow::anyhow!("No api_key configured for provider"))
 }

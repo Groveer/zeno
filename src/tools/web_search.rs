@@ -3,10 +3,14 @@
 //! Users can customize the search provider via `zn.web_search({...})` in init.lua:
 //!
 //! ```lua
-//! zn.web_search({ provider = "brave", api_key_env = "BRAVE_API_KEY" })
-//! zn.web_search({ provider = "tavily", api_key_env = "TAVILY_API_KEY" })
+//! zn.web_search({ provider = "brave", api_key = "BRAVE_API_KEY" })
+//! zn.web_search({ provider = "tavily", api_key = "TAVILY_API_KEY" })
 //! zn.web_search({ provider = "searxng", url = "http://localhost:8888" })
 //! ```
+//!
+//! The `api_key` field auto-detects: UPPER_SNAKE_CASE values are tried as
+//! environment variable names first (fallback to literal); other patterns
+//! (e.g. "BSA-xxxx") are used as literal keys directly.
 
 use super::base::{Tool, ToolContext, ToolError};
 use crate::config::settings::WebSearchConfig;
@@ -213,8 +217,7 @@ impl WebSearchTool {
     async fn search_brave(&self, query: &str, limit: usize) -> Result<String, ToolError> {
         let api_key = self.config.resolve_api_key().ok_or_else(|| {
             ToolError::Execution(
-                "Brave Search requires an API key. Set api_key_env or api_key in zn.web_search()."
-                    .into(),
+                "Brave Search requires an API key. Set api_key in zn.web_search().".into(),
             )
         })?;
 
@@ -278,8 +281,7 @@ impl WebSearchTool {
     async fn search_tavily(&self, query: &str, limit: usize) -> Result<String, ToolError> {
         let api_key = self.config.resolve_api_key().ok_or_else(|| {
             ToolError::Execution(
-                "Tavily Search requires an API key. Set api_key_env or api_key in zn.web_search()."
-                    .into(),
+                "Tavily Search requires an API key. Set api_key in zn.web_search().".into(),
             )
         })?;
 

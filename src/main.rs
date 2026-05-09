@@ -189,8 +189,8 @@ async fn main() -> anyhow::Result<()> {
             "Provider '{}' not configured. Add it to ~/.config/zeno/init.lua\n\
              \n\
              local zn = require 'zeno'\n\
-             zn.provider(\"anthropic\", {{ api_key_env = \"ANTHROPIC_API_KEY\", base_url = \"https://api.anthropic.com\", default_model = \"claude-sonnet-4-20250514\" }})\n\
-             zn.provider(\"openai\", {{ api_key_env = \"OPENAI_API_KEY\", base_url = \"https://api.openai.com/v1\", default_model = \"gpt-4o\" }})\n\
+             zn.provider(\"anthropic\", {{ api_key = \"ANTHROPIC_API_KEY\", base_url = \"https://api.anthropic.com\", default_model = \"claude-sonnet-4-20250514\" }})\n\
+             zn.provider(\"openai\", {{ api_key = \"OPENAI_API_KEY\", base_url = \"https://api.openai.com/v1\", default_model = \"gpt-4o\" }})\n\
              zn.set_provider(\"anthropic\")",
             provider_name
         )

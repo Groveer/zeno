@@ -490,7 +490,7 @@ fn register_zeno_api(lua: &Lua, table: &mlua::Table) -> anyhow::Result<()> {
     )?;
 
     // --- Web Search ---
-    // zn.web_search({ provider = "brave", api_key_env = "BRAVE_API_KEY" })
+    // zn.web_search({ provider = "brave", api_key = "BRAVE_API_KEY" })
     table.set(
         "web_search",
         lua.create_function(move |lua, opts: mlua::Table| {
@@ -850,7 +850,7 @@ fn validate(settings: &Settings) -> anyhow::Result<()> {
             "No providers configured. Add at least one provider in init.lua:\n\
              \n\
              local zn = require 'zeno'\n\
-             zn.provider(\"my-provider\", {{ base_url = \"...\", api_key_env = \"...\" }})\n\
+             zn.provider(\"my-provider\", {{ base_url = \"...\", api_key = \"...\" }})\n\
              zn.set_provider(\"my-provider\")\n\
              return zn.config()"
         );
@@ -900,7 +900,7 @@ mod tests {
     const MINIMAL_INIT_LUA: &str = r#"
         local zn = require 'zeno'
         zn.provider("anthropic", {
-            api_key_env = "ANTHROPIC_API_KEY",
+            api_key = "ANTHROPIC_API_KEY",
             base_url = "https://api.anthropic.com",
             default_model = "claude-sonnet-4-20250514",
         })
@@ -934,7 +934,7 @@ mod tests {
         let init_lua = r#"
             local zn = require 'zeno'
             zn.provider("anthropic", {
-                api_key_env = "ANTHROPIC_API_KEY",
+                api_key = "ANTHROPIC_API_KEY",
                 base_url = "https://api.anthropic.com",
                 default_model = "claude-sonnet-4-20250514",
             })
@@ -1031,7 +1031,7 @@ mod tests {
         let init_lua = r#"
             local zn = require 'zeno'
             zn.provider("anthropic", {
-                api_key_env = "ANTHROPIC_API_KEY",
+                api_key = "ANTHROPIC_API_KEY",
                 base_url = "https://api.anthropic.com",
                 default_model = "claude-sonnet-4-20250514",
             })
@@ -1114,7 +1114,7 @@ mod tests {
         let init_lua = r#"
 local zn = require 'zeno'
 zn.provider("anthropic", {
-    api_key_env = "ANTHROPIC_API_KEY",
+    api_key = "ANTHROPIC_API_KEY",
     base_url = "https://api.anthropic.com",
     default_model = "claude-sonnet-4-20250514",
 })
@@ -1135,7 +1135,7 @@ return zn.config()
         let init_lua = r#"
 local zn = require 'zeno'
 zn.provider("anthropic", {
-    api_key_env = "ANTHROPIC_API_KEY",
+    api_key = "ANTHROPIC_API_KEY",
     base_url = "https://api.anthropic.com",
     default_model = "claude-sonnet-4-20250514",
 })
@@ -1168,30 +1168,29 @@ return zn.config()
         let settings = load_from_tmpdir(MINIMAL_INIT_LUA).unwrap();
         assert_eq!(settings.web_search_config.provider, "searxng");
         assert!(settings.web_search_config.url.is_empty());
-        assert!(settings.web_search_config.api_key_env.is_none());
         assert!(settings.web_search_config.api_key.is_none());
     }
 
     #[test]
     fn test_web_search_config_brave() {
         let init_lua = r#"
-            local zn = require 'zeno'
-            zn.provider("anthropic", {
-                api_key_env = "ANTHROPIC_API_KEY",
-                base_url = "https://api.anthropic.com",
-                default_model = "claude-sonnet-4-20250514",
-            })
-            zn.set_provider("anthropic")
-            zn.web_search({
-                provider = "brave",
-                api_key_env = "BRAVE_API_KEY",
-            })
-            return zn.config()
-        "#;
+    local zn = require 'zeno'
+    zn.provider("anthropic", {
+        api_key = "ANTHROPIC_API_KEY",
+        base_url = "https://api.anthropic.com",
+        default_model = "claude-sonnet-4-20250514",
+    })
+    zn.set_provider("anthropic")
+    zn.web_search({
+        provider = "brave",
+        api_key = "BRAVE_API_KEY",
+    })
+    return zn.config()
+    "#;
         let settings = load_from_tmpdir(init_lua).unwrap();
         assert_eq!(settings.web_search_config.provider, "brave");
         assert_eq!(
-            settings.web_search_config.api_key_env.as_deref(),
+            settings.web_search_config.api_key.as_deref(),
             Some("BRAVE_API_KEY")
         );
     }
@@ -1199,33 +1198,32 @@ return zn.config()
     #[test]
     fn test_web_search_config_tavily() {
         let init_lua = r#"
-            local zn = require 'zeno'
-            zn.provider("anthropic", {
-                api_key_env = "ANTHROPIC_API_KEY",
-                base_url = "https://api.anthropic.com",
-                default_model = "claude-sonnet-4-20250514",
-            })
-            zn.set_provider("anthropic")
-            zn.web_search({
-                provider = "tavily",
-                api_key_env = "TAVILY_API_KEY",
-            })
-            return zn.config()
-        "#;
+    local zn = require 'zeno'
+    zn.provider("anthropic", {
+        api_key = "ANTHROPIC_API_KEY",
+        base_url = "https://api.anthropic.com",
+        default_model = "claude-sonnet-4-20250514",
+    })
+    zn.set_provider("anthropic")
+    zn.web_search({
+        provider = "tavily",
+        api_key = "TAVILY_API_KEY",
+    })
+    return zn.config()
+    "#;
         let settings = load_from_tmpdir(init_lua).unwrap();
         assert_eq!(settings.web_search_config.provider, "tavily");
         assert_eq!(
-            settings.web_search_config.api_key_env.as_deref(),
+            settings.web_search_config.api_key.as_deref(),
             Some("TAVILY_API_KEY")
         );
     }
-
     #[test]
     fn test_web_search_config_custom_searxng() {
         let init_lua = r#"
             local zn = require 'zeno'
             zn.provider("anthropic", {
-                api_key_env = "ANTHROPIC_API_KEY",
+                api_key = "ANTHROPIC_API_KEY",
                 base_url = "https://api.anthropic.com",
                 default_model = "claude-sonnet-4-20250514",
             })
@@ -1253,7 +1251,7 @@ return zn.config()
         let init_lua = r#"
             local zn = require 'zeno'
             zn.provider("anthropic", {
-                api_key_env = "ANTHROPIC_API_KEY",
+                api_key = "ANTHROPIC_API_KEY",
                 base_url = "https://api.anthropic.com",
             })
             zn.set_provider("anthropic")
@@ -1283,7 +1281,7 @@ return zn.config()
         let init_lua = r#"
             local zn = require 'zeno'
             zn.provider("anthropic", {
-                api_key_env = "ANTHROPIC_API_KEY",
+                api_key = "ANTHROPIC_API_KEY",
                 base_url = "https://api.anthropic.com",
             })
             zn.set_provider("anthropic")
@@ -1303,7 +1301,7 @@ return zn.config()
         let init_lua = r#"
             local zn = require 'zeno'
             zn.provider("anthropic", {
-                api_key_env = "ANTHROPIC_API_KEY",
+                api_key = "ANTHROPIC_API_KEY",
                 base_url = "https://api.anthropic.com",
             })
             zn.set_provider("anthropic")
@@ -1322,7 +1320,7 @@ return zn.config()
         let init_lua = r#"
             local zn = require 'zeno'
             zn.provider("anthropic", {
-                api_key_env = "ANTHROPIC_API_KEY",
+                api_key = "ANTHROPIC_API_KEY",
                 base_url = "https://api.anthropic.com",
             })
             zn.set_provider("anthropic")
@@ -1344,7 +1342,7 @@ return zn.config()
         let init_lua = r#"
             local zn = require 'zeno'
             zn.provider("anthropic", {
-                api_key_env = "ANTHROPIC_API_KEY",
+                api_key = "ANTHROPIC_API_KEY",
                 base_url = "https://api.anthropic.com",
             })
             zn.set_provider("anthropic")
@@ -1374,7 +1372,7 @@ return zn.config()
         let init_lua = r#"
             local zn = require 'zeno'
             zn.provider("anthropic", {
-                api_key_env = "ANTHROPIC_API_KEY",
+                api_key = "ANTHROPIC_API_KEY",
                 base_url = "https://api.anthropic.com",
             })
             zn.set_provider("anthropic")
@@ -1414,7 +1412,7 @@ return zn.config()
         let init_lua = r#"
             local zn = require 'zeno'
             zn.provider("anthropic", {
-                api_key_env = "ANTHROPIC_API_KEY",
+                api_key = "ANTHROPIC_API_KEY",
                 base_url = "https://api.anthropic.com",
             })
             zn.set_provider("anthropic")
@@ -1445,7 +1443,7 @@ return zn.config()
         let init_lua = r#"
             local zn = require 'zeno'
             zn.provider("anthropic", {
-                api_key_env = "ANTHROPIC_API_KEY",
+                api_key = "ANTHROPIC_API_KEY",
                 base_url = "https://api.anthropic.com",
             })
             zn.set_provider("anthropic")
@@ -1466,7 +1464,7 @@ return zn.config()
         let init_lua = r#"
             local zn = require 'zeno'
             zn.provider("anthropic", {
-                api_key_env = "ANTHROPIC_API_KEY",
+                api_key = "ANTHROPIC_API_KEY",
                 base_url = "https://api.anthropic.com",
             })
             zn.set_provider("anthropic")
@@ -1488,7 +1486,7 @@ return zn.config()
         let init_lua = r#"
             local zn = require 'zeno'
             zn.provider("anthropic", {
-                api_key_env = "ANTHROPIC_API_KEY",
+                api_key = "ANTHROPIC_API_KEY",
                 base_url = "https://api.anthropic.com",
             })
             zn.set_provider("anthropic")
@@ -1505,7 +1503,7 @@ return zn.config()
         let init_lua = r#"
             local zn = require 'zeno'
             zn.provider("anthropic", {
-                api_key_env = "ANTHROPIC_API_KEY",
+                api_key = "ANTHROPIC_API_KEY",
                 base_url = "https://api.anthropic.com",
             })
             zn.set_provider("anthropic")
@@ -1532,7 +1530,7 @@ return zn.config()
         let init_lua = r#"
             local zn = require 'zeno'
             zn.provider("anthropic", {
-                api_key_env = "ANTHROPIC_API_KEY",
+                api_key = "ANTHROPIC_API_KEY",
                 base_url = "https://api.anthropic.com",
             })
             zn.set_provider("anthropic")

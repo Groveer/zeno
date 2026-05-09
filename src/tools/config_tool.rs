@@ -66,7 +66,6 @@ fn mask_api_keys(content: &str) -> String {
         .lines()
         .map(|line| {
             if line.contains("api_key:")
-                && !line.contains("api_key_env:")
                 && let Some(idx) = line.find(':')
             {
                 let prefix = &line[..=idx];

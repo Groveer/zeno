@@ -16,21 +16,21 @@ local zn = require("zeno")
 
 -- Anthropic (default)
 zn.provider("anthropic", {
-  api_key_env = "ANTHROPIC_API_KEY",
+	api_key = "ANTHROPIC_API_KEY",  -- auto-detected as env var name
   base_url = "https://api.anthropic.com",
   default_model = "claude-sonnet-4-20250514",
 })
 
 -- OpenAI compatible
 zn.provider("openai", {
-  api_key_env = "OPENAI_API_KEY",
+	api_key = "OPENAI_API_KEY",  -- auto-detected as env var name
   base_url = "https://api.openai.com/v1",
   default_model = "gpt-4o",
 })
 
 -- Custom OpenAI-compatible endpoint (e.g. Groveer, DeepSeek, local Ollama)
 -- zn.provider("groveer", {
---   api_key_env = "GROVEER_API_KEY",
+--   api_key = "GROVEER_API_KEY",  -- auto-detected as env var name
 --   base_url = "https://cpa.groveer.com/v1",
 --   default_model = "glm-5.1",
 -- })
@@ -70,9 +70,10 @@ zn.provider("openai", {
 --   "duckduckgo"  — DuckDuckGo Lite (no key needed)
 --
 -- zn.web_search({ provider = "searxng", url = "http://localhost:8888" })
--- zn.web_search({ provider = "brave", api_key_env = "BRAVE_API_KEY" })
--- zn.web_search({ provider = "tavily", api_key_env = "TAVILY_API_KEY" })
+-- zn.web_search({ provider = "brave", api_key = "BRAVE_API_KEY" })  -- auto-detected as env var name
+-- zn.web_search({ provider = "tavily", api_key = "TAVILY_API_KEY" })
 -- zn.web_search({ provider = "duckduckgo" })
+-- zn.web_search({ provider = "brave", api_key = "BSA-xxxx-yyyy" })  -- literal key (not UPPER_SNAKE_CASE)
 
 -- ═══════════════════════════════════════════════
 -- MCP Servers (lazy-loaded — zero startup cost)
