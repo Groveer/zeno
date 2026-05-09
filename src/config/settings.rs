@@ -129,7 +129,7 @@ impl Default for ToolsConfig {
             glob: true,
             grep: true,
             web_search: true,
-            web_fetch: false,
+            web_fetch: true,
         }
     }
 }

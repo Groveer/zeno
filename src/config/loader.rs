@@ -124,7 +124,7 @@ fn load_lua(
     tools_defaults.set("glob", true)?;
     tools_defaults.set("grep", true)?;
     tools_defaults.set("web_search", true)?;
-    tools_defaults.set("web_fetch", false)?;
+    tools_defaults.set("web_fetch", true)?;
     lua.set_named_registry_value("_rc_tools_defaults", tools_defaults)?;
 
     let zeno_table = lua.create_table()?;
@@ -923,10 +923,7 @@ mod tests {
     fn test_load_preserves_tool_defaults() {
         let settings = load_from_tmpdir(MINIMAL_INIT_LUA).unwrap();
         assert!(settings.tools.bash, "bash should default to true");
-        assert!(
-            !settings.tools.web_fetch,
-            "web_fetch should default to false"
-        );
+        assert!(settings.tools.web_fetch, "web_fetch should default to true");
     }
 
     #[test]
@@ -939,12 +936,15 @@ mod tests {
                 default_model = "claude-sonnet-4-20250514",
             })
             zn.set_provider("anthropic")
-            zn.tool("web_fetch", true)
+            zn.tool("web_fetch", false)
             zn.tool("bash", false)
             return zn.config()
         "#;
         let settings = load_from_tmpdir(init_lua).unwrap();
-        assert!(settings.tools.web_fetch, "web_fetch should be enabled");
+        assert!(
+            !settings.tools.web_fetch,
+            "web_fetch should be disabled via override"
+        );
         assert!(!settings.tools.bash, "bash should be disabled");
         // Other tools should keep defaults
         assert!(settings.tools.read, "read should default to true");
