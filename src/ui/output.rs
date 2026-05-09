@@ -21,6 +21,8 @@ use super::theme;
 pub enum OutputSegment {
     /// User input echo.
     UserInput(String),
+    /// Question from ask_user tool — icon on first line, indented continuation.
+    AskQuestion(String),
     /// Response to ask_user tool — visually indented under the question.
     AskResponse(String),
     /// Assistant text (LLM response).
@@ -307,6 +309,30 @@ fn segment_to_lines(seg: &OutputSegment) -> Vec<Line<'static>> {
                 vec![Line::from(vec![
                     Span::styled("◆ ".to_string(), Style::new().fg(theme::ACCENT_DIM)),
                     Span::styled(text.clone(), Style::new().fg(theme::TEXT_BRIGHT)),
+                ])]
+            } else {
+                lines
+            }
+        }
+        OutputSegment::AskQuestion(text) => {
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            for (i, line) in text.lines().enumerate() {
+                if i == 0 {
+                    lines.push(Line::from(vec![
+                        Span::styled("   ".to_string(), Style::new().fg(theme::ACCENT)),
+                        Span::styled(line.to_string(), Style::new().fg(theme::TEXT)),
+                    ]));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::styled("    ".to_string(), Style::default()),
+                        Span::styled(line.to_string(), Style::new().fg(theme::TEXT)),
+                    ]));
+                }
+            }
+            if lines.is_empty() {
+                vec![Line::from(vec![
+                    Span::styled("   ".to_string(), Style::new().fg(theme::ACCENT)),
+                    Span::styled(text.clone(), Style::new().fg(theme::TEXT)),
                 ])]
             } else {
                 lines

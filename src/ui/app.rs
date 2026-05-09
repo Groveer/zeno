@@ -441,8 +441,8 @@ impl App {
                     question,
                     response_tx,
                 } => {
-                    // The question is already shown via ToolExecuting from format_tool_input_summary
-                    // — no need for a duplicate Status line here.
+                    self.output
+                        .push(OutputSegment::AskQuestion(question.clone()));
                     // Extract the oneshot sender from the Arc<Mutex>
                     let tx = {
                         let mut guard = response_tx.lock().unwrap();

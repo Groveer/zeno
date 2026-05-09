@@ -1702,18 +1702,7 @@ fn format_tool_input_summary(tool_name: &str, input_json: &str) -> String {
             .and_then(|v| v.as_str())
             .map(|s| format!("\u{f06e} skill_view {}", s))
             .unwrap_or_else(|| "\u{f06e} skill_view".into()),
-        "ask_user" => input
-            .get("question")
-            .and_then(|v| v.as_str())
-            .map(|q| {
-                let preview: String = q.chars().take(60).collect();
-                if q.chars().count() > 60 {
-                    format!("\u{f059} ask_user: {}…", preview)
-                } else {
-                    format!("\u{f059} ask_user: {}", q)
-                }
-            })
-            .unwrap_or_else(|| "\u{f059} ask_user".into()),
+        "ask_user" => "\u{f059} ask_user".into(),
         "config" => input
             .get("action")
             .and_then(|v| v.as_str())
