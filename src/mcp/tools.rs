@@ -41,7 +41,7 @@ impl Tool for McpListServersTool {
             "type": "function",
             "function": {
                 "name": "mcp_list_servers",
-                "description": "List all configured MCP servers and their current status (stopped, starting, connected, failed).",
+                "description": "List all configured MCP servers and their current status.",
                 "parameters": {
                     "type": "object",
                     "properties": {},
@@ -85,13 +85,13 @@ impl Tool for McpListToolsTool {
             "type": "function",
             "function": {
                 "name": "mcp_list_tools",
-                "description": "Discover available tools on a specific MCP server. Connects to the server if not already connected (on-demand startup).",
+                "description": "Discover available tools on an MCP server. Connects on-demand if not already connected. Returns tool names, descriptions, AND full parameter schemas — you can call tools directly without needing mcp_describe_tool.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "server_name": {
                             "type": "string",
-                            "description": "Name of the MCP server to query"
+                            "description": "MCP server to query."
                         }
                     },
                     "required": ["server_name"]
@@ -139,17 +139,17 @@ impl Tool for McpDescribeToolTool {
             "type": "function",
             "function": {
                 "name": "mcp_describe_tool",
-                "description": "Get detailed schema for a specific tool on an MCP server. Returns the tool's parameter schema.",
+                "description": "Get detailed parameter schema for a specific MCP tool. Usually unnecessary — mcp_list_tools already returns full schemas for all tools.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "server_name": {
                             "type": "string",
-                            "description": "Name of the MCP server"
+                            "description": "MCP server name."
                         },
                         "tool_name": {
                             "type": "string",
-                            "description": "Name of the tool to describe"
+                            "description": "Tool to describe."
                         }
                     },
                     "required": ["server_name", "tool_name"]
@@ -232,21 +232,21 @@ impl Tool for McpCallToolTool {
             "type": "function",
             "function": {
                 "name": "mcp_call_tool",
-                "description": "Execute a tool on a specific MCP server. Connects to the server if not already connected (on-demand startup). Use mcp_list_tools first to discover available tools.",
+                "description": "Execute a tool on an MCP server. Connects on-demand if not already connected. Use mcp_list_tools first to discover available tools and their parameter schemas.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "server_name": {
                             "type": "string",
-                            "description": "Name of the MCP server"
+                            "description": "MCP server name."
                         },
                         "tool_name": {
                             "type": "string",
-                            "description": "Name of the tool to call"
+                            "description": "Tool to call."
                         },
                         "arguments": {
                             "type": "object",
-                            "description": "Arguments to pass to the tool (optional)"
+                            "description": "Arguments to pass (optional)."
                         }
                     },
                     "required": ["server_name", "tool_name"]

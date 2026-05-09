@@ -53,17 +53,17 @@ impl Tool for WebSearchTool {
             "type": "function",
             "function": {
                 "name": "web_search",
-                "description": "Search the web for information. Returns a list of results with titles, URLs, and snippets.",
+                "description": "Search the web for information. Returns titles, URLs, and snippets.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "The search query."
+                            "description": "Search query."
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "Maximum number of results (default: 5, max: 10).",
+                            "description": "Max results (default: 5, max: 10).",
                             "default": 5
                         }
                     },

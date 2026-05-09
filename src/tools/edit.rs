@@ -43,21 +43,21 @@ impl Tool for EditTool {
             "type": "function",
             "function": {
                 "name": "edit",
-                "description": "Perform a find-and-replace edit within a file. Uses multi-strategy fuzzy matching to handle common LLM errors with indentation, whitespace, and escape sequences. The old_string must be unique in the file. Use this for targeted edits instead of rewriting entire files.",
+                "description": "Find-and-replace within a file. Uses fuzzy matching to handle common LLM errors with indentation and whitespace. old_string must be unique in the file. Use this for targeted edits instead of rewriting entire files.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Path to the file to edit."
+                            "description": "File path to edit."
                         },
                         "old_string": {
                             "type": "string",
-                            "description": "The exact text to find and replace. Must be unique within the file. Fuzzy matching will handle minor differences."
+                            "description": "Text to find and replace. Must be unique in the file. Fuzzy matching handles minor differences."
                         },
                         "new_string": {
                             "type": "string",
-                            "description": "The replacement text. Use empty string to delete the matched text."
+                            "description": "Replacement text. Use empty string to delete."
                         },
                         "replace_all": {
                             "type": "boolean",

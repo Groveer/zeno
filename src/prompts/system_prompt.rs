@@ -3,7 +3,7 @@
 //! The system prompt is built from:
 //! 1. Core identity & role declaration (always present)
 //! 2. Key principles (always present)
-//! 3. Tool list with descriptions
+//! 3. Tool name list (descriptions are in API schemas, not duplicated here)
 //! 4. Skills Tier 0: category index + skill loading workflow
 //! 5. Runtime context (cwd, OS, git branch)
 //! 6. Project instructions (CLAUDE.md / AGENTS.md)
@@ -25,7 +25,7 @@ use crate::config::settings::RoleConfig;
 use crate::prompts::claudemd;
 use crate::prompts::context::RuntimeContext;
 use crate::skills::registry::SkillRegistry;
-use crate::tools::base::{ToolRegistry, ToolSummary};
+use crate::tools::base::ToolRegistry;
 
 /// Build the complete system prompt.
 ///
@@ -41,7 +41,7 @@ pub fn build(
     let mut parts = vec![
         core_identity(role_config),
         guidelines(role_config),
-        tools_block(&tool_registry.summaries()),
+        tools_block(&tool_registry.names()),
     ];
 
     // 5. Skills Tier 0: category index + loading workflow
@@ -115,21 +115,17 @@ fn guidelines(role: &RoleConfig) -> String {
 }
 
 /// Format the tool list as a readable block for the system prompt.
-fn tools_block(summaries: &[ToolSummary]) -> String {
-    if summaries.is_empty() {
+///
+/// Only lists tool names — descriptions are already in the API tool schemas
+/// sent with every request, so repeating them here would be redundant and
+/// waste tokens. The system prompt just needs to tell the LLM what tools
+/// exist so it can decide which to use; the API schemas provide the details.
+fn tools_block(names: &[&str]) -> String {
+    if names.is_empty() {
         return "## Tools\n\n(No tools registered.)".to_string();
     }
 
-    let mut lines = Vec::new();
-    lines.push(format!("## Tools ({} available)\n", summaries.len()));
-    lines.push("You have access to the following tools:\n".to_string());
-
-    for s in summaries {
-        let desc = truncate_description(&s.description);
-        lines.push(format!("- **{}**: {}", s.name, desc));
-    }
-
-    lines.join("\n")
+    format!("## Tools ({} available)\n\n{}", names.len(), names.join(", "))
 }
 
 // ---------------------------------------------------------------------------
@@ -300,20 +296,14 @@ mod tests {
 
     #[test]
     fn test_tools_block_with_tools() {
-        let summaries = vec![
-            ToolSummary {
-                name: "bash".into(),
-                description: "Execute a shell command.".into(),
-            },
-            ToolSummary {
-                name: "read".into(),
-                description: "Read the contents of a file.".into(),
-            },
-        ];
-        let block = tools_block(&summaries);
+        let names = vec!["bash", "read"];
+        let block = tools_block(&names);
         assert!(block.contains("2 available"));
-        assert!(block.contains("**bash**"));
-        assert!(block.contains("**read**"));
+        assert!(block.contains("bash"));
+        assert!(block.contains("read"));
+        // Descriptions should NOT be in the system prompt block (they're in API schemas)
+        assert!(!block.contains("Execute"));
+        assert!(!block.contains("Read the"));
     }
 
     #[test]

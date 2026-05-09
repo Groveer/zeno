@@ -217,7 +217,9 @@ impl McpManager {
         }
     }
 
-    /// Discover tools on a server (connects if needed). Returns summary text.
+    /// Discover tools on a server (connects if needed). Returns summary with
+    /// full parameter schemas so LLM can call tools directly without needing
+    /// a separate mcp_describe_tool round-trip.
     pub async fn discover_tools(
         &mut self,
         name: &str,
@@ -237,11 +239,16 @@ impl McpManager {
             .iter()
             .map(|t| {
                 let desc = t.description.as_deref().unwrap_or("");
-                if desc.is_empty() {
+                let header = if desc.is_empty() {
                     format!("- {}", t.name)
                 } else {
                     format!("- {}: {}", t.name, desc)
-                }
+                };
+                // Include parameter schema inline so LLM can construct
+                // arguments without calling mcp_describe_tool separately.
+                let params = serde_json::to_string(&t.input_schema)
+                    .unwrap_or_else(|_| "{}".into());
+                format!("{}\n  params: {}", header, params)
             })
             .collect();
 

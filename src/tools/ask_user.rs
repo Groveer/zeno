@@ -25,13 +25,13 @@ impl Tool for AskUserTool {
             "type": "function",
             "function": {
                 "name": "ask_user",
-                "description": "Ask the user a question and get their response. Use when you need clarification or a decision from the user.",
+                "description": "Ask the user a question and get their response. Use when you need clarification or a decision.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "question": {
                             "type": "string",
-                            "description": "The question to ask the user."
+                            "description": "Question to ask."
                         }
                     },
                     "required": ["question"]

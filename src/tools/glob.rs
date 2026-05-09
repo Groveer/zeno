@@ -32,11 +32,11 @@ impl Tool for GlobTool {
                         },
                         "path": {
                             "type": "string",
-                            "description": "Base directory to search in (default: cwd)."
+                            "description": "Base directory (default: cwd)."
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "Maximum results to return (default: 50).",
+                            "description": "Max results (default: 50).",
                             "default": 50
                         }
                     },

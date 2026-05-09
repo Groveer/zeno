@@ -128,7 +128,7 @@ impl Tool for BashTool {
             "type": "function",
             "function": {
                 "name": "bash",
-                "description": "Execute a shell command and return its output. Use for running builds, tests, git operations, and any CLI tool.",
+                "description": "Execute a shell command and return its output.",
                 "parameters": {
                     "type": "object",
                     "properties": {

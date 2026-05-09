@@ -131,16 +131,6 @@ pub trait Tool: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// Tool Summary
-// ---------------------------------------------------------------------------
-
-/// Lightweight summary of a tool for system prompt injection.
-pub struct ToolSummary {
-    pub name: String,
-    pub description: String,
-}
-
-// ---------------------------------------------------------------------------
 // Tool Registry
 // ---------------------------------------------------------------------------
 
@@ -199,25 +189,5 @@ impl ToolRegistry {
     /// List registered tool names.
     pub fn names(&self) -> Vec<&str> {
         self.tools.keys().map(|s| s.as_str()).collect()
-    }
-
-    /// Get summaries of all registered tools (name + description) for system prompt.
-    pub fn summaries(&self) -> Vec<ToolSummary> {
-        self.tools
-            .values()
-            .map(|t| {
-                let desc = t
-                    .schema()
-                    .get("function")
-                    .and_then(|f| f.get("description"))
-                    .and_then(|d| d.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                ToolSummary {
-                    name: t.name().to_string(),
-                    description: desc,
-                }
-            })
-            .collect()
     }
 }

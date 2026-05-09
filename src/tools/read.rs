@@ -35,27 +35,27 @@ impl Tool for ReadTool {
             "type": "function",
             "function": {
                 "name": "read",
-                "description": "Read the contents of a file. Returns file content with line numbers. For understanding a file, use a large limit (e.g. 2000) to read more at once and avoid slow multiple round-trips. Use offset and limit for large files. Use context to read around a specific line (e.g. after grep).",
+                "description": "Read file contents with line numbers. Use large limit (e.g. 2000) to read more at once. Use offset+limit for large files, offset+context to read around a line.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Path to the file to read (relative to cwd or absolute)."
+                            "description": "File path (relative to cwd or absolute)."
                         },
                         "offset": {
                             "type": "integer",
-                            "description": "Line number to start reading from (1-indexed, default: 1).",
+                            "description": "Start line (1-indexed, default: 1).",
                             "default": 1
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "Maximum number of lines to read (default: 500, max: 2000). Use large values (e.g. 2000) when you need to read most of a file.",
+                            "description": "Max lines to read (default: 500, max: 2000).",
                             "default": 500
                         },
                         "context": {
                             "type": "integer",
-                            "description": "Read N lines of context around `offset` (before and after). Mutually exclusive with limit. Example: offset=50, context=10 reads lines 40-60."
+                            "description": "Lines of context around offset. Mutually exclusive with limit. Example: offset=50, context=10 reads lines 40-60."
                         }
                     },
                     "required": ["path"]

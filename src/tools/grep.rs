@@ -28,7 +28,7 @@ impl Tool for GrepTool {
             "type": "function",
             "function": {
                 "name": "grep",
-                "description": "Search file contents using a regex pattern. Returns matching lines with file paths and line numbers.",
+                "description": "Search file contents with regex. Returns matching lines with file paths and line numbers.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -46,12 +46,12 @@ impl Tool for GrepTool {
                         },
                         "context": {
                             "type": "integer",
-                            "description": "Number of context lines before/after each match (default: 0).",
+                            "description": "Context lines before/after each match (default: 0).",
                             "default": 0
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "Maximum number of results (default: 50).",
+                            "description": "Max results (default: 50).",
                             "default": 50
                         }
                     },

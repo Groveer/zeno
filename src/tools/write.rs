@@ -28,17 +28,17 @@ impl Tool for WriteTool {
             "type": "function",
             "function": {
                 "name": "write",
-                "description": "Write content to a file, creating it if it doesn't exist or overwriting it entirely. Creates parent directories automatically.",
+                "description": "Write content to a file, creating it or overwriting entirely. Creates parent directories automatically.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Path to the file to write."
+                            "description": "File path to write."
                         },
                         "content": {
                             "type": "string",
-                            "description": "The complete content to write to the file."
+                            "description": "Complete content to write."
                         }
                     },
                     "required": ["path", "content"]

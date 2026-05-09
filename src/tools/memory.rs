@@ -41,27 +41,7 @@ impl Tool for MemoryTool {
             "type": "function",
             "function": {
                 "name": "memory",
-                "description": concat!(
-                    "Save durable information to persistent memory that survives across sessions. ",
-                    "Memory is injected into future turns, so keep it compact and focused on facts ",
-                    "that will still matter later.\n\n",
-                    "WHEN TO SAVE (do this proactively, don't wait to be asked):\n",
-                    "- User corrects you or says 'remember this' / 'don't do that again'\n",
-                    "- User shares a preference, habit, or personal detail (name, role, timezone, coding style)\n",
-                    "- You discover something about the environment (OS, installed tools, project structure)\n",
-                    "- You learn a convention, API quirk, or workflow specific to this user's setup\n",
-                    "- You identify a stable fact that will be useful again in future sessions\n\n",
-                    "PRIORITY: User preferences and corrections > environment facts > procedural knowledge. ",
-                    "The most valuable memory prevents the user from having to repeat themselves.\n\n",
-                    "Do NOT save task progress, session outcomes, completed-work logs, or temporary TODO ",
-                    "state to memory.\n\n",
-                    "TWO TARGETS:\n",
-                    "- 'user': who the user is -- name, role, preferences, communication style, pet peeves\n",
-                    "- 'memory': your notes -- environment facts, project conventions, tool quirks, lessons learned\n\n",
-                    "ACTIONS: add (new entry), replace (update existing -- old_text identifies it), ",
-                    "remove (delete -- old_text identifies it).\n\n",
-                    "SKIP: trivial/obvious info, things easily re-discovered, raw data dumps, and temporary task state."
-                ),
+                "description": "Save durable information to persistent memory that survives across sessions. Memory is injected into future turns, so keep it compact and focused on facts that will still matter later.\n\nWHEN TO SAVE (do this proactively, don't wait to be asked):\n- User corrects you or says 'remember this' / 'don't do that again'\n- User shares a preference, habit, or personal detail (name, role, timezone, coding style)\n- You discover something about the environment (OS, installed tools, project structure)\n- You learn a convention, API quirk, or workflow specific to this user's setup\n- You identify a stable fact that will be useful again in future sessions\n\nPRIORITY: User preferences and corrections > environment facts > procedural knowledge. The most valuable memory prevents the user from having to repeat themselves.\n\nDo NOT save task progress, session outcomes, completed-work logs, or temporary TODO state to memory.\n\nTWO TARGETS:\n- 'user': who the user is -- name, role, preferences, communication style, pet peeves\n- 'memory': your notes -- environment facts, project conventions, tool quirks, lessons learned\n\nACTIONS: add (new entry), replace (update existing -- old_text identifies it), remove (delete -- old_text identifies it).\n\nSKIP: trivial/obvious info, things easily re-discovered, raw data dumps, and temporary task state.",
                 "parameters": {
                     "type": "object",
                     "properties": {
