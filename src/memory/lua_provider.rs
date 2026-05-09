@@ -53,11 +53,32 @@
 //!     -- Prefetch context before each turn (optional)
 //!     prefetch = function(query) return "" end,
 //!
+//!     -- Queue background prefetch for the next turn (optional)
+//!     -- Called after each turn. Pre-fetches context for the next turn.
+//!     queue_prefetch = function(query) end,
+//!
 //!     -- Sync turn after each response (optional)
 //!     sync_turn = function(user_content, assistant_content) end,
 //!
 //!     -- Mirror built-in memory writes (optional)
 //!     on_memory_write = function(action, target, content) end,
+//!
+//!     -- Per-turn tick with turn number and user message (optional)
+//!     on_turn_start = function(turn_number, message) end,
+//!
+//!     -- End-of-session extraction (optional)
+//!     -- messages_json is a JSON string of the full conversation history.
+//!     -- Use to extract facts, update summaries, flush buffers, etc.
+//!     on_session_end = function(messages_json) end,
+//!
+//!     -- Mid-process session_id rotation (optional)
+//!     -- Fires on /resume, /branch, /reset, /new, and context compression.
+//!     on_session_switch = function(new_id, parent_id, reset) end,
+//!
+//!     -- Called before context compression discards old messages (optional)
+//!     -- messages_json is a JSON string of messages about to be discarded.
+//!     -- Return a string with insights to preserve, or "" for no contribution.
+//!     on_pre_compress = function(messages_json) return "" end,
 //!
 //!     -- Shutdown (optional)
 //!     shutdown = function() end,
@@ -335,6 +356,22 @@ impl MemoryProvider for LuaMemoryProvider {
         }
     }
 
+    async fn on_session_end(&self, messages: &[Value]) {
+        let messages_json = serde_json::to_string(messages).unwrap_or_default();
+        let lua = self.lua.lock().await;
+        let globals = lua.globals();
+        if let Ok(provider) = globals.get::<mlua::Table>("_provider")
+            && let Ok(func) = provider.get::<mlua::Function>("on_session_end")
+            && let Err(e) = func.call::<()>(messages_json)
+        {
+            tracing::debug!(
+                provider = %self.config.name,
+                error = %e,
+                "Memory provider on_session_end failed"
+            );
+        }
+    }
+
     fn get_tool_schemas(&self) -> Vec<Value> {
         self.static_data.tool_schemas.clone()
     }
@@ -395,6 +432,76 @@ impl MemoryProvider for LuaMemoryProvider {
                 );
             }
         }
+    }
+
+    fn queue_prefetch(&self, query: &str) {
+        if let Ok(lua) = self.lua.try_lock() {
+            let globals = lua.globals();
+            if let Ok(provider) = globals.get::<mlua::Table>("_provider")
+                && let Ok(func) = provider.get::<mlua::Function>("queue_prefetch")
+                && let Err(e) = func.call::<()>(query)
+            {
+                tracing::debug!(
+                    provider = %self.config.name,
+                    error = %e,
+                    "Memory provider queue_prefetch failed"
+                );
+            }
+        }
+    }
+
+    fn on_turn_start(&self, turn_number: u32, message: &str) {
+        if let Ok(lua) = self.lua.try_lock() {
+            let globals = lua.globals();
+            if let Ok(provider) = globals.get::<mlua::Table>("_provider")
+                && let Ok(func) = provider.get::<mlua::Function>("on_turn_start")
+                && let Err(e) = func.call::<()>((turn_number as i64, message))
+            {
+                tracing::debug!(
+                    provider = %self.config.name,
+                    error = %e,
+                    "Memory provider on_turn_start failed"
+                );
+            }
+        }
+    }
+
+    fn on_session_switch(&self, new_session_id: &str, parent_session_id: &str, reset: bool) {
+        if let Ok(lua) = self.lua.try_lock() {
+            let globals = lua.globals();
+            if let Ok(provider) = globals.get::<mlua::Table>("_provider")
+                && let Ok(func) = provider.get::<mlua::Function>("on_session_switch")
+                && let Err(e) = func.call::<()>((new_session_id, parent_session_id, reset))
+            {
+                tracing::debug!(
+                    provider = %self.config.name,
+                    error = %e,
+                    "Memory provider on_session_switch failed"
+                );
+            }
+        }
+    }
+
+    fn on_pre_compress(&self, messages: &[Value]) -> String {
+        let messages_json = serde_json::to_string(messages).unwrap_or_default();
+        if let Ok(lua) = self.lua.try_lock() {
+            let globals = lua.globals();
+            if let Ok(provider) = globals.get::<mlua::Table>("_provider")
+                && let Ok(func) = provider.get::<mlua::Function>("on_pre_compress")
+            {
+                match func.call::<mlua::String>(messages_json) {
+                    Ok(s) => return s.to_string_lossy().to_string(),
+                    Err(e) => {
+                        tracing::debug!(
+                            provider = %self.config.name,
+                            error = %e,
+                            "Memory provider on_pre_compress failed"
+                        );
+                    }
+                }
+            }
+        }
+        String::new()
     }
 }
 

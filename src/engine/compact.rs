@@ -17,6 +17,7 @@ use crate::api::types::Role;
 use crate::config::settings::Settings;
 use crate::engine::carryover::Carryover;
 use crate::engine::messages::{ConversationEntry, ConversationHistory, find_safe_split_point};
+use serde_json::Value;
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -310,12 +311,15 @@ pub fn truncate_head_for_ptl_retry(history: &mut ConversationHistory) -> bool {
 ///
 /// Injects carryover working memory into the compression prompt so
 /// the LLM preserves key facts even after the history is compressed.
+/// Also asks the external memory provider to extract insights from
+/// the messages about to be discarded (via on_pre_compress).
 /// Keeps the last `keep_recent` messages intact, compresses everything before.
 pub async fn full_compact(
     settings: &Settings,
     history: &mut ConversationHistory,
     keep_recent: usize,
     carryover: &Carryover,
+    memory_manager: Option<&crate::memory::manager::SharedMemoryManager>,
 ) -> Result<(), CompactError> {
     let carryover_ctx = if carryover.has_data() {
         Some(carryover.to_context_text())
@@ -325,7 +329,40 @@ pub async fn full_compact(
 
     let carryover_ref = carryover_ctx.as_deref();
 
-    let summary = crate::auxiliary::compressor::compress_history(settings, history, carryover_ref)
+    // Ask external memory provider to extract insights from messages
+    // about to be compressed, so they can be preserved in the summary.
+    let memory_insight = if let Some(mm) = memory_manager {
+        let entries = history.entries_raw();
+        let cutoff = crate::engine::messages::find_safe_split_point(entries, keep_recent);
+        if cutoff > 0 {
+            let messages_json: Vec<Value> = entries[..cutoff]
+                .iter()
+                .filter_map(|e| serde_json::to_value(e).ok())
+                .collect();
+            let mm = mm.lock().await;
+            mm.on_pre_compress(&messages_json)
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    // Combine carryover context with memory provider insight
+    let combined_context = match (carryover_ref, memory_insight.as_str()) {
+        (Some(carry), _) if !memory_insight.is_empty() => Some(format!(
+            "{}\n\n## External memory insights\n\n{}",
+            carry, memory_insight
+        )),
+        (Some(carry), _) => Some(carry.to_string()),
+        (None, _) if !memory_insight.is_empty() => {
+            Some(format!("## External memory insights\n\n{}", memory_insight))
+        }
+        (None, _) => None,
+    };
+    let combined_ref = combined_context.as_deref();
+
+    let summary = crate::auxiliary::compressor::compress_history(settings, history, combined_ref)
         .await
         .map_err(|e| CompactError::LlmFailed(e.to_string()))?;
 
@@ -347,6 +384,7 @@ pub async fn auto_compact_if_needed(
     config: &CompactConfig,
     carryover: &Carryover,
     context_window: u32,
+    memory_manager: Option<&crate::memory::manager::SharedMemoryManager>,
 ) -> Result<Option<CompactResult>, CompactError> {
     if !config.enabled || config.threshold_ratio <= 0.0 {
         return Ok(None);
@@ -385,7 +423,15 @@ pub async fn auto_compact_if_needed(
     // Step 3: full compact with PTL retry
     let mut attempt = 0;
     loop {
-        match full_compact(settings, history, config.keep_recent, carryover).await {
+        match full_compact(
+            settings,
+            history,
+            config.keep_recent,
+            carryover,
+            memory_manager,
+        )
+        .await
+        {
             Ok(()) => {
                 let final_tokens = estimate_tokens(history);
                 tracing::info!(

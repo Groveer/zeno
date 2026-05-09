@@ -26,6 +26,8 @@ pub struct MemoryManager {
     external_initialized: bool,
     /// Current session ID (for provider lifecycle).
     session_id: String,
+    /// Cached prefetch result from queue_prefetch(), consumed by prefetch().
+    prefetch_cache: Option<String>,
 }
 
 // Implement Clone by wrapping in Arc<Mutex<>> — the standard pattern for
@@ -40,6 +42,7 @@ impl MemoryManager {
             external_provider: None,
             external_initialized: false,
             session_id: String::new(),
+            prefetch_cache: None,
         }
     }
 
@@ -150,14 +153,33 @@ impl MemoryManager {
     }
 
     /// Prefetch memory context from the external provider before a turn.
+    ///
+    /// If a cached prefetch result is available (from queue_prefetch),
+    /// returns it immediately. Otherwise calls the provider synchronously.
     /// Returns formatted text to inject into the system prompt, or empty string.
-    pub async fn prefetch(&self, query: &str) -> String {
+    pub async fn prefetch(&mut self, query: &str) -> String {
+        // Return cached result if available
+        if let Some(cached) = self.prefetch_cache.take() {
+            return cached;
+        }
+        // Otherwise fetch synchronously
         if let Some(ref p) = self.external_provider
             && self.external_initialized
         {
             return p.prefetch(query).await;
         }
         String::new()
+    }
+
+    /// Queue a background prefetch on the external provider for the NEXT turn.
+    /// The result will be consumed by prefetch() on the next API call.
+    /// Also notifies the external provider of the current turn's context.
+    pub fn queue_prefetch(&self, query: &str) {
+        if let Some(ref p) = self.external_provider
+            && self.external_initialized
+        {
+            p.queue_prefetch(query);
+        }
     }
 
     /// Sync a completed turn to the external provider.
@@ -175,6 +197,53 @@ impl MemoryManager {
             && self.external_initialized
         {
             p.on_memory_write(action, target, content);
+        }
+    }
+
+    /// Notify the external provider of a new turn starting.
+    pub fn on_turn_start(&self, turn_number: u32, message: &str) {
+        if let Some(ref p) = self.external_provider
+            && self.external_initialized
+        {
+            p.on_turn_start(turn_number, message);
+        }
+    }
+
+    /// Notify the external provider of session end.
+    /// Called on explicit exit, /reset, or session timeout.
+    pub async fn on_session_end(&self, messages: &[Value]) {
+        if let Some(ref p) = self.external_provider
+            && self.external_initialized
+        {
+            p.on_session_end(messages).await;
+        }
+    }
+
+    /// Notify the external provider of a session_id change.
+    /// Fires on /resume, /branch, /reset, /new and context compression.
+    pub fn on_session_switch(&self, new_session_id: &str, parent_session_id: &str, reset: bool) {
+        if let Some(ref p) = self.external_provider
+            && self.external_initialized
+        {
+            p.on_session_switch(new_session_id, parent_session_id, reset);
+        }
+    }
+
+    /// Ask the external provider for text to inject into the compression
+    /// summary prompt. Returns empty string if no provider or no contribution.
+    pub fn on_pre_compress(&self, messages: &[Value]) -> String {
+        if let Some(ref p) = self.external_provider
+            && self.external_initialized
+        {
+            return p.on_pre_compress(messages);
+        }
+        String::new()
+    }
+
+    /// Shut down the external provider.
+    pub async fn shutdown(&mut self) {
+        if let Some(ref mut p) = self.external_provider {
+            p.shutdown().await;
         }
     }
 }

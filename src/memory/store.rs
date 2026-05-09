@@ -15,9 +15,12 @@
 //! Character limits (not tokens) because char counts are model-independent.
 
 use std::collections::HashSet;
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
+
+use fs2::FileExt;
 
 /// Character delimiter between entries.
 const ENTRY_DELIMITER: &str = "\n§\n";
@@ -461,12 +464,39 @@ impl MemoryStore {
     }
 
     /// Persist entries to the appropriate file.
+    /// Uses a `.lock` file to acquire an exclusive lock, preventing concurrent
+    /// zeno instances from corrupting the memory file during read-modify-write.
     fn save_to_disk(&self, target: &str) {
         let path = self.path_for(target);
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        write_entry_file(path, self.entries_for(target));
+
+        let lock_path = path.with_extension("md.lock");
+
+        // Acquire exclusive file lock — blocks until other writers finish
+        match File::create(&lock_path) {
+            Ok(lock_file) => {
+                if let Err(e) = lock_file.lock_exclusive() {
+                    tracing::warn!(
+                        lock_path = %lock_path.display(),
+                        error = %e,
+                        "Failed to acquire memory file lock, writing without lock"
+                    );
+                }
+                write_entry_file(path, self.entries_for(target));
+                // Unlock is implicit when lock_file is dropped, but explicit is clearer
+                let _ = lock_file.unlock();
+            }
+            Err(e) => {
+                tracing::warn!(
+                    lock_path = %lock_path.display(),
+                    error = %e,
+                    "Failed to create lock file, writing without lock"
+                );
+                write_entry_file(path, self.entries_for(target));
+            }
+        }
     }
 
     fn path_for(&self, target: &str) -> &Path {
@@ -557,6 +587,7 @@ fn read_entry_file(path: &Path) -> Vec<String> {
 }
 
 /// Write entries to a memory file using atomic temp-file + rename.
+/// The caller is responsible for acquiring the file lock before calling this.
 fn write_entry_file(path: &Path, entries: &[String]) {
     let content = if entries.is_empty() {
         String::new()
@@ -565,7 +596,8 @@ fn write_entry_file(path: &Path, entries: &[String]) {
     };
 
     // Write to temp file in same directory (same filesystem for atomic rename).
-    // Use a unique temp name per call to avoid collisions from concurrent writes.
+    // Use PID + thread-id to avoid collisions from concurrent callers within
+    // the same process (though the file lock should prevent this).
     let dir = path.parent().unwrap_or(Path::new("."));
     let tmp_path = dir.join(format!(
         ".mem_{}_{:?}.tmp",
@@ -573,13 +605,35 @@ fn write_entry_file(path: &Path, entries: &[String]) {
         std::thread::current().id()
     ));
 
-    if let Err(e) = fs::write(&tmp_path, &content) {
-        tracing::warn!(
-            path = %tmp_path.display(),
-            error = %e,
-            "Failed to write temp memory file"
-        );
-        return;
+    match File::create(&tmp_path) {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(content.as_bytes()) {
+                tracing::warn!(
+                    path = %tmp_path.display(),
+                    error = %e,
+                    "Failed to write temp memory file"
+                );
+                let _ = fs::remove_file(&tmp_path);
+                return;
+            }
+            // fsync to ensure data hits disk before rename
+            if let Err(e) = f.sync_all() {
+                tracing::warn!(
+                    path = %tmp_path.display(),
+                    error = %e,
+                    "Failed to sync temp memory file"
+                );
+            }
+            drop(f); // close before rename
+        }
+        Err(e) => {
+            tracing::warn!(
+                path = %tmp_path.display(),
+                error = %e,
+                "Failed to create temp memory file"
+            );
+            return;
+        }
     }
 
     if let Err(e) = fs::rename(&tmp_path, path) {

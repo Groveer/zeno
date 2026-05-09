@@ -17,6 +17,7 @@ use config::settings;
 use engine::messages::ConversationHistory;
 use engine::query_engine::QueryEngine;
 use memory::provider::MemoryProvider;
+use serde_json::Value;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tools::base::ToolRegistry;
@@ -705,6 +706,7 @@ async fn main() -> anyhow::Result<()> {
                         };
 
                         if let Some(data) = session_data {
+                            let new_session_id = data.id.clone();
                             let mut eng = engine.lock().await;
                             // Rebuild conversation history from saved entries
                             let hist = ConversationHistory::from_entries(data.entries.clone());
@@ -712,6 +714,12 @@ async fn main() -> anyhow::Result<()> {
                             eng.cost_tracker = crate::engine::cost_tracker::CostTracker::default();
                             let one_liner = engine::session::build_one_liner(&data);
                             let summary = data.summary.clone();
+
+                            // Notify external memory provider of session switch
+                            if let Some(ref mm) = eng.memory_manager {
+                                let mm = mm.lock().await;
+                                mm.on_session_switch(&new_session_id, "", false);
+                            }
                             drop(eng);
 
                             // Also rebuild the TUI output area with the saved summary
@@ -858,6 +866,16 @@ async fn main() -> anyhow::Result<()> {
                 (entries, tokens, m)
             };
 
+            // Notify memory provider of session end
+            {
+                let json_entries: Vec<Value> = entries
+                    .iter()
+                    .filter_map(|e| serde_json::to_value(e).ok())
+                    .collect();
+                let mgr = memory_manager.lock().await;
+                mgr.on_session_end(&json_entries).await;
+            }
+
             if !entries.is_empty() {
                 let now = SystemTime::now();
                 let summary = engine::session::build_summary(&entries);
@@ -887,5 +905,25 @@ async fn main() -> anyhow::Result<()> {
     }
 
     ui::app::restore_terminal(&mut terminal)?;
+
+    // Fire session_end hook
+    if let Some(he) = &engine.lock().await.hook_executor {
+        if he.has_hooks_for(crate::hooks::types::HookEvent::SessionEnd) {
+            if let Ok(ctx) = he.build_context() {
+                let _ = ctx.set("cwd", cwd.to_string_lossy().to_string());
+                let _ = ctx.set("model", model.as_str());
+                let _ = ctx.set("provider", provider_name.as_str());
+                he.execute_session_event(crate::hooks::types::HookEvent::SessionEnd, &ctx)
+                    .await;
+            }
+        }
+    }
+
+    // Shut down memory manager (flush external provider)
+    {
+        let mut mgr = memory_manager.lock().await;
+        mgr.shutdown().await;
+    }
+
     Ok(())
 }

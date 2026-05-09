@@ -247,6 +247,13 @@ impl QueryEngine {
                 return Ok(());
             }
             turn += 1;
+
+            // Notify external memory provider of new turn
+            if let Some(ref mm) = self.memory_manager {
+                let mm = mm.lock().await;
+                mm.on_turn_start(turn, &effective_input);
+            }
+
             if turn > self.max_turns {
                 let _ = sender.send(UiEvent::Status(format!(
                 "max turns ({}) reached — task may not be complete. Type '继续' or 'continue' to resume.",
@@ -275,6 +282,7 @@ impl QueryEngine {
                     &self.compact_config,
                     &self.carryover,
                     context_window,
+                    self.memory_manager.as_ref(),
                 ) => r,
                 _ = cancel.cancelled() => {
                     tracing::info!(event = "cancelled", phase = "auto_compact", "query_tui: cancelled during auto-compact");
@@ -375,7 +383,7 @@ impl QueryEngine {
 
                 // --- Memory provider prefetch: inject recall context ---
                 if let Some(ref mm) = self.memory_manager {
-                    let mm = mm.lock().await;
+                    let mut mm = mm.lock().await;
                     let prefetch_text = mm.prefetch(&effective_input).await;
                     if !prefetch_text.is_empty() {
                         effective_system_prompt.push_str("\n\n## Relevant Memory\n\n");
@@ -389,7 +397,7 @@ impl QueryEngine {
                         .client
                         .stream_messages(
                             &self.model,
-                            &self.system_prompt,
+                            &effective_system_prompt,
                             &messages,
                             &tool_schemas,
                             self.effective_max_tokens(),
@@ -412,6 +420,7 @@ impl QueryEngine {
                                             &self.compact_config,
                                             &self.carryover,
                                             cw,
+                                            self.memory_manager.as_ref(),
                                         ) => r,
                                         _ = cancel.cancelled() => {
                                             tracing::info!(event = "cancelled", phase = "reactive_compact", "query_tui: cancelled during reactive compact");
@@ -974,6 +983,8 @@ impl QueryEngine {
                 };
                 let mm = mm.lock().await;
                 mm.sync_turn(&user_summary, &assistant_summary).await;
+                // Queue background prefetch for the next turn
+                mm.queue_prefetch(&user_summary);
             }
         }
 
