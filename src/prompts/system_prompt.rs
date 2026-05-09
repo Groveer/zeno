@@ -4,11 +4,20 @@
 //! 1. Core identity & role declaration (always present)
 //! 2. Key principles (always present)
 //! 3. Tool list with descriptions
-//! 4. Skills Tier 0 category index
+//! 4. Skills Tier 0: category index + skill loading workflow
 //! 5. Runtime context (cwd, OS, git branch)
 //! 6. Project instructions (CLAUDE.md / AGENTS.md)
 //!
-//! All skills are loaded lazily via `skill_view`. The Tier 0 category index
+//! The skills section follows a 3-tier progressive disclosure design:
+//! - Tier 0 (system prompt): category index + loading workflow instructions
+//! - Tier 1 (skill_list): browse skill summaries within a category
+//! - Tier 2 (skill_view): load a skill's full instructions
+//!
+//! The loading workflow in Tier 0 is the **driver** that makes the progressive
+//! disclosure system work — without it, the LLM does not know when or how to
+//! descend from Tier 0 → Tier 1 → Tier 2. This was previously implemented via
+//! `always_inject: true` on a `skill-usage-workflow` skill, but is now inlined
+//! directly into the skills_block as an inherent part of Tier 0.
 
 use std::path::Path;
 
@@ -35,7 +44,7 @@ pub fn build(
         tools_block(&tool_registry.summaries()),
     ];
 
-    // 5. Skills Tier 0 category index + always-inject guidelines
+    // 5. Skills Tier 0: category index + loading workflow
     if !skill_registry.is_empty() {
         parts.push(skills_block(skill_registry));
     }
@@ -72,8 +81,8 @@ fn core_identity(role: &RoleConfig) -> String {
     let identity_text = match role.identity {
         Some(ref custom) => custom.trim().to_string(),
         None => "You are zeno (zn), a helpful AI assistant.\n\n\
-            You help users with a wide variety of tasks: answering questions, writing and editing text,\n\
-            analyzing information, and more. When tools are available, use them proactively to assist the user."
+You help users with a wide variety of tasks: answering questions, writing and editing text,\n\
+analyzing information, and more. When tools are available, use them proactively to assist the user."
             .to_string(),
     };
 
@@ -101,8 +110,8 @@ fn guidelines(role: &RoleConfig) -> String {
 - Follow the user's project conventions (CLAUDE.md / AGENTS.md) if present.
 - **Batch independent tool calls**: Issue all independent calls in one response (e.g. `glob` + `grep` together). Only sequence calls with data dependencies.
 "#
- .trim()
- .to_string()
+    .trim()
+    .to_string()
 }
 
 /// Format the tool list as a readable block for the system prompt.
@@ -123,10 +132,61 @@ fn tools_block(summaries: &[ToolSummary]) -> String {
     lines.join("\n")
 }
 
+// ---------------------------------------------------------------------------
+// Skill loading workflow — the driver for 3-tier progressive disclosure
+// ---------------------------------------------------------------------------
+
+/// Skill loading workflow for categorized (multi-category) skill layouts.
+///
+/// This is the Tier 0 "driver" that tells the LLM how to use the progressive
+/// disclosure system. It replaces the old `always_inject` mechanism where a
+/// `skill-usage-workflow` skill was injected in full. The key behavioral
+/// instructions are preserved but inlined directly into Tier 0.
+const SKILL_LOADING_WORKFLOW_CATEGORIZED: &str = "\
+### Loading Workflow (MANDATORY)
+
+You **MUST** load relevant skills before attempting non-trivial tasks.
+
+**Direct match** — When the task clearly matches a skill name listed above, load it directly:\
+```\
+skill_view(name=\"<skill-name>\")\
+```\
+Then follow the loaded instructions before proceeding. Do NOT start the task without loading the skill — skills contain critical steps, pitfalls, and established workflows that prevent mistakes.
+
+**3-Tier Progressive Disclosure** — When the matching skill is not obvious:\
+1. **Tier 0** — Scan the category list above. Identify the most relevant category.\
+2. **Tier 1** — Call `skill_list(category=<cat>)` to browse skills in that category.\
+3. **Tier 2** — Call `skill_view(name=<skill>)` to load the full instructions. Follow them.\
+If unsure which category fits, call `skill_list` on multiple candidates.
+
+**When to skip** — Only for trivial tasks (greetings, simple questions, connectivity tests).\
+For any coding task — even if it seems simple — load the relevant skill first.\
+Err on the side of loading — it is always better to have context you don't need than to miss critical steps, pitfalls, or established workflows.";
+
+/// Skill loading workflow for flat (single-category) skill layouts.
+const SKILL_LOADING_WORKFLOW_FLAT: &str = "\
+### Loading Workflow (MANDATORY)
+
+You **MUST** load relevant skills before attempting non-trivial tasks.
+
+**Direct match** — When the task clearly matches a skill name listed above:\
+```\
+skill_view(name=\"<skill-name>\")\
+```\
+Then follow the loaded instructions before proceeding.
+
+**If unsure** — Call `skill_list` to browse, then `skill_view(name=...)` to load.
+
+**When to skip** — Only for trivial tasks (greetings, simple questions, connectivity tests).\
+For any coding task — even if it seems simple — load the relevant skill first.\
+Err on the side of loading — it is always better to have context you don't need than to miss critical steps, pitfalls, or established workflows.";
+
 /// Format the skills section for the system prompt.
 ///
-/// This includes:
+/// This includes two parts:
 /// 1. **Tier 0 category index**: Compact listing of categories with skill names.
+/// 2. **Loading workflow**: MUST-level instructions driving LLM to use the
+///    3-tier progressive disclosure system (Tier 0 → Tier 1 → Tier 2).
 fn skills_block(registry: &SkillRegistry) -> String {
     let mut parts = Vec::new();
 
@@ -140,15 +200,13 @@ fn skills_block(registry: &SkillRegistry) -> String {
         }
         let mut lines = Vec::new();
         lines.push(format!("## Skills ({} available)\n", skills.len()));
-        lines.push(
-            "**Load skills for non-trivial tasks** — use `skill_view(name=...)` to match a skill directly, or `skill_list` to browse. Skip for greetings/simple questions.\n"
-                .to_string(),
-        );
         for s in &skills {
             let desc = truncate_description(&s.description);
             lines.push(format!("- **{}**: {}", s.name, desc));
         }
-        return lines.join("\n");
+        parts.push(lines.join("\n"));
+        parts.push(SKILL_LOADING_WORKFLOW_FLAT.to_string());
+        return parts.join("\n\n");
     }
 
     let mut lines = Vec::new();
@@ -157,10 +215,6 @@ fn skills_block(registry: &SkillRegistry) -> String {
         registry.len(),
         categories.len()
     ));
-    lines.push(
-        "**Load skills for non-trivial tasks** — match your task to a category above, then `skill_list(category=...)` to browse, `skill_view(name=...)` to load. Skip for greetings/simple questions.\n"
-            .to_string(),
-    );
 
     for (cat, info) in categories {
         let desc = if info.description.is_empty() {
@@ -179,6 +233,7 @@ fn skills_block(registry: &SkillRegistry) -> String {
     }
 
     parts.push(lines.join("\n"));
+    parts.push(SKILL_LOADING_WORKFLOW_CATEGORIZED.to_string());
 
     parts.join("\n\n")
 }
@@ -392,5 +447,110 @@ mod tests {
         let role = RoleConfig::default();
         assert!(core_identity(&role).contains("zeno"));
         assert!(guidelines(&role).contains("Be concise"));
+    }
+
+    // --- New tests for loading workflow ---
+
+    #[test]
+    fn test_skills_block_categorized_contains_loading_workflow() {
+        let mut registry = SkillRegistry::new();
+        registry.register(SkillDefinition {
+            name: "tdd".into(),
+            description: "Test-driven development workflow.".into(),
+            content: "# TDD".into(),
+            source: "user".into(),
+            path: None,
+            category: "software-development".into(),
+        });
+        let mut categories = indexmap::IndexMap::new();
+        categories.insert(
+            "software-development".into(),
+            CategoryInfo {
+                description: "Coding workflows".into(),
+                skill_names: vec!["tdd".into()],
+            },
+        );
+        let registry = SkillRegistry::from_parts(
+            registry.list_skills().into_iter().cloned().collect(),
+            categories,
+        );
+        let block = skills_block(&registry);
+
+        // Loading workflow must be present with MUST-level language
+        assert!(block.contains("MANDATORY"), "should contain MANDATORY");
+        assert!(block.contains("MUST"), "should contain MUST directive");
+        assert!(block.contains("Tier 0"), "should reference Tier 0");
+        assert!(block.contains("Tier 1"), "should reference Tier 1");
+        assert!(block.contains("Tier 2"), "should reference Tier 2");
+        assert!(
+            block.contains("Err on the side of loading"),
+            "should encourage loading"
+        );
+        assert!(
+            block.contains("skill_list(category="),
+            "should show Tier 1 tool usage"
+        );
+        assert!(
+            block.contains("skill_view(name="),
+            "should show Tier 2 tool usage"
+        );
+    }
+
+    #[test]
+    fn test_skills_block_flat_contains_loading_workflow() {
+        let skill = SkillDefinition::new(
+            "tdd".into(),
+            "Test-driven development workflow.".into(),
+            "# TDD".into(),
+            "user".into(),
+            None,
+            "general".into(),
+        );
+        let registry = SkillRegistry::from_parts(vec![skill], indexmap::IndexMap::new());
+        let block = skills_block(&registry);
+
+        assert!(
+            block.contains("MANDATORY"),
+            "flat block should contain MANDATORY"
+        );
+        assert!(block.contains("MUST"), "flat block should contain MUST");
+        assert!(
+            block.contains("Err on the side of loading"),
+            "flat block should encourage loading"
+        );
+    }
+
+    #[test]
+    fn test_skills_loading_workflow_separate_from_index() {
+        // The loading workflow should be a separate section after the category index,
+        // not interleaved with it.
+        let mut registry = SkillRegistry::new();
+        registry.register(SkillDefinition {
+            name: "tdd".into(),
+            description: "Test-driven development workflow.".into(),
+            content: "# TDD".into(),
+            source: "user".into(),
+            path: None,
+            category: "software-development".into(),
+        });
+        let mut categories = indexmap::IndexMap::new();
+        categories.insert(
+            "software-development".into(),
+            CategoryInfo {
+                description: "Coding workflows".into(),
+                skill_names: vec!["tdd".into()],
+            },
+        );
+        let registry = SkillRegistry::from_parts(
+            registry.list_skills().into_iter().cloned().collect(),
+            categories,
+        );
+        let block = skills_block(&registry);
+
+        // Category index and loading workflow are separated by double newline
+        assert!(
+            block.contains("\n\n### Loading Workflow"),
+            "Loading workflow should be a separate ### section after the category index"
+        );
     }
 }
