@@ -398,12 +398,18 @@ impl InputState {
 
     // ── Multi-line cursor helpers ──
 
-    /// Return (row, col_bytes) of the cursor position in the text.
+    /// Return (row, col_byte) of the cursor position in the text.
+    /// col_byte is the byte offset within the current line.
+    ///
+    /// Panics if self.cursor is not on a UTF-8 char boundary (should never happen).
     fn cursor_row_col(&self) -> (usize, usize) {
-        let before = &self.text[..self.cursor.min(self.text.len())];
+        let cursor = self.cursor.min(self.text.len());
+        // Defensive: snap cursor to the nearest char boundary if somehow misaligned.
+        let cursor = snap_to_char_boundary(&self.text, cursor);
+        let before = &self.text[..cursor];
         let row = before.chars().filter(|&c| c == '\n').count();
         let last_newline = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let col = self.cursor - last_newline;
+        let col = cursor - last_newline;
         (row, col)
     }
 
@@ -452,31 +458,31 @@ impl InputState {
     /// Move cursor up one line (multi-line navigation).
     /// Returns false if the cursor was already on the first line (caller should fall through).
     fn move_cursor_up(&mut self) -> bool {
-        let (row, col) = self.cursor_row_col();
+        let (row, col_byte) = self.cursor_row_col();
         if row == 0 {
             return false;
         }
-        let target_col_byte = col;
         let prev_line_start = self.line_start_byte(row - 1);
         let prev_line_end = self.line_end_byte(row - 1);
         let prev_line_len = prev_line_end - prev_line_start;
-        self.cursor = prev_line_start + target_col_byte.min(prev_line_len);
+        let target = prev_line_start + col_byte.min(prev_line_len);
+        self.cursor = snap_to_char_boundary(&self.text, target);
         true
     }
 
     /// Move cursor down one line (multi-line navigation).
     /// Returns false if the cursor was already on the last line (caller should fall through).
     fn move_cursor_down(&mut self) -> bool {
-        let (row, col) = self.cursor_row_col();
+        let (row, col_byte) = self.cursor_row_col();
         let total_rows = self.line_count();
         if row + 1 >= total_rows {
             return false;
         }
-        let target_col_byte = col;
         let next_line_start = self.line_start_byte(row + 1);
         let next_line_end = self.line_end_byte(row + 1);
         let next_line_len = next_line_end - next_line_start;
-        self.cursor = next_line_start + target_col_byte.min(next_line_len);
+        let target = next_line_start + col_byte.min(next_line_len);
+        self.cursor = snap_to_char_boundary(&self.text, target);
         true
     }
 
@@ -940,6 +946,21 @@ impl InputState {
             idx += 1;
         }
         idx.min(self.text.len())
+    }
+}
+
+/// Snap a byte offset to the nearest UTF-8 char boundary at or before it.
+fn snap_to_char_boundary(s: &str, offset: usize) -> usize {
+    let offset = offset.min(s.len());
+    if s.is_char_boundary(offset) {
+        offset
+    } else {
+        // Walk backwards to the previous char boundary.
+        let mut idx = offset;
+        while idx > 0 && !s.is_char_boundary(idx) {
+            idx -= 1;
+        }
+        idx
     }
 }
 
@@ -1494,5 +1515,44 @@ mod tests {
         let consumed = input.handle_key(key);
         assert!(consumed, "Ctrl+W should be consumed");
         assert_eq!(input.text, "hello ");
+    }
+
+    #[test]
+    fn test_move_cursor_up_down_cjk_no_panic() {
+        // Regression: moving cursor up/down between lines with different
+        // character widths (ASCII vs CJK) used to place cursor inside a
+        // multi-byte char boundary, causing a panic.
+        // 你好世界 = 12 bytes, "hello" = 5 bytes
+        let mut input = InputState::new();
+        input.text = "你好世界\nhello".into();
+        // Cursor at end of "hello" on line 1
+        input.cursor = input.text.len(); // 18
+        assert_eq!(input.cursor_row_col(), (1, 5));
+
+        // Move up — cursor should snap to a valid char boundary on line 0
+        // "你好世界" is 12 bytes, col 5 would be inside '世' (bytes 6-8).
+        // snap_to_char_boundary should correct this.
+        assert!(input.move_cursor_up());
+        let (row, col) = input.cursor_row_col(); // must not panic
+        assert_eq!(row, 0);
+        // col may be 3（好 ends at byte 6) or 6（世 ends at byte 9)
+        assert!(col <= 12);
+
+        // Move back down
+        assert!(input.move_cursor_down());
+        let (row, col) = input.cursor_row_col();
+        assert_eq!(row, 1);
+        assert!(col <= 5);
+    }
+
+    #[test]
+    fn test_snap_to_char_boundary() {
+        // '过' = bytes 0-2, so byte 1 is inside the char
+        let s = "hello过world";
+        assert_eq!(snap_to_char_boundary(s, 5), 5); // 'h','e','l','l','o' = ascii
+        assert_eq!(snap_to_char_boundary(s, 6), 5); // inside '过', snap back
+        assert_eq!(snap_to_char_boundary(s, 7), 5); // inside '过', snap back
+        assert_eq!(snap_to_char_boundary(s, 8), 8); // 'w', on boundary
+        assert_eq!(snap_to_char_boundary(s, 100), s.len()); // past end
     }
 }

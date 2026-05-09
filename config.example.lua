@@ -257,9 +257,133 @@ zn.plugins_dir("~/.config/zeno/plugins")
 zn.memory_char_limit(4000)  -- MEMORY.md character limit (default: 4000)
 zn.user_char_limit(2500)    -- USER.md character limit (default: 2500)
 
--- External memory providers (Lua script-based)
--- zn.memory_provider("mem0", { script = "mem0.lua" })  -- external script
--- zn.memory_provider("custom", { script = [[inline code]], inline = true })  -- inline
+-- ── External Memory Providers (Lua script-based) ──────────
+--
+-- External providers run alongside the built-in MEMORY.md/USER.md store.
+-- Only ONE external provider can be active at a time.
+-- Configure via script file or inline Lua code.
+--
+-- zn.memory_provider("mem0", { script = "memory_providers/mem0.lua" })
+-- zn.memory_provider("custom", { script = [[inline code]], inline = true })
+--
+-- ── Memory Provider Lifecycle Hooks ────────────────────────
+--
+-- A Lua memory provider script returns a table implementing these hooks:
+--
+-- Required:
+--   name              = string   -- e.g. "mem0", "honcho"
+--   is_available      = function() → bool     -- check config, no network
+--   initialize        = function(session_id)  -- connect, warm up
+--
+-- Core (optional):
+--   system_prompt     = string   -- static text for system prompt
+--   tool_schemas      = table    -- array of OpenAI function-call schemas
+--   handle_tool_call  = function(tool_name, args_json) → json_string
+--   prefetch          = function(query) → string  -- recall before each turn
+--   queue_prefetch    = function(query)            -- background prefetch for next turn
+--   sync_turn         = function(user_content, assistant_content)
+--   on_memory_write   = function(action, target, content)  -- mirror built-in writes
+--   shutdown          = function()
+--
+-- Lifecycle hooks (optional, called by the engine at key events):
+--   on_turn_start     = function(turn_number, message)
+--   on_session_end    = function(messages_json)          -- session exit/timeout
+--   on_session_switch = function(new_id, parent_id, reset) -- /resume, /reset etc.
+--   on_pre_compress   = function(messages_json) → string -- before context compression
+--
+-- ── Example: Full-featured memory provider ─────────────────
+--
+-- zn.memory_provider("example", { script = [[
+--   local turn_count = 0
+--   return {
+--     name = "example",
+--     system_prompt = "External memory provider active.",
+--
+--     is_available = function()
+--       return os.getenv("EXAMPLE_API_KEY") ~= nil
+--     end,
+--
+--     initialize = function(session_id)
+--       -- Connect to backend, create session, etc.
+--       turn_count = 0
+--     end,
+--
+--     -- Tool schemas exposed to the LLM
+--     tool_schemas = {
+--       {
+--         name = "memory_search",
+--         description = "Search persistent memory by meaning.",
+--         parameters = {
+--           type = "object",
+--           properties = {
+--             query = { type = "string", description = "What to search for." },
+--           },
+--           required = { "query" },
+--         },
+--       },
+--     },
+--
+--     handle_tool_call = function(tool_name, args_json)
+--       local args = json.decode(args_json)
+--       if tool_name == "memory_search" then
+--         -- Search your backend for relevant memories
+--         return json.encode({ success = true, results = {} })
+--       end
+--       return json.encode({ error = "unknown tool" })
+--     end,
+--
+--     -- Pre-turn recall: fetch relevant context from your backend
+--     prefetch = function(query)
+--       return ""  -- return relevant text, or "" for nothing
+--     end,
+--
+--     -- Background prefetch for the next turn (non-blocking)
+--     queue_prefetch = function(query)
+--       -- Kick off async search, cache results for next prefetch()
+--     end,
+--
+--     -- Persist a completed turn to the backend
+--     sync_turn = function(user_content, assistant_content)
+--       -- Send the turn pair to your memory backend
+--     end,
+--
+--     -- Mirror built-in memory writes to your backend
+--     on_memory_write = function(action, target, content)
+--       -- action is "add", "replace", or "remove"
+--       -- target is "memory" or "user"
+--     end,
+--
+--     -- Per-turn notification with turn number
+--     on_turn_start = function(turn_number, message)
+--       turn_count = turn_number
+--     end,
+--
+--     -- End-of-session: extract facts, flush buffers, etc.
+--     on_session_end = function(messages_json)
+--       local messages = json.decode(messages_json)
+--       -- Extract key facts from the conversation and persist them
+--       -- Flush any pending writes or background tasks
+--     end,
+--
+--     -- Session ID rotation: /resume, /branch, /reset, context compression
+--     on_session_switch = function(new_id, parent_id, reset)
+--       -- Update internal session tracking
+--       -- If reset == true, flush per-session buffers
+--     end,
+--
+--     -- Before context compression: extract insights from messages about to be lost
+--     on_pre_compress = function(messages_json)
+--       local messages = json.decode(messages_json)
+--       -- Extract and return key insights to include in the compression summary
+--       -- Return "" to skip
+--       return ""
+--     end,
+--
+--     shutdown = function()
+--       -- Flush queues, close connections
+--     end,
+--   }
+-- ]])
 
 -- ═══════════════════════════════════════════════
 -- Role (Identity & Persona)
