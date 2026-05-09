@@ -1,12 +1,6 @@
 //! Core API types — messages, content blocks, stream events, errors.
 //!
 //! This module defines the common type system shared by all API providers.
-//! Individual items are annotated with `#[allow(dead_code)]` where they are
-//! kept for type completeness / future use even if not yet referenced.
-#![allow(
-    dead_code,
-    reason = "type completeness — variants/methods for all API providers"
-)]
 
 use serde::{Deserialize, Serialize};
 
@@ -55,31 +49,6 @@ pub enum ContentBlock {
     },
 }
 
-impl ContentBlock {
-    /// Create an Image block from a file path.
-    pub fn image_from_path(path: &std::path::Path) -> Result<Self, String> {
-        let resolved = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir().unwrap_or_default().join(path)
-        };
-        let mime_type = match resolved.extension().and_then(|e| e.to_str()) {
-            Some("png") => "image/png",
-            Some("jpg") | Some("jpeg") => "image/jpeg",
-            Some("gif") => "image/gif",
-            Some("webp") => "image/webp",
-            _ => "image/png",
-        };
-        let data = std::fs::read(&resolved).map_err(|e| format!("Failed to read image: {}", e))?;
-        let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
-        Ok(ContentBlock::Image {
-            media_type: mime_type.to_string(),
-            data: encoded,
-            source_path: resolved.to_string_lossy().to_string(),
-        })
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Message
 // ---------------------------------------------------------------------------
@@ -88,40 +57,6 @@ impl ContentBlock {
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,
-}
-
-impl Message {
-    pub fn user(text: impl Into<String>) -> Self {
-        Self {
-            role: Role::User,
-            content: vec![ContentBlock::Text { text: text.into() }],
-        }
-    }
-
-    pub fn assistant(text: impl Into<String>) -> Self {
-        Self {
-            role: Role::Assistant,
-            content: vec![ContentBlock::Text { text: text.into() }],
-        }
-    }
-
-    pub fn text_content(&self) -> String {
-        self.content
-            .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("")
-    }
-
-    pub fn tool_uses(&self) -> Vec<&ContentBlock> {
-        self.content
-            .iter()
-            .filter(|block| matches!(block, ContentBlock::ToolUse { .. }))
-            .collect()
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -180,15 +115,6 @@ impl Usage {
     pub fn prompt_tokens(&self) -> u64 {
         self.input_tokens + self.cache_read_input_tokens + self.cache_creation_input_tokens
     }
-
-    /// Grand total across all categories.
-    ///
-    /// Matches the provider dashboard: `prompt_tokens + completion_tokens`.
-    /// `reasoning_tokens` is NOT added separately — it is already included
-    /// in `output_tokens`.
-    pub fn total(&self) -> u64 {
-        self.prompt_tokens() + self.output_tokens
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -211,7 +137,6 @@ pub enum StreamEvent {
         stop_reason: StopReason,
         usage: Usage,
     },
-    Error(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -239,7 +164,4 @@ pub enum ApiError {
 
     #[error("Payment required (HTTP 402) — provider balance exhausted")]
     PaymentRequired,
-
-    #[error("API key not configured")]
-    NoApiKey,
 }

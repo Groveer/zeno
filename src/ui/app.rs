@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! ratatui application state machine.
 
 //!
@@ -658,13 +657,6 @@ impl App {
 
     pub fn mode(&self) -> AppMode {
         self.mode
-    }
-
-    /// Take the current cancellation token (for passing to engine tasks).
-    /// After calling this, the token is still valid for cancellation but
-    /// a fresh token must be created for the next query.
-    pub fn cancel_token(&self) -> CancellationToken {
-        self.cancel_token.clone()
     }
 
     /// Create a fresh cancellation token for a new LLM query.

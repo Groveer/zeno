@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Scrollable output area for conversation history.
 
 //!
@@ -97,14 +96,6 @@ impl OutputState {
         self.bump_gen();
     }
 
-    /// Return the plain text of the last AI response segment.
-    pub fn last_assistant_text(&self) -> Option<&str> {
-        self.segments.iter().rev().find_map(|seg| match seg {
-            OutputSegment::Text(t) => Some(t.as_str()),
-            _ => None,
-        })
-    }
-
     /// Scroll up by N lines (towards older content).
     pub fn scroll_up(&mut self, lines: usize) {
         self.scroll = self.scroll.saturating_add(lines);
@@ -118,35 +109,6 @@ impl OutputState {
             self.auto_scroll = true;
         } else {
             self.scroll -= lines;
-        }
-    }
-
-    /// Jump to bottom (re-enable auto-scroll).
-    pub fn scroll_bottom(&mut self) {
-        self.scroll = 0;
-        self.auto_scroll = true;
-    }
-
-    /// Total number of lines across all segments.
-    fn total_lines(&self) -> usize {
-        self.segments.iter().map(segment_lines).sum()
-    }
-}
-
-fn segment_lines(seg: &OutputSegment) -> usize {
-    match seg {
-        OutputSegment::UserInput(t) => t.lines().count().max(1),
-        OutputSegment::AskResponse(t) => t.lines().count().max(1),
-        OutputSegment::Text(t) => t.lines().count().max(1),
-        OutputSegment::ToolExecuting(_) => 1,
-        // ToolComplete may contain multi-line diff output (\n-separated)
-        OutputSegment::ToolComplete(s) => s.lines().count().max(1),
-        OutputSegment::ToolError(_) => 1,
-        OutputSegment::Status(_) => 1,
-        OutputSegment::Error(_) => 1,
-        OutputSegment::PermissionPrompt { detail, .. } => {
-            // Header + reason + optional detail + prompt
-            if detail.is_empty() { 2 } else { 3 }
         }
     }
 }

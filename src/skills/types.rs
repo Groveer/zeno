@@ -50,7 +50,7 @@ pub struct SkillDefinition {
 
 impl SkillDefinition {
     /// Create a minimal SkillDefinition with default values.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn new(
         name: String,
         description: String,

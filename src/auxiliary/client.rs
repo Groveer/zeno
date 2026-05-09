@@ -10,10 +10,6 @@
 //!
 //! `call_auxiliary()` is actively used by compressor and web_extract.
 //! `call_vision()` is reserved for future vision integration.
-#![allow(
-    dead_code,
-    reason = "call_vision and AuxiliaryResult unused fields reserved for future use"
-)]
 
 use std::time::Duration;
 
@@ -34,9 +30,6 @@ use super::router::{
 #[derive(Debug, Clone)]
 pub struct AuxiliaryResult {
     pub content: String,
-    pub provider_used: String,
-    pub model_used: String,
-    pub cached: bool,
 }
 
 /// A single message in an auxiliary call (text-only).
@@ -94,21 +87,6 @@ pub async fn call_auxiliary_with_options(
         )
         .await
     }
-}
-
-/// Call a vision auxiliary model with image content support.
-///
-/// Uses the vision-specific routing (filters to vision-capable providers).
-pub async fn call_vision(
-    settings: &Settings,
-    messages: Vec<super::vision::VisionMessage>,
-) -> Result<AuxiliaryResult, AuxiliaryError> {
-    let resolved = super::vision::resolve_vision_provider(settings)?;
-
-    // Convert vision messages to API values
-    let api_messages: Vec<serde_json::Value> = messages.iter().map(|m| m.to_api_value()).collect();
-
-    call_resolved_raw(&resolved, &api_messages, None, None).await
 }
 
 // ---------------------------------------------------------------------------
@@ -407,16 +385,7 @@ async fn do_api_call(
 
             // Validate response structure
             match validate_response(&data) {
-                Ok(content) => {
-                    let provider = extract_provider_from_url(url);
-                    let model = data["model"].as_str().unwrap_or("").to_string();
-                    Ok(AuxiliaryResult {
-                        content,
-                        provider_used: provider,
-                        model_used: model,
-                        cached: false,
-                    })
-                }
+                Ok(content) => Ok(AuxiliaryResult { content }),
                 Err(e) => Err((e, false, false)),
             }
         }

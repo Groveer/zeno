@@ -4,10 +4,6 @@
 //!
 //! `compress_history()` is actively used by `engine/compact.rs`.
 //! Title generation functions are reserved for future session management UI.
-#![allow(
-    dead_code,
-    reason = "generate_title/clean_title reserved for session UI"
-)]
 
 use crate::config::settings::Settings;
 use crate::engine::messages::ConversationHistory;
@@ -67,77 +63,6 @@ pub async fn compress_history(
     Ok(result.content)
 }
 
-/// Generate a session title from the first user-assistant exchange.
-///
-/// Uses the auxiliary model with the TitleGeneration task config.
-/// Returns the title string, or an error if generation fails.
-///
-/// Reference: hermes-agent `title_generator.generate_title`.
-pub async fn generate_title(
-    settings: &Settings,
-    user_message: &str,
-    assistant_response: Option<&str>,
-) -> Result<String, AuxiliaryError> {
-    // Truncate long messages to keep the request small
-    let user_snippet = truncate_to(user_message, 500);
-    let assistant_snippet = assistant_response.map(|r| truncate_to(r, 500));
-
-    let user_content = if let Some(asst) = assistant_snippet {
-        format!("User: {}\n\nAssistant: {}", user_snippet, asst)
-    } else {
-        user_snippet.to_string()
-    };
-
-    let messages = vec![
-        AuxiliaryMessage {
-            role: "system".into(),
-            content: TITLE_SYSTEM_PROMPT.to_string(),
-        },
-        AuxiliaryMessage {
-            role: "user".into(),
-            content: user_content,
-        },
-    ];
-
-    let result = call_auxiliary(settings, AuxiliaryTask::TitleGeneration, messages).await?;
-
-    // Clean up: remove quotes, trailing punctuation, prefixes like "Title: "
-    let title = clean_title(&result.content);
-    Ok(title)
-}
-
-/// Clean up a generated title string.
-fn clean_title(raw: &str) -> String {
-    let mut title = raw.trim().to_string();
-
-    // Remove surrounding quotes
-    title = title.trim_matches('"').trim_matches('\'').to_string();
-
-    // Remove "Title: " prefix
-    if title.to_lowercase().starts_with("title:") {
-        title = title[6..].trim().to_string();
-    }
-
-    // Enforce reasonable length
-    if title.len() > 80 {
-        title = truncate_to(&title, 77).to_string() + "...";
-    }
-
-    title
-}
-
-/// Truncate a string to at most `max_len` characters, respecting char boundaries.
-fn truncate_to(s: &str, max_len: usize) -> &str {
-    if s.len() <= max_len {
-        return s;
-    }
-    let mut end = max_len;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
-
 /// Format conversation history as readable text for compression.
 fn format_history(history: &ConversationHistory) -> String {
     // Use the to_api_messages() method to get structured data
@@ -183,9 +108,6 @@ Rules:
 - Use bullet points for clarity."#;
 
 /// System prompt for the title generation task.
-///
-/// Reference: hermes-agent `title_generator._TITLE_PROMPT`.
-const TITLE_SYSTEM_PROMPT: &str = r#"Generate a short, descriptive title (3-7 words) for a conversation that starts with the following exchange. The title should capture the main topic or intent. Return ONLY the title text, nothing else. No quotes, no punctuation at the end, no prefixes."#;
 
 #[cfg(test)]
 mod tests {
@@ -204,23 +126,5 @@ mod tests {
         assert!(text.contains("[User]"));
         assert!(text.contains("[Assistant]"));
         assert!(text.contains("quicksort"));
-    }
-
-    #[test]
-    fn test_clean_title() {
-        assert_eq!(clean_title("  Hello World  "), "Hello World");
-        assert_eq!(clean_title(r#""Fix the bug""#), "Fix the bug");
-        assert_eq!(clean_title("Title: Fix the bug"), "Fix the bug");
-        assert_eq!(clean_title("TITLE: Fix the bug"), "Fix the bug");
-        assert_eq!(
-            clean_title(&"x".repeat(100)),
-            format!("{}...", "x".repeat(77))
-        );
-    }
-
-    #[test]
-    fn test_truncate_to() {
-        assert_eq!(truncate_to("hello", 10), "hello");
-        assert_eq!(truncate_to("hello world", 5), "hello");
     }
 }

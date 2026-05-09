@@ -3,10 +3,6 @@
 //! Caches reqwest::Client instances by (provider, base_url) key.
 //! `get_or_create()` is actively used by `client.rs`; the eviction/shutdown
 //! helpers are reserved for future interactive CLI commands.
-#![allow(
-    dead_code,
-    reason = "evict_provider/shutdown/cleanup_stale reserved for CLI commands"
-)]
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -84,33 +80,6 @@ pub fn get_or_create(
     Ok(client)
 }
 
-/// Remove all cached clients for a specific provider.
-///
-/// Call this when credentials for a provider have been refreshed.
-pub fn evict_provider(provider_name: &str) {
-    if let Ok(mut cache) = CLIENT_CACHE.lock() {
-        cache.retain(|key, _| key.0 != provider_name);
-    }
-}
-
-/// Shut down all cached clients and clear the cache.
-///
-/// Call this on application shutdown.
-pub fn shutdown() {
-    if let Ok(mut cache) = CLIENT_CACHE.lock() {
-        cache.clear();
-    }
-}
-
-/// Remove stale entries from the cache.
-///
-/// Call this periodically to free resources.
-pub fn cleanup_stale() {
-    if let Ok(mut cache) = CLIENT_CACHE.lock() {
-        cache.retain(|_, entry| entry.created_at.elapsed() < STALE_AFTER);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,31 +95,17 @@ mod tests {
     }
 
     #[test]
-    fn test_evict_provider() {
-        let _ = get_or_create(
-            "evict_test",
-            "https://api.example.com",
-            Duration::from_secs(30),
-        );
-        evict_provider("evict_test");
-        // After eviction, next call creates a fresh client
-        let client = get_or_create(
-            "evict_test",
-            "https://api.example.com",
-            Duration::from_secs(30),
-        );
-        assert!(client.is_ok());
-    }
-
-    #[test]
     fn test_shutdown() {
         let _ = get_or_create(
             "shutdown_test",
             "https://api.example.com",
             Duration::from_secs(30),
         );
-        shutdown();
-        // After shutdown, next call creates a fresh client
+        // Clear the cache manually for cleanup
+        if let Ok(mut cache) = CLIENT_CACHE.lock() {
+            cache.clear();
+        }
+        // After clear, next call creates a fresh client
         let client = get_or_create(
             "shutdown_test",
             "https://api.example.com",

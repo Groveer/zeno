@@ -13,15 +13,20 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use super::base::{Tool, ToolContext, ToolError};
+use crate::memory::manager::SharedMemoryManager;
 use crate::memory::store::MemoryStore;
 
 pub struct MemoryTool {
     store: Arc<Mutex<MemoryStore>>,
+    memory_manager: SharedMemoryManager,
 }
 
 impl MemoryTool {
-    pub fn new(store: Arc<Mutex<MemoryStore>>) -> Self {
-        Self { store }
+    pub fn new(store: Arc<Mutex<MemoryStore>>, memory_manager: SharedMemoryManager) -> Self {
+        Self {
+            store,
+            memory_manager,
+        }
     }
 }
 
@@ -108,7 +113,14 @@ impl Tool for MemoryTool {
                 let content = arguments["content"].as_str().ok_or_else(|| {
                     ToolError::InvalidArguments("'content' is required for 'add'".into())
                 })?;
-                store.add(target, content)
+                let result = store.add(target, content);
+                // Mirror to external memory provider (if any)
+                self.memory_manager
+                    .lock()
+                    .await
+                    .on_memory_write(action, target, content)
+                    .await;
+                result
             }
             "replace" => {
                 let old_text = arguments["old_text"].as_str().ok_or_else(|| {
@@ -117,13 +129,27 @@ impl Tool for MemoryTool {
                 let content = arguments["content"].as_str().ok_or_else(|| {
                     ToolError::InvalidArguments("'content' is required for 'replace'".into())
                 })?;
-                store.replace(target, old_text, content)
+                let result = store.replace(target, old_text, content);
+                // Mirror to external memory provider (if any)
+                self.memory_manager
+                    .lock()
+                    .await
+                    .on_memory_write(action, target, content)
+                    .await;
+                result
             }
             "remove" => {
                 let old_text = arguments["old_text"].as_str().ok_or_else(|| {
                     ToolError::InvalidArguments("'old_text' is required for 'remove'".into())
                 })?;
-                store.remove(target, old_text)
+                let result = store.remove(target, old_text);
+                // Mirror to external memory provider (if any)
+                self.memory_manager
+                    .lock()
+                    .await
+                    .on_memory_write(action, target, old_text)
+                    .await;
+                result
             }
             _ => {
                 return Ok(json!({

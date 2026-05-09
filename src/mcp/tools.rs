@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! MCP gateway tools — 4 meta-tools that proxy calls to MCP servers.
 
 use async_trait::async_trait;

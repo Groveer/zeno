@@ -171,7 +171,6 @@ impl HookExecutor {
     }
 
     /// Number of registered hooks total (for diagnostics).
-    #[allow(dead_code)]
     pub fn hook_count(&self) -> usize {
         self.hooks.values().map(|v| v.len()).sum()
     }
@@ -182,7 +181,6 @@ impl HookExecutor {
     }
 
     /// List all registered event names with counts (for `/hooks` command).
-    #[allow(dead_code)]
     pub fn registered_events(&self) -> Vec<(&'static str, usize)> {
         self.hooks
             .iter()

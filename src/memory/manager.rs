@@ -32,7 +32,6 @@ pub struct MemoryManager {
 // shared mutable state across tool execution.
 pub type SharedMemoryManager = Arc<Mutex<MemoryManager>>;
 
-#[allow(dead_code)]
 impl MemoryManager {
     /// Create a new MemoryManager with the built-in store.
     pub fn new(builtin_store: Arc<Mutex<MemoryStore>>) -> Self {
@@ -58,16 +57,6 @@ impl MemoryManager {
         }
         tracing::info!(provider = %provider.name(), "External memory provider set");
         self.external_provider = Some(provider);
-        self.external_initialized = false;
-    }
-
-    /// Remove the external provider (shut it down cleanly).
-    pub async fn remove_external(&mut self) {
-        if let Some(ref mut p) = self.external_provider {
-            tracing::info!(provider = %p.name(), "Shutting down external memory provider");
-            p.shutdown().await;
-        }
-        self.external_provider = None;
         self.external_initialized = false;
     }
 
@@ -131,40 +120,6 @@ impl MemoryManager {
         }
     }
 
-    /// Prefetch relevant context from all providers for the upcoming turn.
-    pub async fn prefetch(&self, query: &str) -> String {
-        let mut results = Vec::new();
-
-        if let Some(ref p) = self.external_provider
-            && self.external_initialized
-        {
-            let context = p.prefetch(query).await;
-            if !context.is_empty() {
-                results.push(context);
-            }
-        }
-
-        results.join("\n\n")
-    }
-
-    /// Sync a completed turn to all providers.
-    pub async fn sync_turn(&self, user_content: &str, assistant_content: &str) {
-        if let Some(ref p) = self.external_provider
-            && self.external_initialized
-        {
-            p.sync_turn(user_content, assistant_content).await;
-        }
-    }
-
-    /// Forward a built-in memory write to the external provider.
-    pub fn on_memory_write(&self, action: &str, target: &str, content: &str) {
-        if let Some(ref p) = self.external_provider
-            && self.external_initialized
-        {
-            p.on_memory_write(action, target, content);
-        }
-    }
-
     /// Get tool schemas from the external provider (if any).
     /// Built-in memory uses the standard `memory` tool registered separately.
     pub fn get_external_tool_schemas(&self) -> Vec<Value> {
@@ -189,26 +144,37 @@ impl MemoryManager {
         )))
     }
 
-    /// Check if an external provider is active and initialized.
-    pub fn has_external(&self) -> bool {
-        self.external_provider.is_some() && self.external_initialized
-    }
-
     /// Get the name of the active external provider (if any).
     pub fn external_name(&self) -> Option<&str> {
         self.external_provider.as_ref().map(|p| p.name())
     }
 
-    /// Get a reference to the built-in store.
-    pub fn builtin_store(&self) -> &Arc<Mutex<MemoryStore>> {
-        &self.builtin_store
+    /// Prefetch memory context from the external provider before a turn.
+    /// Returns formatted text to inject into the system prompt, or empty string.
+    pub async fn prefetch(&self, query: &str) -> String {
+        if let Some(ref p) = self.external_provider
+            && self.external_initialized
+        {
+            return p.prefetch(query).await;
+        }
+        String::new()
     }
 
-    /// Clean shutdown all providers.
-    pub async fn shutdown(&mut self) {
-        if let Some(ref mut p) = self.external_provider {
-            p.shutdown().await;
+    /// Sync a completed turn to the external provider.
+    pub async fn sync_turn(&self, user_content: &str, assistant_content: &str) {
+        if let Some(ref p) = self.external_provider
+            && self.external_initialized
+        {
+            p.sync_turn(user_content, assistant_content).await;
         }
-        self.external_initialized = false;
+    }
+
+    /// Notify the external provider of a built-in memory write.
+    pub async fn on_memory_write(&self, action: &str, target: &str, content: &str) {
+        if let Some(ref p) = self.external_provider
+            && self.external_initialized
+        {
+            p.on_memory_write(action, target, content);
+        }
     }
 }

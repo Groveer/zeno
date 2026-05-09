@@ -12,13 +12,11 @@
 //! All decisions are logged with structured fields for audit:
 //! `tool_name`, `permission_decision`, `reason`, `mode`, `file_path`, `command`
 
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
 use crate::config::settings::PermissionMode;
-use crate::tools::base::ToolError;
 
 // ---------------------------------------------------------------------------
 // Permission Decision
@@ -87,18 +85,6 @@ fn canonicalize_safe(path: &Path) -> PathBuf {
     }
     // Fallback: return the path as-is (symlink not resolved)
     path.to_path_buf()
-}
-
-/// Truncate a string to at most `max_chars` characters (not bytes).
-/// This is safe for multi-byte UTF-8 (CJK, emoji, etc.).
-#[allow(dead_code)]
-fn safe_truncate_str(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_chars).collect();
-        format!("{}...(truncated)", truncated)
-    }
 }
 
 /// Write/edit tools: these create or overwrite file content, which is
@@ -583,115 +569,6 @@ pub fn evaluate_permission(
                 reason: "Tool auto-allowed in relaxed mode".to_string(),
             }
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Fine-grained check (uses evaluate_permission)
-// ---------------------------------------------------------------------------
-
-/// Fine-grained permission check with tool input analysis.
-#[allow(dead_code)]
-pub fn check_permission_fine(
-    mode: &PermissionMode,
-    tool_name: &str,
-    is_read_only: bool,
-    tool_input: &Value,
-    cwd: &Path,
-) -> Result<bool, ToolError> {
-    let paths = resolve_paths(tool_name, tool_input, cwd);
-    let decision = evaluate_permission(
-        mode,
-        &[], // no trusted_paths in this legacy path
-        tool_name,
-        is_read_only,
-        paths.file_path.as_deref(),
-        paths.command.as_deref(),
-        cwd,
-    );
-
-    if decision.allowed {
-        return Ok(true);
-    }
-    if !decision.requires_confirmation {
-        return Err(ToolError::PermissionDenied(decision.reason));
-    }
-
-    // Need user confirmation
-    prompt_user(tool_name, &decision.reason, &tool_input.to_string())
-}
-
-// ---------------------------------------------------------------------------
-// Legacy check_permission (backward compatible)
-// ---------------------------------------------------------------------------
-
-/// Legacy permission check: simple mode-based check.
-/// For Ask mode, always prompts the user.
-#[allow(dead_code)]
-pub fn check_permission(
-    mode: &PermissionMode,
-    tool_name: &str,
-    description: &str,
-    tool_input: &str,
-) -> Result<bool, ToolError> {
-    match mode {
-        PermissionMode::Allow => Ok(true),
-        PermissionMode::Deny => {
-            if is_safe_tool(tool_name) {
-                Ok(true)
-            } else {
-                Err(ToolError::PermissionDenied(format!(
-                    "Tool '{}' is blocked in deny mode",
-                    tool_name
-                )))
-            }
-        }
-        PermissionMode::Ask => prompt_user(tool_name, description, tool_input),
-    }
-}
-
-/// Tools that are always safe to execute (read-only, no side effects).
-#[allow(dead_code)]
-fn is_safe_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "read" | "glob" | "grep" | "config" | "ask_user" | "web_search" | "web_fetch"
-    )
-}
-
-// ---------------------------------------------------------------------------
-// User prompt
-// ---------------------------------------------------------------------------
-
-/// Prompt the user for permission in interactive mode.
-#[allow(dead_code)]
-pub(crate) fn prompt_user(
-    tool_name: &str,
-    description: &str,
-    tool_input: &str,
-) -> Result<bool, ToolError> {
-    eprintln!();
-    eprintln!("[permission] Tool: {}", tool_name);
-    eprintln!("[permission] {}", description);
-
-    // Truncate input display — use character-level slicing to avoid panicking
-    // on multi-byte UTF-8 characters (e.g. Chinese, emoji).
-    let display_input = safe_truncate_str(tool_input, 200);
-    eprintln!("[permission] Input: {}", display_input);
-    eprint!("[permission] Allow? (y/n/a = yes to all): ");
-    io::stderr().flush()?;
-
-    let mut response = String::new();
-    io::stdin()
-        .read_line(&mut response)
-        .map_err(ToolError::Io)?;
-    let response = response.trim().to_lowercase();
-
-    match response.as_str() {
-        "y" | "yes" => Ok(true),
-        "n" | "no" => Ok(false),
-        "a" | "all" | "always" => Ok(true),
-        _ => Ok(false),
     }
 }
 

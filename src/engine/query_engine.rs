@@ -1,13 +1,13 @@
 //! Query engine: manages conversation state and tool registry.
 
 use crate::api::client::SupportsStreamingMessages;
-use crate::api::types::{ContentBlock, Role};
 use crate::config::settings::{PermissionMode, Settings};
 use crate::engine::carryover::Carryover;
 use crate::engine::compact::CompactConfig;
 use crate::engine::cost_tracker::CostTracker;
 use crate::engine::messages::{ConversationEntry, ConversationHistory};
 use crate::hooks::executor::HookExecutor;
+use crate::memory::manager::SharedMemoryManager;
 use crate::tools::base::ToolRegistry;
 use std::sync::{Arc, Mutex};
 
@@ -45,6 +45,8 @@ pub struct QueryEngine {
     pub(crate) pending_steer: Arc<Mutex<Option<String>>>,
     /// Shared MCP manager for lazy MCP server connections.
     pub mcp_manager: Option<Arc<tokio::sync::Mutex<crate::mcp::manager::McpManager>>>,
+    /// Shared memory manager for external provider lifecycle (prefetch, sync, mirroring).
+    pub memory_manager: Option<SharedMemoryManager>,
 }
 
 /// Inject user text into a steer slot without interrupting the agent.
@@ -109,12 +111,8 @@ impl QueryEngine {
             permission_allow_all: Arc::new(Mutex::new(false)),
             pending_steer: Arc::new(Mutex::new(None)),
             mcp_manager: None,
+            memory_manager: None,
         }
-    }
-
-    #[allow(dead_code, reason = "reserved for future /compact command options")]
-    pub fn set_compact_config(&mut self, config: CompactConfig) {
-        self.compact_config = config;
     }
 
     // -----------------------------------------------------------------------
@@ -185,47 +183,6 @@ impl QueryEngine {
         self.history = ConversationHistory::from_entries(entries);
         self.history.sanitize();
         self.cost_tracker = CostTracker::default();
-    }
-
-    /// Return true when the conversation ends with tool results awaiting a
-    /// follow-up model turn (i.e., the last message is a user message
-    /// containing tool_result blocks, preceded by an assistant tool_use).
-    #[allow(dead_code, reason = "reserved for session restore flow")]
-    pub fn has_pending_continuation(&self) -> bool {
-        let entries = self.history.entries_raw();
-        if entries.len() < 2 {
-            return false;
-        }
-
-        let last = &entries[entries.len() - 1];
-        let prev = &entries[entries.len() - 2];
-
-        let last_is_user_with_tool_result = last.role == Role::User
-            && last
-                .content
-                .iter()
-                .any(|b| matches!(b, ContentBlock::ToolResult { .. }));
-
-        let prev_is_assistant_with_tool_use = prev.role == Role::Assistant
-            && prev
-                .content
-                .iter()
-                .any(|b| matches!(b, ContentBlock::ToolUse { .. }));
-
-        last_is_user_with_tool_result && prev_is_assistant_with_tool_use
-    }
-
-    /// Continue an interrupted agent loop without appending a new user message.
-    ///
-    /// Reference: OpenHarness `QueryEngine.continue_pending()` (query_engine.py L192-213).
-    /// When the loop exits prematurely (e.g., user interrupted, or the
-    /// model returned an empty/tool-less response), this method can resume
-    /// by injecting a continuation prompt from the carryover's pending goal.
-    ///
-    /// Returns `false` if there is no pending goal to continue.
-    #[allow(dead_code, reason = "reserved for auto-continue flow")]
-    pub fn can_auto_continue(&self) -> bool {
-        self.carryover.has_pending_goal()
     }
 
     /// Resolve the effective max_output_tokens for API calls.

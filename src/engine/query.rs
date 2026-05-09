@@ -373,6 +373,16 @@ impl QueryEngine {
                     }
                 }
 
+                // --- Memory provider prefetch: inject recall context ---
+                if let Some(ref mm) = self.memory_manager {
+                    let mm = mm.lock().await;
+                    let prefetch_text = mm.prefetch(&effective_input).await;
+                    if !prefetch_text.is_empty() {
+                        effective_system_prompt.push_str("\n\n## Relevant Memory\n\n");
+                        effective_system_prompt.push_str(&prefetch_text);
+                    }
+                }
+
                 // ── Acquire stream (with reactive compact on prompt-too-long) ──
                 let stream = match tokio::select! {
                     result = self
@@ -555,12 +565,6 @@ impl QueryEngine {
                                     }
                                 }
                             }
-                        }
-                        Ok(StreamEvent::Error(e)) => {
-                            tracing::warn!(error = %e, "Stream event error");
-                            last_error = Some(ApiError::Stream(e));
-                            stream_failed = true;
-                            break;
                         }
                         Err(e) => {
                             tracing::warn!(error = ?e, "Stream error during consumption");
@@ -954,6 +958,23 @@ impl QueryEngine {
 
             // Do NOT send QueryDone here — the loop continues to the next LLM call.
             // QueryDone is only sent when the loop exits (no more tool_calls, max turns, or error).
+
+            // --- Sync turn to external memory provider ---
+            if let Some(ref mm) = self.memory_manager {
+                // Build a compact summary of this turn for the provider
+                let user_summary = effective_input.clone();
+                let assistant_summary = if !assistant_text.trim().is_empty() {
+                    assistant_text.clone()
+                } else {
+                    tool_uses
+                        .iter()
+                        .map(|tu| format!("[{}]", tu.name))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let mm = mm.lock().await;
+                mm.sync_turn(&user_summary, &assistant_summary).await;
+            }
         }
 
         Ok(())

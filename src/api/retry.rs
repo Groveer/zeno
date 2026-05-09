@@ -16,7 +16,6 @@ use std::future::Future;
 
 /// Retry configuration shared by main API and auxiliary API calls.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct RetryConfig {
     /// Maximum number of retry attempts (not counting the initial call).
     pub max_retries: u32,
@@ -24,8 +23,6 @@ pub struct RetryConfig {
     pub base_delay: f64,
     /// Maximum delay in seconds (caps the exponential growth).
     pub max_delay: f64,
-    /// HTTP status codes that are retryable (e.g. 429, 500, 502, 503, 529).
-    pub retryable_statuses: Vec<u16>,
 }
 
 impl Default for RetryConfig {
@@ -34,7 +31,6 @@ impl Default for RetryConfig {
             max_retries: 3,
             base_delay: 1.0,
             max_delay: 30.0,
-            retryable_statuses: vec![429, 500, 502, 503, 529],
         }
     }
 }
@@ -48,15 +44,8 @@ impl RetryConfig {
             max_retries: 2,
             base_delay: 0.5,
             max_delay: 10.0,
-            retryable_statuses: vec![429, 500, 502, 503, 529],
         }
     }
-}
-
-/// Check if an HTTP status code is retryable according to the given config.
-#[allow(dead_code)]
-pub fn is_retryable_status(status: u16, config: &RetryConfig) -> bool {
-    config.retryable_statuses.contains(&status)
 }
 
 /// Check if an HTTP status code is retryable using the default status set.
@@ -146,52 +135,6 @@ where
     }
 }
 
-/// Variant of `retry_with_backoff` that also extracts retry-relevant metadata
-/// (HTTP status, Retry-After) from the error for more precise backoff timing.
-///
-/// Use this when the error type carries HTTP status information.
-#[allow(dead_code)]
-pub async fn retry_with_backoff_for_status<T, E, F, Fut, P, S, R>(
-    config: &RetryConfig,
-    label: &str,
-    is_retryable: P,
-    extract_status: S,
-    extract_retry_after: R,
-    mut f: F,
-) -> Result<T, E>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T, E>>,
-    E: std::fmt::Debug,
-    P: Fn(&E) -> bool,
-    S: Fn(&E) -> Option<u16>,
-    R: Fn(&E) -> Option<f64>,
-{
-    let mut attempts: u32 = 0;
-    loop {
-        match f().await {
-            Ok(result) => return Ok(result),
-            Err(e) => {
-                attempts += 1;
-                if attempts > config.max_retries || !is_retryable(&e) {
-                    return Err(e);
-                }
-                let status = extract_status(&e);
-                let retry_after = extract_retry_after(&e);
-                let delay = get_retry_delay(attempts, config, status, retry_after);
-                tracing::warn!(
-                    label = %label,
-                    attempt = attempts,
-                    delay_secs = delay,
-                    error = ?e,
-                    "{} failed, retrying", label
-                );
-                tokio::time::sleep(tokio::time::Duration::from_secs_f64(delay)).await;
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,7 +145,6 @@ mod tests {
         assert_eq!(config.max_retries, 3);
         assert_eq!(config.base_delay, 1.0);
         assert_eq!(config.max_delay, 30.0);
-        assert_eq!(config.retryable_statuses, vec![429, 500, 502, 503, 529]);
     }
 
     #[test]
@@ -211,17 +153,6 @@ mod tests {
         assert_eq!(config.max_retries, 2);
         assert_eq!(config.base_delay, 0.5);
         assert_eq!(config.max_delay, 10.0);
-    }
-
-    #[test]
-    fn test_is_retryable_status() {
-        let config = RetryConfig::default();
-        assert!(is_retryable_status(429, &config));
-        assert!(is_retryable_status(500, &config));
-        assert!(is_retryable_status(503, &config));
-        assert!(!is_retryable_status(200, &config));
-        assert!(!is_retryable_status(401, &config));
-        assert!(!is_retryable_status(404, &config));
     }
 
     #[test]
@@ -282,7 +213,6 @@ mod tests {
             max_retries: 2,
             base_delay: 0.01,
             max_delay: 0.05,
-            retryable_statuses: vec![429],
         };
         let result =
             retry_with_backoff(&config, "test", |_| true, || async { Ok::<_, String>(42) }).await;
@@ -295,7 +225,6 @@ mod tests {
             max_retries: 2,
             base_delay: 0.01,
             max_delay: 0.05,
-            retryable_statuses: vec![429],
         };
         let mut attempts = 0;
         let result = retry_with_backoff(
@@ -323,7 +252,6 @@ mod tests {
             max_retries: 3,
             base_delay: 0.01,
             max_delay: 0.05,
-            retryable_statuses: vec![429],
         };
         let result: Result<i32, &str> = retry_with_backoff(
             &config,
@@ -341,7 +269,6 @@ mod tests {
             max_retries: 1,
             base_delay: 0.01,
             max_delay: 0.05,
-            retryable_statuses: vec![429],
         };
         let result: Result<i32, &str> = retry_with_backoff(
             &config,

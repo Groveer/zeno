@@ -18,9 +18,6 @@ pub enum ToolError {
     #[error("Invalid arguments: {0}")]
     InvalidArguments(String),
 
-    #[error("Permission denied: {0}")]
-    PermissionDenied(String),
-
     #[error("File not found: {0}")]
     NotFound(String),
 
@@ -47,15 +44,6 @@ pub struct ToolContext {
 }
 
 impl ToolContext {
-    #[allow(dead_code)]
-    pub fn new(cwd: PathBuf) -> Self {
-        Self {
-            cwd,
-            ask_sender: None,
-            mcp_manager: None,
-        }
-    }
-
     /// Create a context with an ask channel (for TUI mode).
     pub fn with_ask_sender(
         cwd: PathBuf,

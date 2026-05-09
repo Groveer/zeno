@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Skill loading from directories.
 //!
 //! Scans directories for `<category>/<name>/SKILL.md` files, parses YAML frontmatter

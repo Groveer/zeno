@@ -22,15 +22,6 @@ pub struct WebSearchTool {
 }
 
 impl WebSearchTool {
-    /// Create with default config (SearXNG → DuckDuckGo fallback).
-    #[allow(dead_code)]
-    pub fn new() -> Self {
-        Self {
-            client: Self::build_client(),
-            config: WebSearchConfig::default(),
-        }
-    }
-
     /// Create with user-supplied config from init.lua.
     pub fn with_config(config: WebSearchConfig) -> Self {
         Self {

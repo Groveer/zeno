@@ -3,10 +3,6 @@
 //! `config_dir()`, `config_path()`, `data_dir()`, `log_dir()`, `ensure_log_dir()`,
 //! and `cleanup_old_logs()` are actively used. The remaining functions are
 //! reserved for future migration/setup commands.
-#![allow(
-    dead_code,
-    reason = "legacy_config_path/ensure_config_dir/log_path reserved for future CLI"
-)]
 
 use std::path::PathBuf;
 
@@ -20,11 +16,6 @@ pub fn config_dir() -> PathBuf {
 /// Returns the path to the main config file (Lua).
 pub fn config_path() -> PathBuf {
     config_dir().join("init.lua")
-}
-
-/// Returns the path to the legacy YAML config (for /migrate only).
-pub fn legacy_config_path() -> PathBuf {
-    config_dir().join("config.yaml")
 }
 
 /// Returns the global memory directory (`~/.config/zeno/memory`).
@@ -69,20 +60,8 @@ pub fn session_index_path() -> PathBuf {
 }
 
 /// Ensures the config directory exists, returns its path.
-pub fn ensure_config_dir() -> anyhow::Result<PathBuf> {
-    let dir = config_dir();
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
-}
-
-/// Returns the log directory inside the config directory.
 pub fn log_dir() -> PathBuf {
     config_dir().join("logs")
-}
-
-/// Returns the path to the main log file.
-pub fn log_path() -> PathBuf {
-    log_dir().join("zeno.log")
 }
 
 /// Ensures the log directory exists, returns its path.

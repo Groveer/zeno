@@ -50,10 +50,7 @@ pub const VALID_HOOK_EVENTS: &[(&str, HookEvent)] = &[
 /// Variants that don't match the current event type are silently ignored
 /// (e.g., `Block` from a `SessionStart` hook is a no-op).
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum HookResult {
-    /// No-op — proceed normally.
-    Continue,
     /// Block the current action (only meaningful for `PreToolUse`).
     Block { reason: String },
     /// Inject extra context before the LLM call (only for `PreLlmCall`).

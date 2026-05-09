@@ -435,15 +435,3 @@ pub fn resolve_api_key(provider: &ProviderConfig) -> anyhow::Result<String> {
         anyhow::bail!("No api_key or api_key_env configured for provider")
     }
 }
-
-/// Get the effective model for a given provider.
-#[allow(dead_code, reason = "reserved for future provider-switching UI")]
-pub fn effective_model(settings: &Settings, provider_name: &str) -> Option<String> {
-    settings.providers.get(provider_name).map(|p| {
-        if p.default_model.is_empty() {
-            settings.model.clone()
-        } else {
-            p.default_model.clone()
-        }
-    })
-}

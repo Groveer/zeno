@@ -1,5 +1,4 @@
 mod api;
-mod auth;
 mod auxiliary;
 mod config;
 mod engine;
@@ -260,11 +259,9 @@ async fn main() -> anyhow::Result<()> {
         "Memory loaded from disk"
     );
     let memory_store = Arc::new(tokio::sync::Mutex::new(memory_store));
-    registry.register(Box::new(tools::memory::MemoryTool::new(
-        memory_store.clone(),
-    )))?;
 
-    // Initialize memory manager (orchestrates built-in + external providers)
+    // Initialize memory manager (orchestrates built-in + external providers).
+    // Created before MemoryTool so it can receive `on_memory_write` notifications.
     let mut memory_manager = memory::manager::MemoryManager::new(memory_store.clone());
 
     // Load and activate the configured external memory provider (if any)
@@ -312,6 +309,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Wrap memory manager for shared access
     let memory_manager: memory::manager::SharedMemoryManager = Arc::new(Mutex::new(memory_manager));
+
+    registry.register(Box::new(tools::memory::MemoryTool::new(
+        memory_store.clone(),
+        memory_manager.clone(),
+    )))?;
 
     // Register external provider's tools (if any)
     let external_schemas = memory_manager.lock().await.get_external_tool_schemas();
@@ -406,6 +408,7 @@ async fn main() -> anyhow::Result<()> {
         cwd.clone(),
     );
     engine.mcp_manager = Some(mcp_manager.clone());
+    engine.memory_manager = Some(memory_manager.clone());
     engine.hook_executor = hook_executor;
 
     // Fire session_start hook

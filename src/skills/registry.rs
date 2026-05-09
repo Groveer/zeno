@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Skill registry — store loaded skills with category index.
 //!
 //! Provides:
@@ -50,6 +49,7 @@ impl SkillRegistry {
     }
 
     /// Register a skill. If a skill with the same name exists, it is replaced.
+    #[cfg(test)]
     pub fn register(&mut self, skill: SkillDefinition) {
         // Remove existing skill with same name (last-writer-wins)
         self.skills.retain(|s| s.name != skill.name);
@@ -136,6 +136,7 @@ impl SkillRegistry {
     }
 
     /// Merge another registry into this one. Existing entries are overwritten.
+    #[cfg(test)]
     pub fn merge(&mut self, other: SkillRegistry) {
         for skill in other.skills {
             self.register(skill);

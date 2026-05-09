@@ -328,12 +328,6 @@ impl McpManager {
     pub fn get_mut(&mut self, name: &str) -> Option<&mut McpServerState> {
         self.servers.get_mut(name)
     }
-
-    /// Whether any servers are configured.
-    #[allow(dead_code)]
-    pub fn has_servers(&self) -> bool {
-        !self.servers.is_empty()
-    }
 }
 
 // ---------------------------------------------------------------------------
