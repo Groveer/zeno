@@ -1415,9 +1415,9 @@ mod tests {
         input.move_cursor_up();
         assert_eq!(input.cursor_row_col(), (0, 1));
 
-        // Move up at top — should go to start
-        input.move_cursor_up();
-        assert_eq!(input.cursor, 0);
+        // Move up at top — returns false, cursor stays
+        assert!(!input.move_cursor_up());
+        assert_eq!(input.cursor_row_col(), (0, 1));
 
         // Now go down
         input.cursor = 0;
