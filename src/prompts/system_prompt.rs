@@ -100,7 +100,6 @@ fn guidelines(role: &RoleConfig) -> String {
 - When the user is just chatting or asking a question — respond with text only, no tool calls.
 - Follow the user's project conventions (CLAUDE.md / AGENTS.md) if present.
 - **Batch independent tool calls**: Issue all independent calls in one response (e.g. `glob` + `grep` together). Only sequence calls with data dependencies.
-- **Load skills for non-trivial tasks** (skip for greetings, simple questions): direct match → `skill_view` immediately; unknown → `skill_list` to browse → `skill_view`. Err on the side of loading.
 "#
  .trim()
  .to_string()
@@ -142,7 +141,7 @@ fn skills_block(registry: &SkillRegistry) -> String {
         let mut lines = Vec::new();
         lines.push(format!("## Skills ({} available)\n", skills.len()));
         lines.push(
-            "Skills are knowledge guides you can load on demand. Use `skill_list` to browse, `skill_view` to load.\n"
+            "**Load skills for non-trivial tasks** — use `skill_view(name=...)` to match a skill directly, or `skill_list` to browse. Skip for greetings/simple questions.\n"
                 .to_string(),
         );
         for s in &skills {
@@ -159,7 +158,7 @@ fn skills_block(registry: &SkillRegistry) -> String {
         categories.len()
     ));
     lines.push(
-        "Skills are knowledge guides organized by category. Use `skill_list` to browse a category, `skill_view` to load one.\n"
+        "**Load skills for non-trivial tasks** — match your task to a category above, then `skill_list(category=...)` to browse, `skill_view(name=...)` to load. Skip for greetings/simple questions.\n"
             .to_string(),
     );
 
