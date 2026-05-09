@@ -283,6 +283,8 @@ impl QueryEngine {
                     &self.carryover,
                     context_window,
                     self.memory_manager.as_ref(),
+                    &self.system_prompt,
+                    &tool_schemas,
                 ) => r,
                 _ = cancel.cancelled() => {
                     tracing::info!(event = "cancelled", phase = "auto_compact", "query_tui: cancelled during auto-compact");
@@ -421,6 +423,8 @@ impl QueryEngine {
                                             &self.carryover,
                                             cw,
                                             self.memory_manager.as_ref(),
+                                            &effective_system_prompt,
+                                            &tool_schemas,
                                         ) => r,
                                         _ = cancel.cancelled() => {
                                             tracing::info!(event = "cancelled", phase = "reactive_compact", "query_tui: cancelled during reactive compact");

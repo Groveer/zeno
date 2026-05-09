@@ -173,10 +173,19 @@ pub fn context_collapse(history: &mut ConversationHistory, keep_recent: usize) -
             if let ContentBlock::Text { text } = block
                 && text.len() > CONTEXT_COLLAPSE_CHAR_LIMIT
             {
-                let head = text[..CONTEXT_COLLAPSE_HEAD_CHARS].trim_end();
-                let tail = text[text.len() - CONTEXT_COLLAPSE_TAIL_CHARS..].trim_start();
-                let omitted =
-                    text.len() - CONTEXT_COLLAPSE_HEAD_CHARS - CONTEXT_COLLAPSE_TAIL_CHARS;
+                // Use char boundaries — byte-slicing a UTF-8 string can panic
+                // when the offset falls in the middle of a multi-byte char.
+                let head_end = text
+                    .char_indices()
+                    .nth(CONTEXT_COLLAPSE_HEAD_CHARS)
+                    .map_or(text.len(), |(i, _)| i);
+                let tail_start = text
+                    .char_indices()
+                    .nth_back(CONTEXT_COLLAPSE_TAIL_CHARS)
+                    .map_or(0, |(i, _)| i);
+                let head = text[..head_end].trim_end();
+                let tail = text[tail_start..].trim_start();
+                let omitted = tail_start - head_end;
                 *text = format!("{}\n...[collapsed {} chars]...\n{}", head, omitted, tail);
                 changed = true;
             }
@@ -374,10 +383,45 @@ pub async fn full_compact(
 // Auto-compact trigger
 // ---------------------------------------------------------------------------
 
+/// Estimate token count for extra context that `estimate_tokens(history)` misses:
+/// the system prompt and tool schemas.
+///
+/// Tool schemas can be substantial (20-30K tokens with many tools + MCP servers).
+/// Without including them, auto-compact may never trigger even when the real
+/// API prompt already exceeds the threshold.
+///
+/// Uses the same CJK-aware estimation as `estimate_tokens` for consistency.
+fn estimate_extra_tokens(system_prompt: &str, tool_schemas: &[serde_json::Value]) -> usize {
+    // System prompt: CJK-aware estimation
+    let mut ascii_bytes: usize = 0;
+    let mut cjk_count: usize = 0;
+    for ch in system_prompt.chars() {
+        if is_cjk(ch) {
+            cjk_count += 1;
+        } else {
+            ascii_bytes += ch.len_utf8();
+        }
+    }
+
+    // Tool schemas: JSON serialised length / 4 (schemas are almost always ASCII)
+    let schema_tokens: usize = tool_schemas
+        .iter()
+        .map(|v| {
+            let json_str = serde_json::to_string(v).unwrap_or_default();
+            json_str.len() / 4
+        })
+        .sum();
+
+    (ascii_bytes / 4) + (cjk_count * 2 / 3) + schema_tokens
+}
+
 /// Check if auto-compact is needed and perform it.
 /// 1. Try micro-compact first
 /// 2. If still over threshold, context-collapse then try full LLM compact
 /// 3. If full compact itself gets "prompt too long", PTL retry (up to 3x)
+///
+/// `system_prompt` and `tool_schemas` are needed for accurate token estimation —
+/// they consume context window space but are not part of the message history.
 pub async fn auto_compact_if_needed(
     settings: &Settings,
     history: &mut ConversationHistory,
@@ -385,20 +429,23 @@ pub async fn auto_compact_if_needed(
     carryover: &Carryover,
     context_window: u32,
     memory_manager: Option<&crate::memory::manager::SharedMemoryManager>,
+    system_prompt: &str,
+    tool_schemas: &[serde_json::Value],
 ) -> Result<Option<CompactResult>, CompactError> {
     if !config.enabled || config.threshold_ratio <= 0.0 {
         return Ok(None);
     }
 
     let threshold_tokens = ((context_window as f64) * config.threshold_ratio) as usize;
-    let tokens = estimate_tokens(history);
+    let extra_tokens = estimate_extra_tokens(system_prompt, tool_schemas);
+    let tokens = estimate_tokens(history) + extra_tokens;
     if tokens < threshold_tokens {
         return Ok(None);
     }
 
     // Step 1: micro-compact (cheap, no LLM call)
     let _was_micro = micro_compact(history, config.keep_recent);
-    let new_tokens = estimate_tokens(history);
+    let new_tokens = estimate_tokens(history) + extra_tokens;
 
     if new_tokens < threshold_tokens {
         tracing::info!(
@@ -433,7 +480,7 @@ pub async fn auto_compact_if_needed(
         .await
         {
             Ok(()) => {
-                let final_tokens = estimate_tokens(history);
+                let final_tokens = estimate_tokens(history) + extra_tokens;
                 tracing::info!(
                     compact_method = "full",
                     compact_trigger = "auto",
