@@ -125,7 +125,11 @@ fn tools_block(names: &[&str]) -> String {
         return "## Tools\n\n(No tools registered.)".to_string();
     }
 
-    format!("## Tools ({} available)\n\n{}", names.len(), names.join(", "))
+    format!(
+        "## Tools ({} available)\n\n{}",
+        names.len(),
+        names.join(", ")
+    )
 }
 
 // ---------------------------------------------------------------------------

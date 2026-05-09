@@ -60,7 +60,6 @@ fn dispatch_command(input: &str) -> CommandAction {
             CommandAction::NeedEngine("model", arg)
         }
         "/tools" => CommandAction::Done,
-        "/config" => CommandAction::Done,
         "/memory" => CommandAction::Done,
         "/mcp" => CommandAction::Done,
         "/hooks" => CommandAction::NeedEngine("hooks", String::new()),
@@ -83,7 +82,6 @@ Available commands:
 /cost — Token usage
 /model — Current model
 /tools — List tools
-/config — Show config
 /memory — Memory files
 /hooks — List hooks
 /resume — Restore the last session (conversation history + output)
@@ -236,7 +234,7 @@ async fn main() -> anyhow::Result<()> {
     if tc.web_fetch {
         registry.register(Box::new(tools::web_fetch::WebFetchTool::new()))?;
     }
-    registry.register(Box::new(tools::config_tool::ConfigTool::new()))?;
+
     registry.register(Box::new(tools::ask_user::AskUserTool::new()))?;
 
     // Resolve working directory early (needed for memory dir + skills + system prompt)
@@ -511,13 +509,6 @@ async fn main() -> anyhow::Result<()> {
                         "/tools" => send_text_response(
                             &sender,
                             &format!("Tools ({}): {}", tool_names.len(), tool_names.join(", ")),
-                        ),
-                        "/config" => send_text_response(
-                            &sender,
-                            &format!(
-                                "Config: ~/.config/zeno/init.lua\nProvider: {}\nModel: {}",
-                                provider_name, model
-                            ),
                         ),
                         "/memory" => {
                             let summary = {

@@ -20,8 +20,8 @@ use super::theme;
 
 /// All slash commands supported by the TUI, with short aliases first.
 const COMMANDS: &[&str] = &[
-    "/clear", "/compact", "/config", "/cost", "/exit", "/goal", "/help", "/mcp", "/memory",
-    "/model", "/quit", "/resume", "/tools",
+    "/clear", "/compact", "/cost", "/exit", "/goal", "/help", "/mcp", "/memory", "/model", "/quit",
+    "/resume", "/tools",
 ];
 
 /// Maximum number of items shown in the completion popup.

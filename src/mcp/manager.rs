@@ -246,8 +246,7 @@ impl McpManager {
                 };
                 // Include parameter schema inline so LLM can construct
                 // arguments without calling mcp_describe_tool separately.
-                let params = serde_json::to_string(&t.input_schema)
-                    .unwrap_or_else(|_| "{}".into());
+                let params = serde_json::to_string(&t.input_schema).unwrap_or_else(|_| "{}".into());
                 format!("{}\n  params: {}", header, params)
             })
             .collect();

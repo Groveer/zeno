@@ -1718,11 +1718,6 @@ fn format_tool_input_summary(tool_name: &str, input_json: &str) -> String {
             .map(|s| format!("\u{f06e} skill_view {}", s))
             .unwrap_or_else(|| "\u{f06e} skill_view".into()),
         "ask_user" => "\u{f059} ask_user".into(),
-        "config" => input
-            .get("action")
-            .and_then(|v| v.as_str())
-            .map(|s| format!("\u{f013} config {}", s))
-            .unwrap_or_else(|| "\u{f013} config".into()),
         "memory" => {
             let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("?");
             let target = input

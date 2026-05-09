@@ -3,7 +3,6 @@
 pub mod ask_user;
 pub mod base;
 pub mod bash;
-pub mod config_tool;
 pub mod edit;
 pub mod glob;
 pub mod grep;
