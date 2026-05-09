@@ -10,6 +10,9 @@
 use super::base::{Tool, ToolContext, ToolError};
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use std::sync::Arc;
+
+use crate::config::settings::Settings;
 
 /// Maximum response body size to read (10 MB).
 const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
@@ -22,10 +25,11 @@ const TIMEOUT_SECS: u64 = 30;
 
 pub struct WebFetchTool {
     client: reqwest::Client,
+    settings: Arc<Settings>,
 }
 
 impl WebFetchTool {
-    pub fn new() -> Self {
+    pub fn new(settings: Arc<Settings>) -> Self {
         Self {
             client: reqwest::Client::builder()
                 .user_agent("zeno/0.1 (terminal AI assistant; +https://github.com/nicepkg/zeno)")
@@ -33,6 +37,7 @@ impl WebFetchTool {
                 .redirect(reqwest::redirect::Policy::limited(10))
                 .build()
                 .unwrap_or_default(),
+            settings,
         }
     }
 }
@@ -154,8 +159,23 @@ impl Tool for WebFetchTool {
         let content = if is_json_content_type(&content_type) {
             parse_json(&bytes)
         } else if extract_text && is_html_content_type(&content_type) {
-            html2text::from_read(&bytes[..], 120)
-                .unwrap_or_else(|_| String::from_utf8_lossy(&bytes).into_owned())
+            // Try auxiliary model first for HTML extraction/summarization.
+            // Falls back to raw html2text if auxiliary model is unavailable.
+            let raw_text = html2text::from_read(&bytes[..], 120)
+                .unwrap_or_else(|_| String::from_utf8_lossy(&bytes).into_owned());
+            match crate::auxiliary::web_fetch::extract_web_content(&self.settings, &url, &raw_text)
+                .await
+            {
+                Ok(summary) => summary,
+                Err(e) => {
+                    tracing::debug!(
+                        event = "web_fetch_auxiliary_fallback",
+                        error = %e,
+                        "Auxiliary model failed, falling back to raw html2text"
+                    );
+                    raw_text
+                }
+            }
         } else {
             // Plain text or unknown — return as-is
             String::from_utf8_lossy(&bytes).into_owned()

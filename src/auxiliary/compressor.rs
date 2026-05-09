@@ -108,6 +108,50 @@ Rules:
 - Use bullet points for clarity."#;
 
 /// System prompt for the title generation task.
+const TITLE_SYSTEM_PROMPT: &str = r#"You are a session title generator. Generate a short, descriptive title for a conversation session.
+
+Rules:
+- Maximum 8 words, no punctuation at the end.
+- Summarize the main topic or task discussed.
+- Be specific (e.g., "Fix zeno web_fetch auxiliary model" not "Debugging issue").
+- Use plain text, no quotes or formatting."#;
+
+/// Generate a short title for a session based on its first user message.
+///
+/// Returns a concise title string, or `None` if generation fails
+/// (caller should fall back to the default one-liner).
+pub async fn generate_title(settings: &Settings, first_user_message: &str) -> Option<String> {
+    if first_user_message.trim().is_empty() {
+        return None;
+    }
+
+    let truncated: String = first_user_message.chars().take(500).collect();
+
+    let messages = vec![
+        AuxiliaryMessage {
+            role: "system".into(),
+            content: TITLE_SYSTEM_PROMPT.to_string(),
+        },
+        AuxiliaryMessage {
+            role: "user".into(),
+            content: format!(
+                "Generate a title for a session that starts with:\n\n{}",
+                truncated
+            ),
+        },
+    ];
+
+    match call_auxiliary(settings, AuxiliaryTask::TitleGeneration, messages).await {
+        Ok(result) => {
+            let title = result.content.trim().to_string();
+            if title.is_empty() { None } else { Some(title) }
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "Title generation failed, using default");
+            None
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

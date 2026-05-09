@@ -8,7 +8,7 @@
 //! 5. Auto-retries with max_completion_tokens when provider rejects max_tokens
 //! 6. Validates response structure before returning
 //!
-//! `call_auxiliary()` is actively used by compressor and web_extract.
+//! `call_auxiliary()` is actively used by compressor and web_fetch.
 //! `call_vision()` is reserved for future vision integration.
 
 use std::time::Duration;
@@ -53,6 +53,20 @@ pub async fn call_auxiliary(
     messages: Vec<AuxiliaryMessage>,
 ) -> Result<AuxiliaryResult, AuxiliaryError> {
     call_auxiliary_with_options(settings, task, messages, None, None).await
+}
+
+/// Call an auxiliary model with raw JSON messages (supports multimodal/vision).
+///
+/// Unlike `call_auxiliary`, this accepts pre-constructed JSON messages
+/// that may include image_url parts for vision models.
+/// Used by `auxiliary::vision` for image analysis.
+pub async fn call_auxiliary_raw(
+    settings: &Settings,
+    task: AuxiliaryTask,
+    raw_messages: Vec<serde_json::Value>,
+) -> Result<AuxiliaryResult, AuxiliaryError> {
+    let resolved = super::router::resolve_provider(task, settings)?;
+    call_resolved_raw(&resolved, &raw_messages, None, None).await
 }
 
 /// Call an auxiliary model with optional overrides for temperature and max_tokens.
@@ -114,6 +128,7 @@ async fn call_with_fallback(
 
         let resolved = match super::router::try_resolve_candidate(
             provider_name,
+            task,
             &candidate_config,
             settings,
         ) {
@@ -210,7 +225,7 @@ async fn call_resolved(
 ///    retry with the parameter removed or replaced (domain-specific, not in retry.rs).
 /// 3. **Provider fallback**: if all retries on this provider fail with a retryable error,
 ///    the caller (`call_with_fallback`) tries the next provider in the chain.
-async fn call_resolved_raw(
+pub(super) async fn call_resolved_raw(
     provider: &ResolvedProvider,
     api_messages: &[serde_json::Value],
     temperature_override: Option<f64>,
@@ -530,11 +545,21 @@ fn validate_response(data: &serde_json::Value) -> Result<String, AuxiliaryError>
         }
     };
 
-    let content = message
-        .get("content")
-        .and_then(|c| c.as_str())
-        .unwrap_or("")
-        .to_string();
+    let content = match message.get("content") {
+        Some(c) if c.is_null() => {
+            return Err(AuxiliaryError::InvalidResponse(
+                "unknown".into(),
+                "Response choices[0].message.content is null".into(),
+            ));
+        }
+        Some(c) => c.as_str().unwrap_or("").to_string(),
+        None => {
+            return Err(AuxiliaryError::InvalidResponse(
+                "unknown".into(),
+                "Response choices[0].message missing 'content' field".into(),
+            ));
+        }
+    };
 
     Ok(content)
 }
@@ -656,6 +681,26 @@ mod tests {
     #[test]
     fn test_validate_response_no_message() {
         let data = serde_json::json!({"choices": [{"finish_reason": "stop"}]});
+        assert!(matches!(
+            validate_response(&data),
+            Err(AuxiliaryError::InvalidResponse(_, _))
+        ));
+    }
+
+    #[test]
+    fn test_validate_response_null_content() {
+        // content: null → should error, not return Ok("")
+        let data = serde_json::json!({"choices": [{"message": {"content": null}}]});
+        assert!(matches!(
+            validate_response(&data),
+            Err(AuxiliaryError::InvalidResponse(_, _))
+        ));
+    }
+
+    #[test]
+    fn test_validate_response_missing_content_field() {
+        // message exists but has no content key → should error
+        let data = serde_json::json!({"choices": [{"message": {"role": "assistant"}}]});
         assert!(matches!(
             validate_response(&data),
             Err(AuxiliaryError::InvalidResponse(_, _))

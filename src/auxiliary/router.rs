@@ -123,7 +123,7 @@ impl AuxiliaryTask {
         match self {
             Self::Compression => "compression",
             Self::Vision => "vision",
-            Self::WebExtract => "web_extract",
+            Self::WebExtract => "web_fetch",
             Self::TitleGeneration => "title_generation",
             Self::SessionSearch => "session_search",
         }
@@ -134,7 +134,7 @@ impl AuxiliaryTask {
         match self {
             Self::Compression => &settings.auxiliary.compression,
             Self::Vision => &settings.auxiliary.vision,
-            Self::WebExtract => &settings.auxiliary.web_extract,
+            Self::WebExtract => &settings.auxiliary.web_fetch,
             Self::TitleGeneration => &settings.auxiliary.title_generation,
             Self::SessionSearch => &settings.auxiliary.session_search,
         }
@@ -159,6 +159,17 @@ impl AuxiliaryTask {
             Self::WebExtract => 4096,
             Self::TitleGeneration => 256,
             Self::SessionSearch => 1024,
+        }
+    }
+
+    /// Config table name in the `auxiliary` section.
+    pub fn config_table_name(&self) -> &str {
+        match self {
+            Self::Compression => "compression",
+            Self::Vision => "vision",
+            Self::WebExtract => "web_extract",
+            Self::TitleGeneration => "title_generation",
+            Self::SessionSearch => "session_search",
         }
     }
 }
@@ -248,14 +259,14 @@ pub fn resolve_provider(
 
     // Explicit provider (not "auto")
     if normalized != "auto" {
-        return resolve_explicit(&normalized, task_config, settings);
+        return resolve_explicit(&normalized, task, task_config, settings);
     }
 
     // Auto: try provider chain
     let chain = build_provider_chain(settings);
 
     for candidate in chain {
-        match try_resolve_candidate(&candidate, task_config, settings) {
+        match try_resolve_candidate(&candidate, task, task_config, settings) {
             Ok(resolved) => return Ok(resolved),
             Err(AuxiliaryError::NoApiKey(_)) => continue,
             Err(e) => return Err(e),
@@ -285,6 +296,7 @@ pub fn build_provider_chain(settings: &Settings) -> Vec<String> {
 /// Resolve an explicitly configured provider.
 fn resolve_explicit(
     provider_name: &str,
+    task: AuxiliaryTask,
     task_config: &AuxiliaryTaskConfig,
     settings: &Settings,
 ) -> Result<ResolvedProvider, AuxiliaryError> {
@@ -292,49 +304,28 @@ fn resolve_explicit(
         AuxiliaryError::ApiCall(format!("Provider '{}' not found in config", provider_name))
     })?;
 
-    let api_key = crate::config::settings::resolve_api_key_opt(provider.api_key.as_deref())
-        .ok_or_else(|| AuxiliaryError::NoApiKey(provider_name.to_string()))?;
-
-    let model = if task_config.model.is_empty() {
-        if provider.default_model.is_empty() {
-            settings.model.clone()
-        } else {
-            provider.default_model.clone()
-        }
+    // Task-level api_key takes precedence over provider's api_key.
+    let api_key = if let Some(ref key) = task_config.api_key {
+        crate::config::settings::resolve_api_key_opt(Some(key.as_str()))
     } else {
-        task_config.model.clone()
-    };
+        crate::config::settings::resolve_api_key_opt(provider.api_key.as_deref())
+    }
+    .ok_or_else(|| AuxiliaryError::NoApiKey(provider_name.to_string()))?;
 
-    let base_url = task_config
-        .base_url
-        .clone()
-        .unwrap_or_else(|| provider.base_url.clone());
-
-    let temperature = task_config
-        .temperature
-        .unwrap_or_else(|| task_config.default_temperature_for_task());
-
-    let max_tokens = if task_config.max_tokens > 0 {
-        task_config.max_tokens
-    } else {
-        task_config.default_max_tokens_for_task()
-    };
-
-    Ok(ResolvedProvider {
-        provider_name: provider_name.to_string(),
-        base_url,
+    Ok(build_resolved(
+        provider_name,
+        provider,
         api_key,
-        model,
-        timeout: task_config.timeout,
-        extra_body: task_config.extra_body.clone(),
-        max_tokens,
-        temperature,
-    })
+        task,
+        task_config,
+        settings,
+    ))
 }
 
 /// Try to resolve a candidate provider from the auto chain.
 pub fn try_resolve_candidate(
     provider_name: &str,
+    task: AuxiliaryTask,
     task_config: &AuxiliaryTaskConfig,
     settings: &Settings,
 ) -> Result<ResolvedProvider, AuxiliaryError> {
@@ -343,9 +334,35 @@ pub fn try_resolve_candidate(
         .get(provider_name)
         .ok_or_else(|| AuxiliaryError::NoApiKey(provider_name.to_string()))?;
 
-    let api_key = crate::config::settings::resolve_api_key_opt(provider.api_key.as_deref())
-        .ok_or_else(|| AuxiliaryError::NoApiKey(provider_name.to_string()))?;
+    // Task-level api_key takes precedence over provider's api_key.
+    let api_key = if let Some(ref key) = task_config.api_key {
+        crate::config::settings::resolve_api_key_opt(Some(key.as_str()))
+    } else {
+        crate::config::settings::resolve_api_key_opt(provider.api_key.as_deref())
+    }
+    .ok_or_else(|| AuxiliaryError::NoApiKey(provider_name.to_string()))?;
 
+    Ok(build_resolved(
+        provider_name,
+        provider,
+        api_key,
+        task,
+        task_config,
+        settings,
+    ))
+}
+
+/// Build a `ResolvedProvider` from a provider config and task config.
+///
+/// Shared logic for `resolve_explicit` and `try_resolve_candidate`.
+fn build_resolved(
+    provider_name: &str,
+    provider: &crate::config::settings::ProviderConfig,
+    api_key: String,
+    task: AuxiliaryTask,
+    task_config: &AuxiliaryTaskConfig,
+    settings: &Settings,
+) -> ResolvedProvider {
     let model = if task_config.model.is_empty() {
         if provider.default_model.is_empty() {
             settings.model.clone()
@@ -357,7 +374,7 @@ pub fn try_resolve_candidate(
     };
 
     let base_url = task_config
-        .base_url
+        .url
         .clone()
         .unwrap_or_else(|| provider.base_url.clone());
 
@@ -368,10 +385,10 @@ pub fn try_resolve_candidate(
     let max_tokens = if task_config.max_tokens > 0 {
         task_config.max_tokens
     } else {
-        task_config.default_max_tokens_for_task()
+        task.default_max_tokens()
     };
 
-    Ok(ResolvedProvider {
+    ResolvedProvider {
         provider_name: provider_name.to_string(),
         base_url,
         api_key,
@@ -380,7 +397,7 @@ pub fn try_resolve_candidate(
         extra_body: task_config.extra_body.clone(),
         max_tokens,
         temperature,
-    })
+    }
 }
 
 /// Helper: get default temperature for a task from its config key name.
@@ -388,10 +405,6 @@ impl AuxiliaryTaskConfig {
     fn default_temperature_for_task(&self) -> f64 {
         // All tasks currently use 0.3; this is a hook for future per-task defaults.
         0.3
-    }
-
-    fn default_max_tokens_for_task(&self) -> u32 {
-        4096
     }
 }
 
@@ -509,7 +522,7 @@ mod tests {
     fn test_task_config_key() {
         assert_eq!(AuxiliaryTask::Compression.config_key(), "compression");
         assert_eq!(AuxiliaryTask::Vision.config_key(), "vision");
-        assert_eq!(AuxiliaryTask::WebExtract.config_key(), "web_extract");
+        assert_eq!(AuxiliaryTask::WebExtract.config_key(), "web_fetch");
         assert_eq!(
             AuxiliaryTask::TitleGeneration.config_key(),
             "title_generation"
@@ -531,6 +544,62 @@ mod tests {
         assert_eq!(effective_temperature("gpt-4o", Some(0.5)), Some(0.5));
         assert_eq!(effective_temperature("gpt-4o", None), Some(0.3));
         assert_eq!(effective_temperature("kimi-latest", Some(0.5)), None);
+    }
+
+    #[test]
+    fn test_resolve_uses_task_specific_max_tokens() {
+        let settings = make_settings();
+
+        // TitleGeneration default is 256
+        let resolved = resolve_provider(AuxiliaryTask::TitleGeneration, &settings).unwrap();
+        assert_eq!(
+            resolved.max_tokens, 256,
+            "TitleGeneration should default to 256"
+        );
+
+        // SessionSearch default is 1024
+        let resolved = resolve_provider(AuxiliaryTask::SessionSearch, &settings).unwrap();
+        assert_eq!(
+            resolved.max_tokens, 1024,
+            "SessionSearch should default to 1024"
+        );
+
+        // Compression default is 4096
+        let resolved = resolve_provider(AuxiliaryTask::Compression, &settings).unwrap();
+        assert_eq!(
+            resolved.max_tokens, 4096,
+            "Compression should default to 4096"
+        );
+    }
+
+    #[test]
+    fn test_resolve_explicit_max_tokens_override() {
+        let mut settings = make_settings();
+        settings.auxiliary.compression.provider = "fallback".into();
+        settings.auxiliary.compression.max_tokens = 1000;
+
+        let resolved = resolve_provider(AuxiliaryTask::Compression, &settings).unwrap();
+        assert_eq!(resolved.max_tokens, 1000);
+    }
+
+    #[test]
+    fn test_resolve_task_api_key_override() {
+        let mut settings = make_settings();
+        // Task-level api_key should take precedence over provider's
+        settings.auxiliary.compression.api_key = Some("task-specific-key".into());
+
+        let resolved = resolve_provider(AuxiliaryTask::Compression, &settings).unwrap();
+        assert_eq!(resolved.api_key, "task-specific-key");
+    }
+
+    #[test]
+    fn test_resolve_task_base_url_override() {
+        let mut settings = make_settings();
+        // Task-level url should take precedence over provider's base_url
+        settings.auxiliary.compression.url = Some("https://custom-proxy.example.com/v1".into());
+
+        let resolved = resolve_provider(AuxiliaryTask::Compression, &settings).unwrap();
+        assert_eq!(resolved.base_url, "https://custom-proxy.example.com/v1");
     }
 
     #[test]

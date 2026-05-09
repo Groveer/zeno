@@ -363,6 +363,13 @@ impl QueryEngine {
                 // Re-sanitize and rebuild messages each attempt (history may
                 // have been mutated by reactive compact on a prior attempt).
                 self.history.sanitize();
+
+                // --- Vision preprocessing: analyze images via auxiliary model ---
+                // The OpenAI adapter drops Image blocks; Anthropic handles them natively.
+                // For providers that don't support vision, send images to the auxiliary
+                // vision model and replace Image blocks with text descriptions.
+                self.preprocess_images(sender).await;
+
                 let messages = self.history.to_api_messages();
 
                 // --- PreLlmCall hook: may inject extra context ---
@@ -1010,6 +1017,84 @@ impl QueryEngine {
             tool_calls: 0,
             tokens: self.cost_tracker.last_prompt_tokens + self.cost_tracker.last_output_tokens,
         });
+    }
+
+    /// Preprocess Image blocks in conversation history via the auxiliary vision model.
+    ///
+    /// Anthropic natively supports Image blocks, so preprocessing is skipped for it.
+    /// For all other providers (OpenAI-compatible), Image blocks are sent to the
+    /// auxiliary vision model and replaced with text descriptions.
+    async fn preprocess_images(&mut self, sender: &tokio::sync::mpsc::UnboundedSender<UiEvent>) {
+        // Anthropic handles images natively — no preprocessing needed
+        if self.settings.active_provider == "anthropic" {
+            return;
+        }
+
+        // Check if there are any Image blocks to process
+        let has_images = self.history.entries_raw().iter().any(|e| {
+            e.content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Image { .. }))
+        });
+
+        if !has_images {
+            return;
+        }
+
+        // Process each entry that contains Image blocks
+        for entry in self.history.entries_mut() {
+            let mut new_blocks: Vec<ContentBlock> = Vec::new();
+            let mut modified = false;
+
+            for block in &entry.content {
+                if let ContentBlock::Image {
+                    media_type,
+                    data,
+                    source_path,
+                } = block
+                {
+                    // Send image to auxiliary vision model
+                    let _ = sender.send(UiEvent::Status(
+                        "Analyzing image via auxiliary model...".into(),
+                    ));
+
+                    match crate::auxiliary::vision::analyze_image(
+                        &self.settings,
+                        data,
+                        media_type,
+                        source_path,
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            let label = if source_path.is_empty() {
+                                "image (clipboard)".to_string()
+                            } else {
+                                format!("image ({})", source_path)
+                            };
+                            new_blocks.push(ContentBlock::Text {
+                                text: format!("[Image Analysis — {}]:\n{}", label, result.content),
+                            });
+                            modified = true;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                event = "vision_fallback",
+                                error = %e,
+                                "Auxiliary vision model failed, keeping image as-is"
+                            );
+                            new_blocks.push(block.clone());
+                        }
+                    }
+                } else {
+                    new_blocks.push(block.clone());
+                }
+            }
+
+            if modified {
+                entry.content = new_blocks;
+            }
+        }
     }
 }
 

@@ -12,6 +12,7 @@ mod tools;
 mod ui;
 mod utils;
 
+use api::types::ContentBlock;
 use config::load as config_load;
 use config::settings;
 use engine::messages::ConversationHistory;
@@ -63,6 +64,11 @@ fn dispatch_command(input: &str) -> CommandAction {
         "/memory" => CommandAction::Done,
         "/mcp" => CommandAction::Done,
         "/hooks" => CommandAction::NeedEngine("hooks", String::new()),
+        "/search" => CommandAction::NeedEngine("search", String::new()),
+        s if s.starts_with("/search") => {
+            let arg = s.strip_prefix("/search").unwrap_or("").trim().to_string();
+            CommandAction::NeedEngine("search", arg)
+        }
         s if s.starts_with("/goal") => {
             let arg = s.strip_prefix("/goal").unwrap_or("").trim().to_string();
             CommandAction::NeedEngine("goal", arg)
@@ -86,6 +92,8 @@ Available commands:
 /hooks — List hooks
 /resume — Restore the last session (conversation history + output)
 /resume N — Restore session #N (use /resume to list all)
+/search — Search past sessions
+/search [query] — Search past sessions by topic
 /goal [text] — Set/show/clear auto-continue goal
 /goal clear — Clear goal
 /goal pause — Pause goal
@@ -232,7 +240,9 @@ async fn main() -> anyhow::Result<()> {
         )))?;
     }
     if tc.web_fetch {
-        registry.register(Box::new(tools::web_fetch::WebFetchTool::new()))?;
+        registry.register(Box::new(tools::web_fetch::WebFetchTool::new(
+            settings.clone(),
+        )))?;
     }
 
     registry.register(Box::new(tools::ask_user::AskUserTool::new()))?;
@@ -749,6 +759,64 @@ async fn main() -> anyhow::Result<()> {
                             send_text_response(&sender, "No saved session to resume.");
                         }
                     }
+                    "search" => {
+                        let query = arg.trim();
+                        let index = engine::session::load_session_index();
+                        if index.is_empty() {
+                            send_text_response(&sender, "No saved sessions to search.");
+                        } else if query.is_empty() {
+                            let list = engine::session::format_session_list(&index);
+                            send_text_response(
+                                &sender,
+                                &format!("Usage: /search [query]\n\n{}", list),
+                            );
+                        } else {
+                            let settings = settings.clone();
+                            let sender2 = sender.clone();
+                            let query_owned = query.to_string();
+                            let index_owned = index.clone();
+                            tokio::spawn(async move {
+                                let _ = sender2.send(engine::tui_events::UiEvent::Status(
+                                    "Searching sessions...".into(),
+                                ));
+                                match auxiliary::session_search::search_sessions(
+                                    &settings,
+                                    &query_owned,
+                                    &index_owned,
+                                )
+                                .await
+                                {
+                                    Ok(result) => {
+                                        let mut output = format!(
+                                            "━━━ Session Search: {} ━━━\n\n{}",
+                                            query_owned, result
+                                        );
+                                        output.push_str("\n\nUse /resume N to load a session.");
+                                        let _ = sender2
+                                            .send(engine::tui_events::UiEvent::TextDelta(output));
+                                        let _ =
+                                            sender2.send(engine::tui_events::UiEvent::QueryDone {
+                                                text: String::new(),
+                                                tool_calls: 0,
+                                                tokens: 0,
+                                            });
+                                    }
+                                    Err(e) => {
+                                        let _ =
+                                            sender2.send(engine::tui_events::UiEvent::TextDelta(
+                                                format!("Search failed: {}", e),
+                                            ));
+                                        let _ =
+                                            sender2.send(engine::tui_events::UiEvent::QueryDone {
+                                                text: String::new(),
+                                                tool_calls: 0,
+                                                tokens: 0,
+                                            });
+                                    }
+                                }
+                            });
+                        }
+                    }
                     _ => {}
                 },
                 CommandAction::Compact => {
@@ -872,6 +940,34 @@ async fn main() -> anyhow::Result<()> {
                 let summary = engine::session::build_summary(&entries);
                 let final_response =
                     engine::session::extract_final_response(&entries).unwrap_or_default();
+
+                // Generate AI title via auxiliary model
+                let first_user_msg = entries
+                    .iter()
+                    .find(|e| {
+                        e.role == crate::api::types::Role::User
+                            && e.content
+                                .iter()
+                                .any(|b| matches!(b, ContentBlock::Text { .. }))
+                            && !e
+                                .content
+                                .iter()
+                                .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                    })
+                    .and_then(|e| {
+                        e.content.iter().find_map(|b| {
+                            if let ContentBlock::Text { text } = b {
+                                Some(text.as_str())
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                    .unwrap_or("");
+                let title = auxiliary::compressor::generate_title(&settings, first_user_msg)
+                    .await
+                    .unwrap_or_default();
+
                 let data = engine::session::SessionData {
                     id: engine::session::generate_session_id(),
                     saved_at: engine::session::format_timestamp(now),
@@ -882,6 +978,7 @@ async fn main() -> anyhow::Result<()> {
                     total_tokens,
                     summary,
                     final_response,
+                    title,
                 };
                 engine::session::save_session(&data);
             } else {

@@ -133,6 +133,12 @@ zn.provider("openai", {
 -- ═══════════════════════════════════════════════
 -- Auxiliary models (cheaper models for specific tasks)
 -- ═══════════════════════════════════════════════
+--
+-- Each task can override provider, model, url, api_key, timeout, extra_body, max_tokens, temperature.
+-- provider = "auto" → try active provider first, then fallback to others.
+-- model = "" → inherit from the resolved provider or main model.
+-- url = nil → use the resolved provider's base_url.
+-- api_key = nil → use the resolved provider's api_key.
 
 zn.auxiliary("compression", {
   provider = "auto",
@@ -142,13 +148,13 @@ zn.auxiliary("compression", {
 
 zn.auxiliary("vision", {
   provider = "auto",
-  model = "", -- "" = inherit from main model
+  model = "",
   timeout = 30,
 })
 
-zn.auxiliary("web_extract", {
+zn.auxiliary("web_fetch", {
   provider = "auto",
-  model = "", -- "" = inherit from main model
+  model = "",
   timeout = 60,
 })
 
@@ -156,13 +162,35 @@ zn.auxiliary("title_generation", {
   provider = "auto",
   model = "",
   timeout = 30,
+  max_tokens = 256, -- title is short, save tokens
 })
 
 zn.auxiliary("session_search", {
   provider = "auto",
   model = "",
   timeout = 30,
+  max_tokens = 1024,
 })
+
+-- ── Examples: custom endpoint/credentials for a specific task ──
+--
+-- Use a different OpenAI-compatible endpoint:
+-- zn.auxiliary("compression", {
+--   model = "gpt-4o-mini",
+--   url = "https://api.openai.com/v1",
+--   api_key = "OPENAI_API_KEY",
+-- })
+--
+-- Use a local Ollama instance:
+-- zn.auxiliary("compression", {
+--   model = "qwen2.5:7b",
+--   url = "http://localhost:11434/v1",
+-- })
+--
+-- Use a proxy/reverse-proxy (api_key inherited from active provider):
+-- zn.auxiliary("compression", {
+--   url = "https://my-proxy.example.com/v1",
+-- })
 
 -- ═══════════════════════════════════════════════
 -- Model Context Windows

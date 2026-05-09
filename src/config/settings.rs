@@ -215,6 +215,9 @@ mod tests {
         assert!(looks_like_env_var("MY_VAR_123"));
         assert!(looks_like_env_var("A_"));
         assert!(looks_like_env_var("X2"));
+        // Underscore prefix is valid per POSIX
+        assert!(looks_like_env_var("_MY_KEY"));
+        assert!(looks_like_env_var("__KEY"));
 
         // Literal API keys → false (use raw strings to avoid Rust 2024 edition prefix parsing)
         assert!(!looks_like_env_var(r#"BSA-xxxx-yyyy"#));
@@ -227,7 +230,8 @@ mod tests {
         assert!(!looks_like_env_var("123")); // no letters
         assert!(!looks_like_env_var("has spaces"));
         assert!(!looks_like_env_var("has.dots"));
-        assert!(!looks_like_env_var(""));
+        assert!(!looks_like_env_var("")); // empty
+        assert!(looks_like_env_var("_A")); // underscore prefix + letter = valid
     }
 
     #[test]
@@ -471,7 +475,7 @@ impl Default for MemoryConfig {
 pub struct AuxiliaryConfig {
     pub compression: AuxiliaryTaskConfig,
     pub vision: AuxiliaryTaskConfig,
-    pub web_extract: AuxiliaryTaskConfig,
+    pub web_fetch: AuxiliaryTaskConfig,
     pub title_generation: AuxiliaryTaskConfig,
     pub session_search: AuxiliaryTaskConfig,
 }
@@ -481,7 +485,7 @@ impl Default for AuxiliaryConfig {
         Self {
             compression: AuxiliaryTaskConfig::default_with_timeout(30.0),
             vision: AuxiliaryTaskConfig::default_with_timeout(30.0),
-            web_extract: AuxiliaryTaskConfig::default_with_timeout(60.0),
+            web_fetch: AuxiliaryTaskConfig::default_with_timeout(60.0),
             title_generation: AuxiliaryTaskConfig::default_with_timeout(30.0),
             session_search: AuxiliaryTaskConfig::default_with_timeout(30.0),
         }
@@ -494,7 +498,9 @@ pub struct AuxiliaryTaskConfig {
     pub provider: String,
     #[serde(default)]
     pub model: String,
-    pub base_url: Option<String>,
+    /// Custom API endpoint URL for this task.
+    /// If unset, falls back to the resolved provider's base_url.
+    pub url: Option<String>,
     /// API key or environment variable name (auto-detected).
     /// Same logic as `ProviderConfig.api_key` and `WebSearchConfig.api_key`.
     pub api_key: Option<String>,
@@ -519,7 +525,7 @@ impl Default for AuxiliaryTaskConfig {
         Self {
             provider: "auto".into(),
             model: String::new(),
-            base_url: None,
+            url: None,
             api_key: None,
             timeout: 30.0,
             extra_body: HashMap::new(),
@@ -550,15 +556,11 @@ pub fn looks_like_env_var(s: &str) -> bool {
         return false;
     }
     let mut has_letter = false;
-    for (i, c) in s.chars().enumerate() {
+    for c in s.chars() {
         match c {
             'A'..='Z' => has_letter = true,
             '0'..='9' => {}
-            '_' => {
-                if i == 0 {
-                    return false;
-                }
-            }
+            '_' => {}
             _ => return false,
         }
     }

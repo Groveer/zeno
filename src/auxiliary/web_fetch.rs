@@ -90,7 +90,7 @@ pub async fn extract_html(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn test_web_extract_truncation() {
+    fn test_web_fetch_truncation() {
         // Verify that very long content gets truncated
         let long_content = "x".repeat(100_000);
         assert!(long_content.len() > 50_000);

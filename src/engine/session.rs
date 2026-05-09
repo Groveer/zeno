@@ -93,6 +93,9 @@ pub struct SessionData {
     /// The last assistant text response — the most valuable recall context.
     /// Captured verbatim (up to 2000 chars) so the user can recall what was concluded.
     pub final_response: String,
+    /// AI-generated short title for the session.
+    #[serde(default)]
+    pub title: String,
 }
 
 /// Lightweight entry for the session index — avoids loading full session data for listing.
@@ -107,6 +110,9 @@ pub struct SessionIndexEntry {
     pub one_liner: String,
     /// Entry count for quick reference.
     pub entry_count: usize,
+    /// AI-generated short title for the session.
+    #[serde(default)]
+    pub title: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -164,6 +170,7 @@ fn update_session_index(data: &SessionData) {
         total_tokens: data.total_tokens,
         one_liner: build_index_liner(data),
         entry_count: data.entries.len(),
+        title: data.title.clone(),
     };
 
     // Remove existing entry with same ID (shouldn't happen, but be safe)
@@ -244,6 +251,7 @@ fn rebuild_session_index() -> Vec<SessionIndexEntry> {
                 total_tokens: data.total_tokens,
                 one_liner: build_index_liner(&data),
                 entry_count: data.entries.len(),
+                title: data.title.clone(),
             };
             index.push(idx_entry);
         }
@@ -490,7 +498,12 @@ pub fn extract_final_response(entries: &[ConversationEntry]) -> Option<String> {
 pub fn build_index_liner(data: &SessionData) -> String {
     let user_msgs = count_user_messages(&data.entries);
 
-    // Use the first ~100 chars of the last user message as a topic indicator
+    // Prefer AI-generated title if available
+    if !data.title.is_empty() {
+        return format!("{} msgs, {} — {}", user_msgs, data.model, data.title);
+    }
+
+    // Fallback: use the first ~100 chars of the last user message as a topic indicator
     let topic = data
         .entries
         .iter()
