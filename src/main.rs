@@ -474,6 +474,12 @@ async fn main() -> anyhow::Result<()> {
         app.mark_dirty();
     }
 
+    // Pre-generate session title in the background after the first query
+    // completes, so it's ready when the user quits (no blocking exit).
+    let (title_tx, mut title_rx) = tokio::sync::oneshot::channel::<String>();
+    let mut title_tx = Some(title_tx);
+    let mut was_running = false;
+
     // Main TUI event loop
     // Use longer poll timeout when idle (100ms ≈ 10fps) vs short when running (16ms ≈ 60fps).
     // This dramatically reduces CPU when the user isn't interacting.
@@ -500,6 +506,55 @@ async fn main() -> anyhow::Result<()> {
                     app.mark_dirty();
                 }
             }
+
+            // Detect transition from Running → Idle: fire background title
+            // generation on the first completed query.
+            if was_running && !app.is_running() && title_tx.is_some() {
+                if let Ok(eng) = engine.try_lock() {
+                    // Extract the first user message for title generation
+                    let first_msg = eng
+                        .history
+                        .entries_raw()
+                        .iter()
+                        .find(|e| {
+                            e.role == crate::api::types::Role::User
+                                && e.content
+                                    .iter()
+                                    .any(|b| matches!(b, ContentBlock::Text { .. }))
+                                && !e
+                                    .content
+                                    .iter()
+                                    .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                        })
+                        .and_then(|e| {
+                            e.content.iter().find_map(|b| {
+                                if let ContentBlock::Text { text } = b {
+                                    Some(text.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                        .unwrap_or_default();
+                    if !first_msg.is_empty() {
+                        let settings = settings.clone();
+                        let tx = title_tx.take().unwrap();
+                        tokio::spawn(async move {
+                            let title = match tokio::time::timeout(
+                                std::time::Duration::from_secs(8),
+                                auxiliary::compressor::generate_title(&settings, &first_msg),
+                            )
+                            .await
+                            {
+                                Ok(t) => t.unwrap_or_default(),
+                                Err(_) => String::new(),
+                            };
+                            let _ = tx.send(title);
+                        });
+                    }
+                }
+            }
+            was_running = app.is_running();
         }
 
         // 2. Dispatch user input
@@ -965,37 +1020,18 @@ async fn main() -> anyhow::Result<()> {
         let summary = engine::session::build_summary(&entries);
         let final_response = engine::session::extract_final_response(&entries).unwrap_or_default();
 
-        // Generate AI title via auxiliary model (with timeout to avoid blocking exit)
-        let first_user_msg = entries
-            .iter()
-            .find(|e| {
-                e.role == crate::api::types::Role::User
-                    && e.content
-                        .iter()
-                        .any(|b| matches!(b, ContentBlock::Text { .. }))
-                    && !e
-                        .content
-                        .iter()
-                        .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
-            })
-            .and_then(|e| {
-                e.content.iter().find_map(|b| {
-                    if let ContentBlock::Text { text } = b {
-                        Some(text.as_str())
-                    } else {
-                        None
-                    }
-                })
-            })
-            .unwrap_or("");
-        let title = match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            auxiliary::compressor::generate_title(&settings, first_user_msg),
-        )
-        .await
-        {
-            Ok(t) => t.unwrap_or_default(),
-            Err(_) => String::new(),
+        // Use the pre-generated title if it's ready (fired earlier in
+        // the background when the first query completed).  If it's not
+        // ready yet, poll briefly then fall back to empty.
+        let title = match title_rx.try_recv() {
+            Ok(t) => t,
+            Err(_) => {
+                // Title still in-flight — wait up to 2s then give up.
+                match tokio::time::timeout(std::time::Duration::from_secs(2), &mut title_rx).await {
+                    Ok(Ok(t)) => t,
+                    _ => String::new(),
+                }
+            }
         };
 
         let data = engine::session::SessionData {
