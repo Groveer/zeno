@@ -462,10 +462,28 @@ fn segment_to_lines(seg: &OutputSegment) -> Vec<Line<'static>> {
             lines
         }
         OutputSegment::ToolError(err) => {
-            vec![Line::from(vec![
-                Span::styled("  ".to_string(), Style::new().fg(theme::ERROR)),
-                Span::styled(err.clone(), Style::new().fg(theme::ERROR)),
-            ])]
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            for (i, line) in err.lines().enumerate() {
+                if i == 0 {
+                    lines.push(Line::from(vec![
+                        Span::styled("  ".to_string(), Style::new().fg(theme::ERROR)),
+                        Span::styled(line.to_string(), Style::new().fg(theme::ERROR)),
+                    ]));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::styled("    ".to_string(), Style::default()),
+                        Span::styled(line.to_string(), Style::new().fg(theme::ERROR)),
+                    ]));
+                }
+            }
+            if lines.is_empty() {
+                vec![Line::from(vec![
+                    Span::styled("  ".to_string(), Style::new().fg(theme::ERROR)),
+                    Span::styled(err.clone(), Style::new().fg(theme::ERROR)),
+                ])]
+            } else {
+                lines
+            }
         }
         OutputSegment::Status(msg) => {
             // Split by newlines so multiline status messages render correctly
