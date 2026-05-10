@@ -921,6 +921,37 @@ impl QueryEngine {
 
             self.history.push_tool_results(tool_results);
 
+            // ── Compress edit tool inputs ──────────────────────────────
+            // After successful edits, strip common prefix/suffix context
+            // lines from the ToolUse.input to save tokens in future API calls.
+            {
+                let last_entry = self.history.entries_raw().last();
+                if let Some(entry) = last_entry {
+                    let mut successful_edit_ids = std::collections::HashSet::new();
+                    for block in &entry.content {
+                        if let ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error,
+                        } = block
+                        {
+                            if (is_error.is_none() || *is_error == Some(false))
+                                && content.starts_with("Replaced")
+                            {
+                                // Find the matching tool_use name
+                                if tool_uses
+                                    .iter()
+                                    .any(|tu| tu.id == *tool_use_id && tu.name == "edit")
+                                {
+                                    successful_edit_ids.insert(tool_use_id.clone());
+                                }
+                            }
+                        }
+                    }
+                    self.history.compress_edit_inputs(&successful_edit_ids);
+                }
+            }
+
             // ── Drain pending steer ────────────────────────────────
             // If the user typed input while the agent was running, inject
             // it into the last tool result's content so the model sees it
@@ -1484,8 +1515,10 @@ fn summarize_tool_output(tool_name: &str, output: &str, input_json: &str) -> Str
         }
         "write" => "written".into(),
         "edit" => {
-            // Generate multi-line diff from input_json's old_string / new_string.
-            // Each line prefixed with "-" (deleted) or "+" (added), separated by \n.
+            // Compute a minimal diff showing only changed lines + 1 line context.
+            // This avoids showing the full old_string/new_string (which often
+            // contain many identical context lines that the LLM included for
+            // uniqueness).
             let input = parse_tool_input(input_json);
 
             let old_str = input
@@ -1512,31 +1545,33 @@ fn summarize_tool_output(tool_name: &str, output: &str, input_json: &str) -> Str
                 return "patched".into();
             }
 
-            let mut diff_lines: Vec<String> = Vec::new();
+            let diff_lines = crate::utils::diff::compute_edit_diff(old_str, new_str);
+
+            if diff_lines.is_empty() {
+                return "patched (no diff)".into();
+            }
+
             const MAX_DIFF_LINES: usize = 20;
             const MAX_LINE_WIDTH: usize = 80;
 
-            for line in &old_lines {
+            let mut result_lines: Vec<String> = Vec::new();
+            for line in &diff_lines {
                 let truncated: String = line.chars().take(MAX_LINE_WIDTH).collect();
-                diff_lines.push(format!("-{}", truncated));
-            }
-            for line in &new_lines {
-                let truncated: String = line.chars().take(MAX_LINE_WIDTH).collect();
-                diff_lines.push(format!("+{}", truncated));
+                result_lines.push(truncated);
             }
 
             if replace_all {
-                diff_lines.push("(replace all)".into());
+                result_lines.push("(replace all)".into());
             }
 
             // Truncate if too many lines
-            if diff_lines.len() > MAX_DIFF_LINES {
-                let omitted = diff_lines.len() - MAX_DIFF_LINES;
-                diff_lines.truncate(MAX_DIFF_LINES);
-                diff_lines.push(format!("... ({} more lines omitted)", omitted));
+            if result_lines.len() > MAX_DIFF_LINES {
+                let omitted = result_lines.len() - MAX_DIFF_LINES;
+                result_lines.truncate(MAX_DIFF_LINES);
+                result_lines.push(format!("... ({} more lines omitted)", omitted));
             }
 
-            diff_lines.join("\n")
+            result_lines.join("\n")
         }
         "grep" => {
             let match_count = output.lines().filter(|l| !l.is_empty()).count();

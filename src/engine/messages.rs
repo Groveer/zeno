@@ -91,6 +91,35 @@ impl ConversationHistory {
         true
     }
 
+    /// Compress `old_string`/`new_string` in edit tool ToolUse.input blocks
+    /// by stripping common prefix/suffix context lines.
+    ///
+    /// For each tool_use_id in `successful_edit_ids`, find the matching
+    /// ToolUse block in the most recent assistant entry and compress its
+    /// input. This reduces token count for future API calls since the
+    /// context lines are no longer needed after the edit succeeded.
+    pub fn compress_edit_inputs(
+        &mut self,
+        successful_edit_ids: &std::collections::HashSet<String>,
+    ) {
+        if successful_edit_ids.is_empty() {
+            return;
+        }
+        for entry in self.entries.iter_mut().rev() {
+            if entry.role != Role::Assistant {
+                continue;
+            }
+            for block in &mut entry.content {
+                if let ContentBlock::ToolUse { id, input, .. } = block {
+                    if successful_edit_ids.contains(id) {
+                        crate::utils::diff::compress_edit_input(input);
+                    }
+                }
+            }
+            break; // Only the most recent assistant entry
+        }
+    }
+
     /// Convert the full history to API `Message` format.
     pub fn to_api_messages(&self) -> Vec<Message> {
         self.entries

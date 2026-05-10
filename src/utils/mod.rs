@@ -1,5 +1,7 @@
 //! Shared utility functions.
 
+pub mod diff;
+
 /// Compute the terminal display width of a string, accounting for emoji
 /// presentation sequences.
 ///
