@@ -914,85 +914,110 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        // 5. Check quit — auto-save session before exiting
+        // 5. Check quit — restore terminal ASAP so the user gets their
+        //    shell back without delay.  Slow session-save work is done
+        //    *after* the terminal is restored (below the loop).
         if app.should_quit() {
-            // Capture engine state for session persistence
-            let (entries, total_tokens, current_model) = {
-                let eng = engine.lock().await;
-                let entries = eng.history.entries_raw().to_vec();
-                let tokens = eng.cost_tracker.total_tokens();
-                let m = eng.model.clone();
-                (entries, tokens, m)
-            };
-
-            // Notify memory provider of session end
-            {
-                let json_entries: Vec<Value> = entries
-                    .iter()
-                    .filter_map(|e| serde_json::to_value(e).ok())
-                    .collect();
-                let mgr = memory_manager.lock().await;
-                mgr.on_session_end(&json_entries).await;
-            }
-
-            if !entries.is_empty() {
-                let now = SystemTime::now();
-                let summary = engine::session::build_summary(&entries);
-                let final_response =
-                    engine::session::extract_final_response(&entries).unwrap_or_default();
-
-                // Generate AI title via auxiliary model
-                let first_user_msg = entries
-                    .iter()
-                    .find(|e| {
-                        e.role == crate::api::types::Role::User
-                            && e.content
-                                .iter()
-                                .any(|b| matches!(b, ContentBlock::Text { .. }))
-                            && !e
-                                .content
-                                .iter()
-                                .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
-                    })
-                    .and_then(|e| {
-                        e.content.iter().find_map(|b| {
-                            if let ContentBlock::Text { text } = b {
-                                Some(text.as_str())
-                            } else {
-                                None
-                            }
-                        })
-                    })
-                    .unwrap_or("");
-                let title = auxiliary::compressor::generate_title(&settings, first_user_msg)
-                    .await
-                    .unwrap_or_default();
-
-                let data = engine::session::SessionData {
-                    id: engine::session::generate_session_id(),
-                    saved_at: engine::session::format_timestamp(now),
-                    model: current_model,
-                    provider: provider_name.to_string(),
-                    cwd: cwd.to_string_lossy().to_string(),
-                    entries,
-                    total_tokens,
-                    summary,
-                    final_response,
-                    title,
-                };
-                engine::session::save_session(&data);
-            } else {
-                // Empty session — remove stale session index if it exists
-                let idx = config::paths::session_index_path();
-                if idx.exists() {
-                    let _ = std::fs::remove_file(&idx);
-                }
-            }
+            // Cancel any running LLM task so the engine lock is released quickly.
+            app.cancel_running();
             break;
         }
     }
 
+    // ── Restore terminal ───────────────────────────────────────────
+    // Drain any buffered stdin events (mouse sequences etc.) before restoring
+    // the terminal so they don't leak as garbage characters to the shell.
+    while crossterm::event::poll(std::time::Duration::from_millis(0))? {
+        let _ = crossterm::event::read();
+    }
+
     ui::app::restore_terminal(&mut terminal)?;
+
+    // ── Session persistence (after terminal restore) ───────────────
+    // Capture engine state for session persistence (with timeout).
+    // If the engine is still busy, we proceed with whatever we can get.
+    let (entries, total_tokens, current_model) =
+        match tokio::time::timeout(std::time::Duration::from_secs(3), engine.lock()).await {
+            Ok(eng) => {
+                let entries = eng.history.entries_raw().to_vec();
+                let tokens = eng.cost_tracker.total_tokens();
+                let m = eng.model.clone();
+                (entries, tokens, m)
+            }
+            Err(_) => (Vec::new(), 0, String::new()),
+        };
+
+    // Notify memory provider of session end (with timeout)
+    {
+        let json_entries: Vec<Value> = entries
+            .iter()
+            .filter_map(|e| serde_json::to_value(e).ok())
+            .collect();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let mgr = memory_manager.lock().await;
+            mgr.on_session_end(&json_entries).await;
+        })
+        .await;
+    }
+
+    if !entries.is_empty() {
+        let now = SystemTime::now();
+        let summary = engine::session::build_summary(&entries);
+        let final_response = engine::session::extract_final_response(&entries).unwrap_or_default();
+
+        // Generate AI title via auxiliary model (with timeout to avoid blocking exit)
+        let first_user_msg = entries
+            .iter()
+            .find(|e| {
+                e.role == crate::api::types::Role::User
+                    && e.content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::Text { .. }))
+                    && !e
+                        .content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            })
+            .and_then(|e| {
+                e.content.iter().find_map(|b| {
+                    if let ContentBlock::Text { text } = b {
+                        Some(text.as_str())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .unwrap_or("");
+        let title = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            auxiliary::compressor::generate_title(&settings, first_user_msg),
+        )
+        .await
+        {
+            Ok(t) => t.unwrap_or_default(),
+            Err(_) => String::new(),
+        };
+
+        let data = engine::session::SessionData {
+            id: engine::session::generate_session_id(),
+            saved_at: engine::session::format_timestamp(now),
+            model: current_model,
+            provider: provider_name.to_string(),
+            cwd: cwd.to_string_lossy().to_string(),
+            entries,
+            total_tokens,
+            summary,
+            final_response,
+            title,
+        };
+        engine::session::save_session(&data);
+    } else {
+        // Empty session — remove stale session index if it exists
+        let idx = config::paths::session_index_path();
+        if idx.exists() {
+            let _ = std::fs::remove_file(&idx);
+        }
+    }
 
     // Fire session_end hook
     if let Some(he) = &engine.lock().await.hook_executor {

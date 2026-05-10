@@ -183,6 +183,11 @@ impl App {
             }
         ) {
             self.should_quit = true;
+            // Also cancel any running LLM task so the engine lock is
+            // released quickly.  Without this, the quit path would have
+            // to wait for the query_tui loop to notice the cancellation
+            // at its next checkpoint, causing a multi-second hang.
+            self.cancel_token.cancel();
             return;
         }
 
@@ -215,6 +220,7 @@ impl App {
                     }
                     _ => {
                         self.should_quit = true;
+                        self.cancel_token.cancel();
                     }
                 }
                 return;
@@ -665,6 +671,11 @@ impl App {
     pub fn reset_cancel_token(&mut self) -> CancellationToken {
         self.cancel_token = CancellationToken::new();
         self.cancel_token.clone()
+    }
+
+    /// Cancel the current running query (used by the exit path).
+    pub fn cancel_running(&self) {
+        self.cancel_token.cancel();
     }
 
     /// Drain the permission queue. When `permission_allow_all` is set,
