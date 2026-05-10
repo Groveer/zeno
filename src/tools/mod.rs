@@ -3,6 +3,7 @@
 pub mod ask_user;
 pub mod base;
 pub mod bash;
+pub mod delegate_task;
 pub mod edit;
 pub mod glob;
 pub mod grep;

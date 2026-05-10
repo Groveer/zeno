@@ -39,7 +39,7 @@ use crate::engine::tui_events::UiEvent;
 use crate::hooks::executor::HookExecutor;
 use crate::hooks::types::HookEvent;
 use crate::permissions::checker;
-use crate::tools::base::ToolContext;
+use crate::tools::base::{SubAgentDeps, ToolContext};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
@@ -808,11 +808,29 @@ impl QueryEngine {
                 return Ok(());
             }
 
-            let ctx = ToolContext::with_ask_sender(
+            let mut ctx = ToolContext::with_ask_sender(
                 self.cwd.clone(),
                 sender.clone(),
                 self.mcp_manager.clone(),
-            );
+            )
+            .with_cancel_token(cancel.clone());
+
+            // Attach sub-agent dependencies if available
+            if let Some(ref factory) = self.client_factory {
+                let progress_tx = self.sub_agent_tx.clone().unwrap_or_else(|| {
+                    let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+                    tx
+                });
+                let deps = SubAgentDeps {
+                    client_factory: factory.clone(),
+                    tool_registry: self.tools.clone(),
+                    settings: self.settings.clone(),
+                    progress_tx,
+                    delegation_config: self.settings.delegation.clone(),
+                    cost_tracker: self.sub_agent_cost_tracker.clone(),
+                };
+                ctx = ctx.with_sub_agent_deps(deps);
+            }
             let mut tool_results: Vec<ContentBlock> = Vec::new();
 
             for tu in &tool_uses {
@@ -849,7 +867,7 @@ impl QueryEngine {
                             &self.permission_mode,
                             &self.settings.trusted_paths,
                             &self.permission_allow_all,
-                            &self.tools,
+                            self.tools.as_ref(),
                             tu,
                             &ctx,
                             sender,
@@ -907,7 +925,7 @@ impl QueryEngine {
                         &self.permission_mode,
                         &self.settings.trusted_paths,
                         &self.permission_allow_all,
-                        &self.tools,
+                        self.tools.as_ref(),
                         tu,
                         &ctx,
                         sender,

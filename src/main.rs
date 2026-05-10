@@ -15,6 +15,7 @@ mod utils;
 use api::types::ContentBlock;
 use config::load as config_load;
 use config::settings;
+use config::settings::ProviderConfig;
 use engine::messages::ConversationHistory;
 use engine::query_engine::QueryEngine;
 use memory::provider::MemoryProvider;
@@ -249,6 +250,31 @@ async fn main() -> anyhow::Result<()> {
 
     registry.register(Box::new(tools::ask_user::AskUserTool::new()))?;
 
+    // Register delegate_task tool (sub-agent support) — always available
+    registry.register(Box::new(tools::delegate_task::DelegateTaskTool::new()))?;
+
+    // Create client factory for sub-agents
+    let client_factory: Arc<
+        dyn Fn(&str, &ProviderConfig) -> Box<dyn api::client::SupportsStreamingMessages>
+            + Send
+            + Sync,
+    > = Arc::new({
+        move |name: &str, config: &ProviderConfig| {
+            let api_key = settings::resolve_api_key(config).unwrap_or_default();
+            let base_url = config.base_url.clone();
+            match name {
+                "anthropic" => Box::new(api::anthropic::AnthropicClient::new(api_key, base_url))
+                    as Box<dyn api::client::SupportsStreamingMessages>,
+                _ => Box::new(api::openai::OpenAIClient::new(api_key, base_url))
+                    as Box<dyn api::client::SupportsStreamingMessages>,
+            }
+        }
+    });
+
+    // Create sub-agent progress channel (attached to ToolContext for delegate_task)
+    let (_sub_agent_progress_tx, _sub_agent_progress_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::engine::sub_agent::SubAgentEvent>();
+
     // Resolve working directory early (needed for memory dir + skills + system prompt)
     let cwd = std::env::current_dir().unwrap_or_default();
 
@@ -417,12 +443,14 @@ async fn main() -> anyhow::Result<()> {
     drop(memory_prompt);
     tracing::debug!(prompt_len = system_prompt.len(), "System prompt assembled");
 
+    let registry = Arc::new(registry); // wrap for shared access by sub-agents
+
     let mut engine = QueryEngine::new(
         client,
         model.to_string(),
         system_prompt,
         ConversationHistory::new(),
-        registry,
+        registry.clone(),
         settings.max_turns,
         settings.max_tokens,
         permission_mode.clone(),
@@ -432,6 +460,7 @@ async fn main() -> anyhow::Result<()> {
     engine.mcp_manager = Some(mcp_manager.clone());
     engine.memory_manager = Some(memory_manager.clone());
     engine.hook_executor = hook_executor;
+    engine.client_factory = Some(client_factory.clone());
 
     // Fire session_start hook
     if let Some(he) = &engine.hook_executor {
@@ -453,13 +482,17 @@ async fn main() -> anyhow::Result<()> {
     let engine = Arc::new(Mutex::new(engine));
 
     let mut app = ui::app::App::new();
-    // Share the engine's steer slot so the TUI can inject mid-run user input
-    // without needing the engine lock. This enables the "type while running"
-    // feature — the user's text goes into the slot, and the engine drains it
-    // after tool results are appended.
+    // Share the sub-agent progress sender with the engine so delegate_task
+    // can report sub-agent progress to the TUI.
     {
         let eng = engine.lock().await;
         app.set_steer_slot(eng.pending_steer.clone());
+    }
+    // Wire sub-agent progress channel AFTER app is created (app owns the rx).
+    // The engine clones the tx into each ToolContext so delegate_task can send events.
+    {
+        let mut eng = engine.lock().await;
+        eng.sub_agent_tx = Some(app.sub_agent_sender());
     }
     app.set_status(ui::status_bar::StatusInfo {
         model: model.to_string(),

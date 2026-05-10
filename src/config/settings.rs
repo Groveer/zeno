@@ -39,6 +39,9 @@ pub struct Settings {
     pub auxiliary: AuxiliaryConfig,
     pub llm: LlmConfig,
     pub log_retention_days: u64,
+    /// Delegation config for sub-agents (delegate_task tool).
+    #[serde(default)]
+    pub delegation: DelegationConfig,
 }
 
 impl Default for Settings {
@@ -61,6 +64,7 @@ impl Default for Settings {
             memory: MemoryConfig::default(),
             auxiliary: AuxiliaryConfig::default(),
             llm: LlmConfig::default(),
+            delegation: DelegationConfig::default(),
             log_retention_days: 3,
         }
     }
@@ -423,6 +427,31 @@ impl Default for LlmConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Delegation
+// ---------------------------------------------------------------------------
+
+/// Configuration for the delegate_task tool (sub-agent system).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct DelegationConfig {
+    /// Maximum number of sub-agents that can run concurrently.
+    /// Default: 3. Minimum: 1.
+    pub max_concurrent_children: u32,
+    /// Timeout per sub-agent in seconds.
+    /// Default: 300 (5 minutes). Minimum: 30.
+    pub child_timeout: f64,
+}
+
+impl Default for DelegationConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_children: 3,
+            child_timeout: 300.0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Memory
 // ---------------------------------------------------------------------------
 
@@ -478,6 +507,9 @@ pub struct AuxiliaryConfig {
     pub web_fetch: AuxiliaryTaskConfig,
     pub title_generation: AuxiliaryTaskConfig,
     pub session_search: AuxiliaryTaskConfig,
+    /// Delegation task config (for sub-agents). When provider is set
+    /// (not "auto"), sub-agents use a different model/provider than the parent.
+    pub delegation: AuxiliaryTaskConfig,
 }
 
 impl Default for AuxiliaryConfig {
@@ -488,6 +520,7 @@ impl Default for AuxiliaryConfig {
             web_fetch: AuxiliaryTaskConfig::default_with_timeout(60.0),
             title_generation: AuxiliaryTaskConfig::default_with_timeout(30.0),
             session_search: AuxiliaryTaskConfig::default_with_timeout(30.0),
+            delegation: AuxiliaryTaskConfig::default_with_timeout(60.0),
         }
     }
 }

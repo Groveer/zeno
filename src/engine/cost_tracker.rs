@@ -133,6 +133,18 @@ impl CostTracker {
         entries.sort_by(|a, b| b.1.calls.cmp(&a.1.calls));
         entries
     }
+
+    /// Absorb sub-agent token usage into this tracker.
+    /// Adds all token counts from the sub-agent's result without incrementing
+    /// turn_count (sub-agent turns are not parent turns).
+    pub fn absorb_subagent(&mut self, model: &str, input_tokens: u64, output_tokens: u64) {
+        self.total_input_tokens += input_tokens;
+        self.total_output_tokens += output_tokens;
+        let entry = self.model_costs.entry(model.to_string()).or_default();
+        entry.input_tokens += input_tokens;
+        entry.output_tokens += output_tokens;
+        entry.calls += 1;
+    }
 }
 
 #[cfg(test)]

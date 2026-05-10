@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::query_engine::steer_into_slot;
+use crate::engine::sub_agent::SubAgentEvent;
 
 use super::input::{self, InputState};
 use super::output::{OutputSegment, OutputState};
@@ -67,6 +68,10 @@ pub struct App {
     /// Shared reference to the engine's steer slot so the TUI can inject
     /// mid-run user input into the agent loop without the engine lock.
     steer_slot: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+    /// Receiver for sub-agent progress events (delegate_task).
+    sub_agent_rx: tokio::sync::mpsc::UnboundedReceiver<SubAgentEvent>,
+    /// Sender for sub-agent progress events (cloned into ToolContext).
+    sub_agent_tx: tokio::sync::mpsc::UnboundedSender<SubAgentEvent>,
 }
 
 /// A queued permission request waiting for user response.
@@ -86,6 +91,7 @@ impl App {
 
     pub fn new() -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (sub_agent_tx, sub_agent_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             input: InputState::new(),
             output: OutputState::new(),
@@ -114,6 +120,8 @@ impl App {
             permission_allow_all: false,
             steer_queue: Vec::new(),
             steer_slot: None,
+            sub_agent_rx,
+            sub_agent_tx,
         }
     }
 
@@ -125,6 +133,12 @@ impl App {
     /// mid-run user input. Called once when the engine is created.
     pub fn set_steer_slot(&mut self, slot: std::sync::Arc<std::sync::Mutex<Option<String>>>) {
         self.steer_slot = Some(slot);
+    }
+
+    /// Get the sender for sub-agent progress events.
+    /// The engine clones this and puts it into ToolContext for delegate_task.
+    pub fn sub_agent_sender(&self) -> tokio::sync::mpsc::UnboundedSender<SubAgentEvent> {
+        self.sub_agent_tx.clone()
     }
 
     /// Whether something changed since the last frame and a re-render is due.
@@ -544,6 +558,82 @@ impl App {
                     self.output.push(OutputSegment::Status(format!(
                         "󰏖 compact: {} ({}  {} tokens)",
                         method, tokens_before, tokens_after
+                    )));
+                }
+            }
+        }
+
+        // Process sub-agent events
+        self.process_sub_agent_events();
+    }
+
+    /// Process sub-agent progress events from delegate_task.
+    fn process_sub_agent_events(&mut self) {
+        while let Ok(event) = self.sub_agent_rx.try_recv() {
+            self.render_dirty = true;
+            match event {
+                SubAgentEvent::Started { goal, tools, .. } => {
+                    let tools_str = if tools.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" [tools: {}]", tools.join(", "))
+                    };
+                    let short_goal = truncate_preview(&goal, 60);
+                    self.output.push(OutputSegment::Status(format!(
+                        "🔄 sub-agent started: {}{}",
+                        short_goal, tools_str
+                    )));
+                }
+                SubAgentEvent::Thinking { text, .. } => {
+                    let short = truncate_preview(&text, 80);
+                    if !short.trim().is_empty() {
+                        self.output
+                            .push(OutputSegment::Status(format!("💭 sub-agent: {}", short)));
+                    }
+                }
+                SubAgentEvent::ToolStarted {
+                    tool,
+                    input_summary,
+                    ..
+                } => {
+                    let display = if input_summary.is_empty() {
+                        tool
+                    } else {
+                        format!("{} ({})", tool, input_summary)
+                    };
+                    self.output.push(OutputSegment::ToolExecuting(format!(
+                        "sub-agent: {}",
+                        display
+                    )));
+                }
+                SubAgentEvent::ToolCompleted {
+                    tool,
+                    result_bytes,
+                    is_error,
+                    ..
+                } => {
+                    let status = if is_error { "✗" } else { "✓" };
+                    self.output.push(OutputSegment::ToolComplete(format!(
+                        "{} {} ({} bytes)",
+                        status, tool, result_bytes
+                    )));
+                }
+                SubAgentEvent::Status { message, .. } => {
+                    self.output
+                        .push(OutputSegment::Status(format!("sub-agent: {}", message)));
+                }
+                SubAgentEvent::Completed { result, .. } => {
+                    let status = if result.interrupted {
+                        "interrupted"
+                    } else if result.error.is_some() {
+                        "failed"
+                    } else {
+                        "completed"
+                    };
+                    let summary_len = result.summary.len();
+                    self.output.push(OutputSegment::Status(format!(
+                        "✓ sub-agent {} ({} calls, {:.1}s, {} chars)",
+                        status, result.api_calls, result.duration_seconds, summary_len
                     )));
                 }
             }

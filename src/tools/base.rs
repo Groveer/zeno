@@ -2,9 +2,15 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
+
+use crate::config::settings::{DelegationConfig, ProviderConfig, Settings};
+use crate::engine::cost_tracker::CostTracker;
+use crate::engine::sub_agent::SubAgentEvent;
 
 // ---------------------------------------------------------------------------
 // Tool Error
@@ -29,6 +35,41 @@ pub enum ToolError {
 }
 
 // ---------------------------------------------------------------------------
+// Sub-agent dependencies
+// ---------------------------------------------------------------------------
+
+/// Dependencies needed to spawn sub-agents from tools.
+/// Carried in `ToolContext` so the `delegate_task` tool can create sub-agents.
+#[derive(Clone)]
+#[allow(dead_code, reason = "used by delegate_task tool via ToolContext")]
+pub struct SubAgentDeps {
+    /// Factory to create API clients for sub-agents.
+    pub client_factory: Arc<
+        dyn Fn(&str, &ProviderConfig) -> Box<dyn crate::api::client::SupportsStreamingMessages>
+            + Send
+            + Sync,
+    >,
+    /// The parent's tool registry (shared reference).
+    pub tool_registry: Arc<ToolRegistry>,
+    /// Application settings.
+    pub settings: Arc<Settings>,
+    /// Channel to send sub-agent progress events to the TUI.
+    pub progress_tx: tokio::sync::mpsc::UnboundedSender<SubAgentEvent>,
+    /// Delegation config (max_concurrent, timeout).
+    pub delegation_config: DelegationConfig,
+    /// Shared cost tracker — sub-agents fold their token usage into this.
+    pub cost_tracker: Arc<Mutex<CostTracker>>,
+}
+
+impl std::fmt::Debug for SubAgentDeps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubAgentDeps")
+            .field("settings", &self.settings)
+            .finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tool Context
 // ---------------------------------------------------------------------------
 
@@ -41,6 +82,11 @@ pub struct ToolContext {
     pub ask_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::engine::tui_events::UiEvent>>,
     /// Shared MCP manager for lazy MCP server connections.
     pub mcp_manager: Option<std::sync::Arc<tokio::sync::Mutex<crate::mcp::manager::McpManager>>>,
+    /// Dependencies for sub-agent delegation (set when the engine supports it).
+    pub sub_agent_deps: Option<SubAgentDeps>,
+    /// Cancellation token from the parent engine — tools that spawn background
+    /// work (e.g. delegate_task) should link this to their own cancellation.
+    pub cancel_token: Option<CancellationToken>,
 }
 
 impl ToolContext {
@@ -54,7 +100,21 @@ impl ToolContext {
             cwd,
             ask_sender: Some(sender),
             mcp_manager,
+            sub_agent_deps: None,
+            cancel_token: None,
         }
+    }
+
+    /// Attach sub-agent dependencies to this context.
+    pub fn with_sub_agent_deps(mut self, deps: SubAgentDeps) -> Self {
+        self.sub_agent_deps = Some(deps);
+        self
+    }
+
+    /// Attach a cancellation token to this context.
+    pub fn with_cancel_token(mut self, token: CancellationToken) -> Self {
+        self.cancel_token = Some(token);
+        self
     }
 
     /// Resolve a path relative to cwd.
@@ -135,6 +195,8 @@ pub trait Tool: Send + Sync {
 // ---------------------------------------------------------------------------
 
 /// Static registry of available tools.
+///
+/// After construction, wrap in `Arc` for shared ownership (e.g. sub-agent support).
 pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
 }
@@ -144,6 +206,15 @@ impl ToolRegistry {
         Self {
             tools: HashMap::new(),
         }
+    }
+
+    /// Wrap in `Arc` for shared ownership.
+    #[allow(
+        dead_code,
+        reason = "used by sub-agent engine for ToolRegistry sharing"
+    )]
+    pub fn into_arc(self) -> Arc<Self> {
+        Arc::new(self)
     }
 
     /// Register a tool. Returns an error if a tool with the same name is already registered.
@@ -162,6 +233,16 @@ impl ToolRegistry {
     /// Get all tool schemas for the LLM.
     pub fn schemas(&self) -> Vec<Value> {
         self.tools.values().map(|t| t.schema()).collect()
+    }
+
+    /// Get schemas only for the specified tool names.
+    /// Used by sub-agents so they only see their allowed tools.
+    pub fn schemas_for(&self, names: &[String]) -> Vec<Value> {
+        names
+            .iter()
+            .filter_map(|n| self.tools.get(n.as_str()))
+            .map(|t| t.schema())
+            .collect()
     }
 
     /// Execute a tool by name. Validates input before execution.

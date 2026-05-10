@@ -172,6 +172,19 @@ zn.auxiliary("session_search", {
   max_tokens = 1024,
 })
 
+-- Sub-agent delegation (delegate_task tool):
+-- Controls which provider/model sub-agents use when spawned via delegate_task.
+-- When all fields are at defaults (provider="auto", model=""), sub-agents
+-- inherit the parent's provider configuration entirely.
+--
+-- zn.auxiliary("delegation", {
+--   provider = "auto",    -- "auto" → use parent's provider; "openai" → use OpenAI
+--   model = "",           -- "" → inherit; "gpt-4o-mini" → use a cheaper model
+--   url = nil,            -- nil → use resolved provider's base_url
+--   api_key = nil,        -- nil → use resolved provider's api_key
+--   timeout = 60,
+-- })
+
 -- Or configure all auxiliary tasks at once with a single table:
 -- zn.auxiliaries({
 --   compression = { provider = "auto", model = "", timeout = 30 },
@@ -179,6 +192,7 @@ zn.auxiliary("session_search", {
 --   web_fetch = { provider = "auto", model = "", timeout = 60 },
 --   title_generation = { provider = "auto", model = "", timeout = 30, max_tokens = 256 },
 --   session_search = { provider = "auto", model = "", timeout = 30, max_tokens = 1024 },
+--   delegation = { provider = "auto", model = "", timeout = 60 },
 -- })
 
 -- ── Examples: custom endpoint/credentials for a specific task ──
@@ -199,6 +213,21 @@ zn.auxiliary("session_search", {
 -- Use a proxy/reverse-proxy (api_key inherited from active provider):
 -- zn.auxiliary("compression", {
 --   url = "https://my-proxy.example.com/v1",
+-- })
+--
+-- ── Examples: sub-agent delegation (delegate_task tool) ──────────────
+--
+-- Route sub-agents to a cheaper model (parent stays on main model):
+-- zn.auxiliary("delegation", {
+--   model = "gpt-4o-mini",
+--   provider = "auto",         -- "auto" = inherit parent's provider
+-- })
+--
+-- Route sub-agents to a completely different provider:
+-- zn.auxiliary("delegation", {
+--   provider = "openai",
+--   model = "gpt-4o-mini",
+--   url = "https://api.openai.com/v1",
 -- })
 
 -- ═══════════════════════════════════════════════

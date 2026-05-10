@@ -1,7 +1,7 @@
 //! Query engine: manages conversation state and tool registry.
 
 use crate::api::client::SupportsStreamingMessages;
-use crate::config::settings::{PermissionMode, Settings};
+use crate::config::settings::{PermissionMode, ProviderConfig, Settings};
 use crate::engine::carryover::Carryover;
 use crate::engine::compact::CompactConfig;
 use crate::engine::cost_tracker::CostTracker;
@@ -17,11 +17,15 @@ pub struct QueryEngine {
     pub model: String,
     pub system_prompt: String,
     pub history: ConversationHistory,
-    pub tools: ToolRegistry,
+    pub tools: Arc<ToolRegistry>,
     pub max_turns: u32,
     pub max_tokens: u32,
     pub permission_mode: PermissionMode,
     pub cost_tracker: CostTracker,
+    /// Shared cost tracker for sub-agents. Sub-agents fold their token usage
+    /// into this; the main engine absorbs it into `cost_tracker` after each
+    /// tool-turn that contained delegate_task calls.
+    pub sub_agent_cost_tracker: Arc<Mutex<CostTracker>>,
     pub compact_config: CompactConfig,
     pub settings: Arc<Settings>,
     /// Working directory captured at session start. Used instead of
@@ -47,6 +51,16 @@ pub struct QueryEngine {
     pub mcp_manager: Option<Arc<tokio::sync::Mutex<crate::mcp::manager::McpManager>>>,
     /// Shared memory manager for external provider lifecycle (prefetch, sync, mirroring).
     pub memory_manager: Option<SharedMemoryManager>,
+    /// Factory function to create API clients for sub-agents.
+    /// Takes a provider name and ProviderConfig, returns a new client.
+    /// If None, sub-agents use the parent's client directly.
+    pub client_factory: Option<
+        Arc<dyn Fn(&str, &ProviderConfig) -> Box<dyn SupportsStreamingMessages> + Send + Sync>,
+    >,
+    /// Sender for sub-agent progress events (from App).
+    /// Cloned into ToolContext so delegate_task can report progress.
+    pub sub_agent_tx:
+        Option<tokio::sync::mpsc::UnboundedSender<crate::engine::sub_agent::SubAgentEvent>>,
 }
 
 /// Inject user text into a steer slot without interrupting the agent.
@@ -81,7 +95,7 @@ impl QueryEngine {
         model: String,
         system_prompt: String,
         history: ConversationHistory,
-        tools: ToolRegistry,
+        tools: Arc<ToolRegistry>,
         max_turns: u32,
         max_tokens: u32,
         permission_mode: PermissionMode,
@@ -103,6 +117,7 @@ impl QueryEngine {
             max_tokens,
             permission_mode,
             cost_tracker: CostTracker::default(),
+            sub_agent_cost_tracker: Arc::new(Mutex::new(CostTracker::default())),
             compact_config,
             settings,
             cwd,
@@ -112,6 +127,8 @@ impl QueryEngine {
             pending_steer: Arc::new(Mutex::new(None)),
             mcp_manager: None,
             memory_manager: None,
+            client_factory: None,
+            sub_agent_tx: None,
         }
     }
 
