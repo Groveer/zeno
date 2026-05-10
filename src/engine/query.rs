@@ -1521,6 +1521,39 @@ fn summarize_tool_output(tool_name: &str, output: &str, _input_json: &str) -> St
                 }
             }
         }
+        // glob: just show the count
+        "glob" => {
+            let first_line = output.lines().next().unwrap_or(output);
+            if first_line.starts_with("Found ") {
+                first_line.to_string()
+            } else {
+                let line_count = output.lines().count();
+                format!("({} lines)", line_count)
+            }
+        }
+        // grep: show match count + file count
+        "grep" => {
+            let first_line = output.lines().next().unwrap_or(output);
+            if first_line.starts_with("Found ") {
+                // Parse file count from results
+                let file_count: usize = output
+                    .lines()
+                    .skip(1) // skip "Found N match(es):"
+                    .filter(|l| !l.is_empty())
+                    .filter_map(|l| l.split(':').next())
+                    .filter(|file| !file.is_empty())
+                    .collect::<std::collections::HashSet<&str>>()
+                    .len();
+                if file_count > 0 {
+                    format!("{} ({} file(s))", first_line, file_count)
+                } else {
+                    first_line.to_string()
+                }
+            } else {
+                let line_count = output.lines().count();
+                format!("({} lines)", line_count)
+            }
+        }
         // web_search / web_fetch: LLM digests the content — user just needs summary
         "web_search" => {
             let result_count = output.lines().filter(|l| !l.is_empty()).count();
