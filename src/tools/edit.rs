@@ -43,7 +43,7 @@ impl Tool for EditTool {
             "type": "function",
             "function": {
                 "name": "edit",
-                "description": "Find-and-replace within a file. Uses fuzzy matching to handle common LLM errors with indentation and whitespace. old_string must be unique in the file. Use this for targeted edits instead of rewriting entire files.",
+                "description": "Find-and-replace within a file. Uses fuzzy matching (indentation, whitespace, line-number prefixes, etc.) to handle common LLM errors.\n\nBEST PRACTICE:\n1. First READ the file to get accurate content.\n2. Copy-paste the EXACT text to replace as old_string — include surrounding lines for uniqueness.\n3. old_string MUST be unique in the file (or use replace_all=true).\n4. Match the file's indentation exactly — or don't worry, fuzzy matching handles ±8 spaces.\n5. For multi-line old_string, copy exact lines from read output (line numbers stripped automatically).\n6. Trailing whitespace mismatches are handled automatically.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -53,11 +53,11 @@ impl Tool for EditTool {
                         },
                         "old_string": {
                             "type": "string",
-                            "description": "Text to find and replace. Must be unique in the file. Fuzzy matching handles minor differences."
+                            "description": "Text to find and replace. COPY EXACTLY from read output (line-number prefixes stripped automatically). Include 2-3 surrounding lines for uniqueness. MUST be unique — if it appears multiple times, use replace_all=true."
                         },
                         "new_string": {
                             "type": "string",
-                            "description": "Replacement text. Use empty string to delete."
+                            "description": "Replacement text. Use empty string to delete old_string. Preserve the same indentation style as old_string (but fuzzy matching adjusts automatically)."
                         },
                         "replace_all": {
                             "type": "boolean",
@@ -146,16 +146,56 @@ impl Tool for EditTool {
             }
         }
 
+        // Build a compact change summary: show first line of change
+        // NOTE: use .chars().take() for truncation (UTF-8 safe, avoids byte-slice panics)
+        let truncate =
+            |s: &str, max_chars: usize| -> String { s.chars().take(max_chars).collect::<String>() };
+
+        let change_preview = if old_string.lines().count() <= 1 {
+            let trimmed_old = old_string.trim();
+            if trimmed_old.len() > 60 {
+                format!("\n  -: {}", truncate(trimmed_old, 57))
+            } else {
+                format!("\n  -: {}", trimmed_old)
+            }
+        } else {
+            let old_first = old_string.lines().next().unwrap_or("").trim();
+            let old_last = old_string.lines().last().unwrap_or("").trim();
+            let new_first = new_string.lines().next().unwrap_or("").trim();
+            if old_first == new_first {
+                // Multi-line change, first line same — show range
+                let old_summary = if old_last.chars().count() > 60 {
+                    format!("{} ... {}", truncate(old_first, 40), truncate(old_last, 20),)
+                } else {
+                    format!("{} ... {}", old_first, old_last)
+                };
+                format!("\n  changed: {}", old_summary)
+            } else {
+                let old_trunc = if old_first.chars().count() > 60 {
+                    truncate(old_first, 57)
+                } else {
+                    old_first.to_string()
+                };
+                let new_trunc = if new_first.chars().count() > 60 {
+                    truncate(new_first, 57)
+                } else {
+                    new_first.to_string()
+                };
+                format!("\n  -: {}\n  +: {}", old_trunc, new_trunc)
+            }
+        };
+
         let strategy_info = if strategy != "exact" {
             format!(" [fuzzy: {}]", strategy)
         } else {
             String::new()
         };
         Ok(format!(
-            "Replaced {} occurrence(s) in {}{}",
+            "Replaced {} occurrence(s) in {}{}{}",
             match_count,
             resolved.display(),
-            strategy_info
+            strategy_info,
+            change_preview
         ))
     }
 }
@@ -1200,13 +1240,13 @@ fn find_closest_lines(old_string: &str, content: &str) -> String {
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     let top: Vec<(f64, usize)> = scored.into_iter().take(3).collect();
 
-    let context = 2; // Lines of context around match
+    let context = 1; // Lines of context around match (reduced from 2)
     let mut parts = Vec::new();
     let mut seen_ranges = std::collections::HashSet::new();
 
     for (_, line_idx) in top {
         let start = line_idx.saturating_sub(context);
-        let end = (line_idx + old_lines.len() + context).min(content_lines.len());
+        let end = (line_idx + 1).min(content_lines.len()); // only show the matching line itself
         let key = (start, end);
         if seen_ranges.contains(&key) {
             continue;
@@ -1216,7 +1256,9 @@ fn find_closest_lines(old_string: &str, content: &str) -> String {
         let mut snippet = String::new();
         #[allow(clippy::needless_range_loop)]
         for j in start..end {
-            snippet.push_str(&format!("{:4}| {}\n", j + 1, content_lines[j]));
+            let line = content_lines[j];
+            let display = if line.len() > 80 { &line[..77] } else { line };
+            snippet.push_str(&format!("{:4}| {}\n", j + 1, display));
         }
         parts.push(snippet);
     }

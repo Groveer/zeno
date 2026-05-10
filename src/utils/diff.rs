@@ -69,13 +69,33 @@ pub fn compute_edit_diff(old_str: &str, new_str: &str) -> Vec<String> {
         }
     }
 
-    // Removed lines with context
-    for line in &old_lines[old_diff_start..old_diff_end] {
-        result.push(format!("-{}", line));
-    }
-    // Added lines with context
-    for line in &new_lines[new_diff_start..new_diff_end] {
-        result.push(format!("+{}", line));
+    // Interleave old/new lines within diff zone: only mark truly changed lines.
+    // Identical lines at the same offset are shown as context (space prefix)
+    // instead of redundant -/+, which made small changes look large in the UI.
+    let old_inner_count = old_diff_end - old_diff_start;
+    let new_inner_count = new_diff_end - new_diff_start;
+    let max_inner = old_inner_count.max(new_inner_count);
+
+    for i in 0..max_inner {
+        let old_line = old_lines.get(old_diff_start + i);
+        let new_line = new_lines.get(new_diff_start + i);
+
+        match (old_line, new_line) {
+            (Some(o), Some(n)) if o == n => {
+                result.push(format!(" {}", o));
+            }
+            (Some(o), Some(n)) => {
+                result.push(format!("-{}", o));
+                result.push(format!("+{}", n));
+            }
+            (Some(o), None) => {
+                result.push(format!("-{}", o));
+            }
+            (None, Some(n)) => {
+                result.push(format!("+{}", n));
+            }
+            (None, None) => unreachable!(),
+        }
     }
 
     // Context: last common line (if we skipped some suffix)

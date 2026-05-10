@@ -6,11 +6,11 @@ use serde_json::{Value, json};
 use super::base::{Tool, ToolContext, ToolError};
 
 /// Default number of lines to return when no offset is specified and the file
-/// is large. A generous default avoids excessive LLM round-trips for partial reads.
-const DEFAULT_PREVIEW_LINES: usize = 300;
+/// is large. Increased from 300 to reduce round-trips for medium-sized files.
+const DEFAULT_PREVIEW_LINES: usize = 500;
 
 /// Files shorter than this are returned in full (no truncation).
-const FULL_READ_THRESHOLD: usize = 300;
+const FULL_READ_THRESHOLD: usize = 500;
 
 /// Maximum file size in bytes that read will load (10 MB).
 /// Prevents OOM from reading huge single-line files.
@@ -35,7 +35,7 @@ impl Tool for ReadTool {
             "type": "function",
             "function": {
                 "name": "read",
-                "description": "Read file contents with line numbers. Use large limit (e.g. 2000) to read more at once. Use offset+limit for large files, offset+context to read around a line.",
+                "description": "Read file contents with line numbers.\n\nBEHAVIOR:\n- Small files (≤500 lines, no params): returns the ENTIRE file.\n- Large files (no params): returns first 500 lines as preview.\n- Use offset+limit to read a specific range (e.g. offset=50, limit=100).\n- Use offset+context to read around a line (e.g. offset=50, context=10 reads lines 40-60).\n- Set limit=2000 to read up to 2000 lines at once.\n\nBEST PRACTICE: For large files, first read without params to get a preview, then use offset+limit to read specific sections.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -50,7 +50,7 @@ impl Tool for ReadTool {
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "Max lines to read (default: 500, max: 2000).",
+                            "description": "Max lines to read (default: 500, max: 2000). Use 2000 to read large sections in one call.",
                             "default": 500
                         },
                         "context": {
@@ -143,23 +143,14 @@ impl Tool for ReadTool {
             result.push_str(&format!("{:>6} | {}\n", line_num, line));
         }
 
-        // Metadata footer
+        // Metadata footer — compact
         if end < total_lines {
             result.push_str(&format!(
-                "\n(showing lines {}-{} of {} total)\n",
+                "\n(lines {}-{} of {})\n",
                 start + 1,
                 end,
                 total_lines
             ));
-            if !has_offset && !has_context {
-                result.push_str(&format!(
-                    "TIP: Use offset+limit or offset+context to read specific sections.\n\
-                     Example: offset={}, context=20 to read lines {}-{}.\n",
-                    total_lines / 2,
-                    total_lines / 2 - 20,
-                    total_lines / 2 + 20,
-                ));
-            }
         }
 
         Ok(result)
