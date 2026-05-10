@@ -172,6 +172,15 @@ zn.auxiliary("session_search", {
   max_tokens = 1024,
 })
 
+-- Or configure all auxiliary tasks at once with a single table:
+-- zn.auxiliaries({
+--   compression = { provider = "auto", model = "", timeout = 30 },
+--   vision = { provider = "auto", model = "", timeout = 30 },
+--   web_fetch = { provider = "auto", model = "", timeout = 60 },
+--   title_generation = { provider = "auto", model = "", timeout = 30, max_tokens = 256 },
+--   session_search = { provider = "auto", model = "", timeout = 30, max_tokens = 1024 },
+-- })
+
 -- ── Examples: custom endpoint/credentials for a specific task ──
 --
 -- Use a different OpenAI-compatible endpoint:

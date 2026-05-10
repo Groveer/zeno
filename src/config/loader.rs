@@ -540,6 +540,21 @@ fn register_zeno_api(lua: &Lua, table: &mlua::Table) -> anyhow::Result<()> {
             Ok(())
         })?,
     )?;
+    // Bulk version: zn.auxiliaries({ compression = {...}, vision = {...}, ... })
+    table.set(
+        "auxiliaries",
+        lua.create_function(move |lua, opts: mlua::Table| {
+            let existing: mlua::Table = get_overrides(lua)?
+                .get::<mlua::Table>("auxiliary")
+                .unwrap_or_else(|_| lua.create_table().unwrap());
+            for pair in opts.pairs::<String, mlua::Value>() {
+                let (task, val) = pair?;
+                existing.set(task, val)?;
+            }
+            get_overrides(lua)?.set("auxiliary", existing)?;
+            Ok(())
+        })?,
+    )?;
 
     // --- Global settings ---
     table.set(
@@ -1046,6 +1061,33 @@ mod tests {
         let settings = load_from_tmpdir(init_lua).unwrap();
         assert_eq!(settings.auxiliary.vision.model, "gemini-2.5-flash");
         assert_eq!(settings.auxiliary.vision.timeout, 30.0);
+    }
+
+    #[test]
+    fn test_auxiliaries_bulk_config_from_lua() {
+        let init_lua = r#"
+            local zn = require 'zeno'
+            zn.provider("anthropic", {
+                api_key = "ANTHROPIC_API_KEY",
+                base_url = "https://api.anthropic.com",
+                default_model = "claude-sonnet-4-20250514",
+            })
+            zn.set_provider("anthropic")
+            zn.auxiliaries({
+                vision = { provider = "auto", model = "gemini-2.5-flash", timeout = 30 },
+                compression = { provider = "openai", model = "gpt-4o-mini", timeout = 15 },
+                web_fetch = { provider = "auto", timeout = 45, max_tokens = 2048 },
+            })
+            return zn.config()
+        "#;
+        let settings = load_from_tmpdir(init_lua).unwrap();
+        assert_eq!(settings.auxiliary.vision.model, "gemini-2.5-flash");
+        assert_eq!(settings.auxiliary.vision.timeout, 30.0);
+        assert_eq!(settings.auxiliary.compression.provider, "openai");
+        assert_eq!(settings.auxiliary.compression.model, "gpt-4o-mini");
+        assert_eq!(settings.auxiliary.compression.timeout, 15.0);
+        assert_eq!(settings.auxiliary.web_fetch.timeout, 45.0);
+        assert_eq!(settings.auxiliary.web_fetch.max_tokens, 2048);
     }
 
     #[test]
