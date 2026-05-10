@@ -52,7 +52,7 @@ tokio-stream = "0.1"
 
 # TUI
 ratatui = "0.30"
-crossterm = "0.28"
+crossterm = "0.29"
 syntect = "5"
 unicode-width = "0.2"
 pulldown-cmark = "0.13"
