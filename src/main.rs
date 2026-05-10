@@ -343,6 +343,7 @@ async fn main() -> anyhow::Result<()> {
 
     let tool_names: Vec<String> = registry.names().into_iter().map(String::from).collect();
     tracing::info!(tools = ?tool_names, "Registered tools");
+    let builtin_tool_count = tool_names.len();
 
     // Release built-in skills to user config dir if needed.
     // Uses spawn_blocking since it involves synchronous filesystem I/O
@@ -382,7 +383,7 @@ async fn main() -> anyhow::Result<()> {
     registry.register(Box::new(tools::skill_view::SkillViewTool::new(
         skill_registry.clone(),
     )))?;
-
+    let skill_tool_count = registry.names().len() - builtin_tool_count;
     // Initialize MCP manager (lazy — no servers started yet)
     let mcp_manager = std::sync::Arc::new(tokio::sync::Mutex::new(
         mcp::manager::McpManager::from_config(&settings.mcp.servers),
@@ -391,6 +392,7 @@ async fn main() -> anyhow::Result<()> {
     registry.register(Box::new(mcp::tools::McpListToolsTool::new()))?;
     registry.register(Box::new(mcp::tools::McpDescribeToolTool::new()))?;
     registry.register(Box::new(mcp::tools::McpCallToolTool::new()))?;
+    let mcp_tool_count = registry.names().len() - builtin_tool_count - skill_tool_count;
 
     // Build system prompt — use memory manager for built-in + external provider content
     let memory_prompt = memory_manager.lock().await.build_system_prompt();
@@ -454,7 +456,9 @@ async fn main() -> anyhow::Result<()> {
         total_tokens: 0,
         context_window: 0,
         turn_count: 0,
-        tool_count: tool_names.len(),
+        builtin_tool_count,
+        mcp_tool_count,
+        skill_tool_count,
         mode: ui::status_bar::AppMode::Idle,
         steer_count: 0,
     });
@@ -573,7 +577,14 @@ async fn main() -> anyhow::Result<()> {
                         ),
                         "/tools" => send_text_response(
                             &sender,
-                            &format!("Tools ({}): {}", tool_names.len(), tool_names.join(", ")),
+                            &format!(
+                                "Tools ({} total): {} builtin, {} mcp, {} skill\n{}",
+                                tool_names.len(),
+                                builtin_tool_count,
+                                mcp_tool_count,
+                                skill_tool_count,
+                                tool_names.join(", ")
+                            ),
                         ),
                         "/memory" => {
                             let summary = {
