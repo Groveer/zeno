@@ -1606,6 +1606,11 @@ fn summarize_tool_output(tool_name: &str, output: &str, _input_json: &str) -> St
 
             result_lines.join("\n")
         }
+        // todo: only show the action result line, not the full task list (shown in side panel)
+        "todo" => {
+            // Take only the first line (the ✅/📋 action summary), skip the full task list
+            output.lines().next().unwrap_or(output).to_string()
+        }
         _ => output.to_string(),
     }
 }

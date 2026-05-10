@@ -12,12 +12,16 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
+    style::{Modifier, Style},
+    text::{Line, Span, Text},
+    widgets::{Block, Borders, Paragraph},
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::query_engine::steer_into_slot;
 use crate::engine::sub_agent::SubAgentEvent;
+use crate::tools::todo::TodoState;
 
 use super::input::{self, InputState};
 use super::output::{OutputSegment, OutputState};
@@ -33,6 +37,33 @@ fn truncate_preview(s: &str, max_chars: usize) -> std::borrow::Cow<'_, str> {
         let end = s.floor_char_boundary(max_chars);
         std::borrow::Cow::Owned(format!("{}…", &s[..end]))
     }
+}
+
+/// Truncate a string to fit within `max_width` terminal columns, respecting
+/// multi-byte UTF-8 and emoji width. Returns an owned `String`.
+fn truncate_str(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let total_width: usize = s
+        .chars()
+        .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
+        .sum();
+    if total_width <= max_width {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut w = 0usize;
+    for c in s.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if w + cw > max_width.saturating_sub(1) {
+            out.push('…');
+            break;
+        }
+        out.push(c);
+        w += cw;
+    }
+    out
 }
 
 /// The main TUI application state.
@@ -72,6 +103,8 @@ pub struct App {
     sub_agent_rx: tokio::sync::mpsc::UnboundedReceiver<SubAgentEvent>,
     /// Sender for sub-agent progress events (cloned into ToolContext).
     sub_agent_tx: tokio::sync::mpsc::UnboundedSender<SubAgentEvent>,
+    /// Shared todo state for the side panel.
+    todo_state: Option<std::sync::Arc<tokio::sync::Mutex<TodoState>>>,
 }
 
 /// A queued permission request waiting for user response.
@@ -122,6 +155,7 @@ impl App {
             steer_slot: None,
             sub_agent_rx,
             sub_agent_tx,
+            todo_state: None,
         }
     }
 
@@ -133,6 +167,11 @@ impl App {
     /// mid-run user input. Called once when the engine is created.
     pub fn set_steer_slot(&mut self, slot: std::sync::Arc<std::sync::Mutex<Option<String>>>) {
         self.steer_slot = Some(slot);
+    }
+
+    /// Set the shared todo state for the side panel.
+    pub fn set_todo_state(&mut self, state: std::sync::Arc<tokio::sync::Mutex<TodoState>>) {
+        self.todo_state = Some(state);
     }
 
     /// Get the sender for sub-agent progress events.
@@ -649,13 +688,13 @@ impl App {
 
         // Calculate dynamic input height based on text line count
         let text_lines = self.input.line_count() as u16;
-        // input height = 1 (border) + text_lines, capped at MAX_INPUT_HEIGHT
         let desired_input_height = (Self::MIN_INPUT_HEIGHT + text_lines.saturating_sub(1))
             .min(Self::MAX_INPUT_HEIGHT)
-            .min(full.height.saturating_sub(2)); // leave room for status bar + at least 1 output line
+            .min(full.height.saturating_sub(2));
         let input_height = desired_input_height.max(Self::MIN_INPUT_HEIGHT);
 
-        let chunks = Layout::default()
+        // Vertical layout: output area | input area | status bar
+        let vert_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(1),
@@ -664,11 +703,26 @@ impl App {
             ])
             .split(full);
 
-        let output_area = chunks[0];
-        let input_area = chunks[1];
-        let status_area = chunks[2];
+        let vert_output_area = vert_chunks[0];
+        let input_area = vert_chunks[1];
+        let status_area = vert_chunks[2];
 
-        // Title bar
+        // Decide layout: if todo_state is present, split output area horizontally
+        // with the side panel on the right. Input and status bar span full width.
+        let side_panel_width: u16 = 40;
+        let has_side_panel = self.todo_state.is_some() && full.width > side_panel_width + 20;
+
+        let (output_area, side_area) = if has_side_panel {
+            let areas = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(1), Constraint::Length(side_panel_width)])
+                .split(vert_output_area);
+            (areas[0], areas[1])
+        } else {
+            (vert_output_area, Rect::default())
+        };
+
+        // ── Title bar ──
         let title = format!(
             " zeno {} (Ctrl+D to quit, Ctrl+C to interrupt) ",
             env!("CARGO_PKG_VERSION")
@@ -687,7 +741,7 @@ impl App {
             title_area,
         );
 
-        // Output area (skip title row)
+        // ── Output area (skip title row) ──
         let output_render_area = Rect {
             y: output_area.y + 1,
             height: output_area.height.saturating_sub(1),
@@ -705,24 +759,26 @@ impl App {
             super::output::render(frame, output_render_area, &mut self.output);
         }
 
-        // Input area
+        // ── Input area ──
         input::render(frame, input_area, &self.input, &self.mode);
 
-        // Status bar
+        // ── Status bar ──
         status_bar::render(frame, status_area, &self.status);
 
-        // Cursor — compute position accounting for multi-line text and scrolling
+        // ── Side panel (todo list) ──
+        if let Some(ref state_arc) = self.todo_state {
+            Self::render_side_panel(frame, side_area, state_arc);
+        }
+
+        // ── Cursor ──
         if self.mode == AppMode::Idle
             || self.mode == AppMode::WaitingInput
             || self.mode == AppMode::Running
         {
             let cursor_col = self.input.cursor_display_col();
-
-            // Available text width (subtract prompt width "◆ " or "> " = 2 display cols)
-            let prompt_width: u16 = 2u16; // "◆ " or "> "
+            let prompt_width: u16 = 2u16;
             let text_width = input_area.width.saturating_sub(prompt_width);
 
-            // Horizontal scroll: same logic as in render()
             let h_scroll = if cursor_col >= text_width {
                 cursor_col - text_width + 1
             } else {
@@ -730,10 +786,8 @@ impl App {
             };
 
             let cursor_x = input_area.x + prompt_width + cursor_col.saturating_sub(h_scroll);
-
-            // Vertical: cursor row relative to the content area, accounting for v_scroll
             let cursor_row = self.input.cursor_row() as u16;
-            let content_height = input_area.height.saturating_sub(1); // minus border
+            let content_height = input_area.height.saturating_sub(1);
             let v_scroll = if cursor_row >= content_height {
                 cursor_row - content_height + 1
             } else {
@@ -743,6 +797,123 @@ impl App {
 
             frame.set_cursor_position((cursor_x, cursor_y));
         }
+    }
+
+    /// Render the right side panel showing the todo list.
+    fn render_side_panel(
+        frame: &mut Frame,
+        area: Rect,
+        state_arc: &std::sync::Arc<tokio::sync::Mutex<TodoState>>,
+    ) {
+        // Try to lock; if contended, show a brief message
+        let state = match state_arc.try_lock() {
+            Ok(s) => s,
+            Err(_) => {
+                let block = Block::default()
+                    .title(" 󰃷 Tasks ")
+                    .borders(Borders::LEFT)
+                    .border_style(Style::new().fg(theme::BORDER));
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        " loading...",
+                        Style::new().fg(theme::TEXT_DIM),
+                    ))
+                    .block(block),
+                    area,
+                );
+                return;
+            }
+        };
+
+        let total = state.tasks.len();
+        let completed = state
+            .tasks
+            .iter()
+            .filter(|t| t.status == "completed")
+            .count();
+
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        // ── Title line ──
+        lines.push(Line::from(vec![
+            Span::styled(" 󰃷 ", Style::new().fg(theme::ACCENT)),
+            Span::styled(
+                "Tasks",
+                Style::new()
+                    .fg(theme::TEXT_BRIGHT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        lines.push(Line::from(""));
+
+        // ── Plan name ──
+        if !state.plan.is_empty() {
+            lines.push(Line::from(Span::styled(
+                truncate_str(&state.plan, area.width.saturating_sub(4) as usize),
+                Style::new().fg(theme::ACCENT),
+            )));
+            lines.push(Line::from(""));
+        }
+
+        // ── Text-based progress bar ──
+        if total > 0 {
+            let bar_width = area.width.saturating_sub(6) as usize;
+            let filled = if bar_width > 0 && total > 0 {
+                (completed * bar_width) / total
+            } else {
+                0
+            };
+            let empty = bar_width.saturating_sub(filled);
+            let bar = format!(
+                " [{}{}] {}/{}",
+                "█".repeat(filled),
+                "░".repeat(empty),
+                completed,
+                total
+            );
+            lines.push(Line::from(vec![Span::styled(
+                bar,
+                Style::new().fg(theme::SUCCESS).bg(theme::SURFACE),
+            )]));
+            lines.push(Line::from(""));
+        }
+
+        // ── Task items ──
+        let content_width = area.width.saturating_sub(4) as usize;
+        for task in &state.tasks {
+            let (checkbox, color) = match task.status.as_str() {
+                "completed" => ("☑", theme::TEXT_DIM),
+                "in_progress" => ("◷", theme::ACCENT),
+                _ => ("☐", theme::TEXT),
+            };
+            let desc = truncate_str(&task.description, content_width.saturating_sub(4));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" {} ", checkbox),
+                    Style::new().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(desc, Style::new().fg(color)),
+            ]));
+        }
+
+        if total == 0 {
+            lines.push(Line::from(Span::styled(
+                " (no tasks)",
+                Style::new().fg(theme::TEXT_DIM),
+            )));
+        }
+
+        // Render with left border
+        let block = Block::default()
+            .borders(Borders::LEFT)
+            .border_style(Style::new().fg(theme::BORDER));
+
+        frame.render_widget(
+            Paragraph::new(Text::from(lines))
+                .block(block)
+                .style(Style::new().bg(theme::BG)),
+            area,
+        );
     }
 
     pub fn take_pending_query(&mut self) -> Option<String> {

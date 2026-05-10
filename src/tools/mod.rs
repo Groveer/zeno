@@ -13,6 +13,7 @@ pub mod read;
 pub mod skill_list;
 pub mod skill_manage;
 pub mod skill_view;
+pub mod todo;
 pub mod web_fetch;
 pub mod web_search;
 pub mod write;

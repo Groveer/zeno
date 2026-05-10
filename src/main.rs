@@ -250,6 +250,13 @@ async fn main() -> anyhow::Result<()> {
 
     registry.register(Box::new(tools::ask_user::AskUserTool::new()))?;
 
+    // Register todo tool (in-memory task list) — always available
+    let todo_state =
+        std::sync::Arc::new(tokio::sync::Mutex::new(tools::todo::TodoState::default()));
+    registry.register(Box::new(tools::todo::TodoTool::from_state(
+        todo_state.clone(),
+    )))?;
+
     // Register delegate_task tool (sub-agent support) — always available
     registry.register(Box::new(tools::delegate_task::DelegateTaskTool::new()))?;
 
@@ -482,6 +489,8 @@ async fn main() -> anyhow::Result<()> {
     let engine = Arc::new(Mutex::new(engine));
 
     let mut app = ui::app::App::new();
+    // Share the todo state so the TUI can render the side panel
+    app.set_todo_state(todo_state);
     // Share the sub-agent progress sender with the engine so delegate_task
     // can report sub-agent progress to the TUI.
     {
