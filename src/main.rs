@@ -63,6 +63,7 @@ fn dispatch_command(input: &str) -> CommandAction {
         "/tools" => CommandAction::Done,
         "/memory" => CommandAction::Done,
         "/mcp" => CommandAction::Done,
+        "/skills" => CommandAction::Done,
         "/hooks" => CommandAction::NeedEngine("hooks", String::new()),
         "/search" => CommandAction::NeedEngine("search", String::new()),
         s if s.starts_with("/search") => {
@@ -87,7 +88,9 @@ Available commands:
 /compact — Compress history
 /cost — Token usage
 /model — Current model
-/tools — List tools
+/tools — List builtin tools
+/mcp — List MCP servers and tools
+/skills — List loaded skills
 /memory — Memory files
 /hooks — List hooks
 /resume — Restore the last session (conversation history + output)
@@ -100,14 +103,13 @@ Available commands:
 /goal resume — Resume goal
 
 Navigation:
-/ — History (input) or scroll (output)
+ / — History (input) or scroll (output)
 PgUp/PgDn — Scroll output
 Mouse wheel — Scroll output
 Shift+drag — Select & copy text
  Ctrl+C — Interrupt (when running) / Quit (when idle)
  Ctrl+D — Hard quit (immediate, any mode)
 ";
-
 /// Send a simple text response + QueryDone through the channel.
 fn send_text_response(sender: &engine::tui_events::UiSender, text: &str) {
     let _ = sender.send(engine::tui_events::UiEvent::TextDelta(text.to_string()));
@@ -341,9 +343,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let tool_names: Vec<String> = registry.names().into_iter().map(String::from).collect();
-    tracing::info!(tools = ?tool_names, "Registered tools");
-    let builtin_tool_count = tool_names.len();
+    let builtin_tool_names: Vec<String> = registry.names().into_iter().map(String::from).collect();
+    tracing::info!(tools = ?builtin_tool_names, "Registered tools");
+    let builtin_tool_count = builtin_tool_names.len();
 
     // Release built-in skills to user config dir if needed.
     // Uses spawn_blocking since it involves synchronous filesystem I/O
@@ -578,12 +580,9 @@ async fn main() -> anyhow::Result<()> {
                         "/tools" => send_text_response(
                             &sender,
                             &format!(
-                                "Tools ({} total): {} builtin, {} mcp, {} skill\n{}",
-                                tool_names.len(),
+                                "Tools ({})\n{}",
                                 builtin_tool_count,
-                                mcp_tool_count,
-                                skill_tool_count,
-                                tool_names.join(", ")
+                                builtin_tool_names.join(", ")
                             ),
                         ),
                         "/memory" => {
@@ -608,6 +607,44 @@ async fn main() -> anyhow::Result<()> {
                                 mgr.summary()
                             };
                             send_text_response(&sender, &summary);
+                        }
+                        "/skills" => {
+                            let mut lines = Vec::new();
+                            let categories = skill_registry.categories();
+                            if categories.is_empty() {
+                                let skills = skill_registry.list_skills();
+                                lines.push(format!("Skills ({})\n", skills.len()));
+                                for s in &skills {
+                                    lines.push(format!("- {}: {}", s.name, s.description));
+                                }
+                            } else {
+                                lines.push(format!(
+                                    "Skills ({} skills in {} categories)\n",
+                                    skill_registry.len(),
+                                    categories.len()
+                                ));
+                                for (cat, info) in categories {
+                                    lines.push(format!(
+                                        "## {} — {}",
+                                        cat,
+                                        if info.description.is_empty() {
+                                            String::new()
+                                        } else {
+                                            info.description.clone()
+                                        }
+                                    ));
+                                    for name in &info.skill_names {
+                                        if let Some(skill) = skill_registry.get(name) {
+                                            lines.push(format!(
+                                                "- {}: {}",
+                                                skill.name, skill.description
+                                            ));
+                                        }
+                                    }
+                                    lines.push(String::new());
+                                }
+                            }
+                            send_text_response(&sender, &lines.join("\n"));
                         }
                         _ => {} // shouldn't reach here
                     }
