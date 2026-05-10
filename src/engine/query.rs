@@ -1459,7 +1459,7 @@ async fn execute_single_tool_tui(
 /// ✏️ Editing src/main.rs → -old_line / +new_line
 ///
 /// Note: No icon prefix here — the icon is already in ToolStart's input_summary.
-fn summarize_tool_output(tool_name: &str, output: &str, input_json: &str) -> String {
+fn summarize_tool_output(tool_name: &str, output: &str, _input_json: &str) -> String {
     // Error output — show first line with exit code
     if output.starts_with("[exit code:") || output.starts_with("[stderr]") {
         let first_line = output.lines().next().unwrap_or(output);
@@ -1475,17 +1475,7 @@ fn summarize_tool_output(tool_name: &str, output: &str, input_json: &str) -> Str
     }
 
     match tool_name {
-        "bash" => {
-            let line_count = output.lines().count();
-            if output.contains("[exit code:") {
-                // Already handled above, but just in case
-                format!("failed ({} lines)", line_count)
-            } else if output.trim() == "(no output)" {
-                "ok (no output)".into()
-            } else {
-                format!("ok ({} lines)", line_count)
-            }
-        }
+        // read: for LLM consumption — user just needs to know what was read
         "read" | "read_file" => {
             // Parse line number range from output like "   1 | ..." and footer "(showing lines X-Y of Z total)"
             let mut first_line_num: Option<usize> = None;
@@ -1531,14 +1521,18 @@ fn summarize_tool_output(tool_name: &str, output: &str, input_json: &str) -> Str
                 }
             }
         }
-        "write" => "written".into(),
+        // web_search / web_fetch: LLM digests the content — user just needs summary
+        "web_search" => {
+            let result_count = output.lines().filter(|l| !l.is_empty()).count();
+            format!("{} results", result_count)
+        }
+        "web_fetch" => {
+            let char_count = output.len();
+            format!("{} chars", char_count)
+        }
+        // edit: compute diff from input for color-coded display
         "edit" => {
-            // Compute a minimal diff showing only changed lines + 1 line context.
-            // This avoids showing the full old_string/new_string (which often
-            // contain many identical context lines that the LLM included for
-            // uniqueness).
-            let input = parse_tool_input(input_json);
-
+            let input = parse_tool_input(_input_json);
             let old_str = input
                 .get("old_string")
                 .and_then(|v| v.as_str())
@@ -1552,108 +1546,34 @@ fn summarize_tool_output(tool_name: &str, output: &str, input_json: &str) -> Str
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
-            if old_str.is_empty() {
-                return "patched".into();
-            }
-
-            let old_lines: Vec<&str> = old_str.lines().collect();
-            let new_lines: Vec<&str> = new_str.lines().collect();
-
-            if old_lines.is_empty() && new_lines.is_empty() {
-                return "patched".into();
+            if old_str.is_empty() && new_str.is_empty() {
+                return output.to_string();
             }
 
             let diff_lines = crate::utils::diff::compute_edit_diff(old_str, new_str);
 
             if diff_lines.is_empty() {
-                return "patched (no diff)".into();
+                return output.to_string();
             }
 
-            const MAX_DIFF_LINES: usize = 20;
-            const MAX_LINE_WIDTH: usize = 80;
-
             let mut result_lines: Vec<String> = Vec::new();
+
+            // First line: tool's own summary
+            if let Some(first) = output.lines().next() {
+                result_lines.push(first.to_string());
+            }
+
             for line in &diff_lines {
-                let truncated: String = line.chars().take(MAX_LINE_WIDTH).collect();
-                result_lines.push(truncated);
+                result_lines.push(line.clone());
             }
 
             if replace_all {
                 result_lines.push("(replace all)".into());
             }
 
-            // Truncate if too many lines
-            if result_lines.len() > MAX_DIFF_LINES {
-                let omitted = result_lines.len() - MAX_DIFF_LINES;
-                result_lines.truncate(MAX_DIFF_LINES);
-                result_lines.push(format!("... ({} more lines omitted)", omitted));
-            }
-
             result_lines.join("\n")
         }
-        "grep" => {
-            let match_count = output.lines().filter(|l| !l.is_empty()).count();
-            format!("{} matches", match_count)
-        }
-        "glob" => {
-            let file_count = output
-                .lines()
-                .filter(|l| !l.starts_with("Found") && !l.is_empty())
-                .count();
-            format!("{} files", file_count)
-        }
-        "web_search" => {
-            let result_count = output.lines().filter(|l| !l.is_empty()).count();
-            format!("{} results", result_count)
-        }
-        "web_fetch" => {
-            let char_count = output.len();
-            format!("{} chars", char_count)
-        }
-        "skill_list" | "skill_view" => {
-            let line_count = output.lines().count();
-            format!("{} lines", line_count)
-        }
-        "memory" => {
-            // Parse JSON output for meaningful display
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(output) {
-                let success = val
-                    .get("success")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                if success {
-                    let target = val
-                        .get("target")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("memory");
-                    let count = val.get("entry_count").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let usage = val.get("usage").and_then(|v| v.as_str()).unwrap_or("");
-                    let msg = val.get("message").and_then(|v| v.as_str()).unwrap_or("");
-                    let icon = if target == "user" {
-                        "\u{f007}"
-                    } else {
-                        "\u{f0e0}"
-                    }; // user icon / memory icon
-                    format!(
-                        "{} {} [{} entries, {}] — {}",
-                        icon, target, count, usage, msg
-                    )
-                } else {
-                    let error = val
-                        .get("error")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown error");
-                    format!("failed: {}", error)
-                }
-            } else {
-                let line_count = output.lines().count();
-                format!("{} lines", line_count)
-            }
-        }
-        _ => {
-            let line_count = output.lines().count();
-            format!("{} lines", line_count)
-        }
+        _ => output.to_string(),
     }
 }
 
@@ -1750,7 +1670,7 @@ fn format_permission_detail(tool_name: &str, input_json: &str) -> String {
             .and_then(|v| v.as_str())
             .map(|s| format!("web_fetch {}", s))
             .unwrap_or_else(|| "web_fetch".into()),
-        _ => input_json.chars().take(500).collect(),
+        _ => input_json.to_string(),
     }
 }
 
@@ -1764,12 +1684,7 @@ fn format_tool_input_summary(tool_name: &str, input_json: &str) -> String {
             .and_then(|v| v.as_str())
             .map(|s| {
                 let s = s.trim();
-                if s.chars().count() > 80 {
-                    let truncated: String = s.chars().take(77).collect();
-                    format!("\u{f120} $ {}…", truncated)
-                } else {
-                    format!("\u{f120} $ {}", s)
-                }
+                format!("\u{f120} $ {}", s)
             })
             .unwrap_or_else(|| "\u{f120} bash".into()),
         "read" | "read_file" => input

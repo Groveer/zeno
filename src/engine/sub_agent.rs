@@ -799,13 +799,7 @@ fn format_tool_input_summary(name: &str, input_json: &str) -> String {
             if let Ok(val) = serde_json::from_str::<Value>(input_json) {
                 val.get("path")
                     .and_then(|p| p.as_str())
-                    .map(|p| {
-                        if p.len() > 50 {
-                            format!("...{}", &p[p.len().saturating_sub(47)..])
-                        } else {
-                            p.to_string()
-                        }
-                    })
+                    .map(|p| p.to_string())
                     .unwrap_or_default()
             } else {
                 String::new()
@@ -815,13 +809,7 @@ fn format_tool_input_summary(name: &str, input_json: &str) -> String {
             if let Ok(val) = serde_json::from_str::<Value>(input_json) {
                 val.get("command")
                     .and_then(|c| c.as_str())
-                    .map(|c| {
-                        if c.len() > 60 {
-                            format!("{}...", &c[..57])
-                        } else {
-                            c.to_string()
-                        }
-                    })
+                    .map(|c| c.to_string())
                     .unwrap_or_default()
             } else {
                 String::new()
@@ -831,13 +819,7 @@ fn format_tool_input_summary(name: &str, input_json: &str) -> String {
             if let Ok(val) = serde_json::from_str::<Value>(input_json) {
                 val.get("query")
                     .and_then(|q| q.as_str())
-                    .map(|q| {
-                        if q.len() > 60 {
-                            format!("{}...", &q[..57])
-                        } else {
-                            q.to_string()
-                        }
-                    })
+                    .map(|q| q.to_string())
                     .unwrap_or_default()
             } else {
                 String::new()
