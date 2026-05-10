@@ -10,6 +10,7 @@ pub mod memory;
 pub mod memory_provider_tool;
 pub mod read;
 pub mod skill_list;
+pub mod skill_manage;
 pub mod skill_view;
 pub mod web_fetch;
 pub mod web_search;

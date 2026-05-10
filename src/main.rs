@@ -378,12 +378,19 @@ async fn main() -> anyhow::Result<()> {
     let skill_registry =
         skills::registry::SkillRegistry::from_parts(loaded_skills, loaded_categories);
 
-    // Register skill tools (needs skill registry)
+    // Wrap in Arc<Mutex> so skill tools (including skill_manage) share a live registry.
+    let skill_registry = std::sync::Arc::new(tokio::sync::Mutex::new(skill_registry));
+
+    // Register skill tools (needs shared skill registry)
     registry.register(Box::new(tools::skill_list::SkillListTool::new(
         skill_registry.clone(),
     )))?;
     registry.register(Box::new(tools::skill_view::SkillViewTool::new(
         skill_registry.clone(),
+    )))?;
+    registry.register(Box::new(tools::skill_manage::SkillManageTool::new(
+        skill_registry.clone(),
+        skill_dirs.clone(),
     )))?;
     let skill_tool_count = registry.names().len() - builtin_tool_count;
     // Initialize MCP manager (lazy — no servers started yet)
@@ -398,13 +405,15 @@ async fn main() -> anyhow::Result<()> {
 
     // Build system prompt — use memory manager for built-in + external provider content
     let memory_prompt = memory_manager.lock().await.build_system_prompt();
+    let skill_registry_guard = skill_registry.lock().await;
     let system_prompt = crate::prompts::system_prompt::build(
         &cwd,
         &registry,
-        &skill_registry,
+        &skill_registry_guard,
         Some(&memory_prompt),
         &settings.role,
     );
+    drop(skill_registry_guard);
     drop(memory_prompt);
     tracing::debug!(prompt_len = system_prompt.len(), "System prompt assembled");
 
@@ -610,9 +619,10 @@ async fn main() -> anyhow::Result<()> {
                         }
                         "/skills" => {
                             let mut lines = Vec::new();
-                            let categories = skill_registry.categories();
+                            let reg = skill_registry.lock().await;
+                            let categories = reg.categories();
                             if categories.is_empty() {
-                                let skills = skill_registry.list_skills();
+                                let skills = reg.list_skills();
                                 lines.push(format!("Skills ({})\n", skills.len()));
                                 for s in &skills {
                                     lines.push(format!("- {}: {}", s.name, s.description));
@@ -620,7 +630,7 @@ async fn main() -> anyhow::Result<()> {
                             } else {
                                 lines.push(format!(
                                     "Skills ({} skills in {} categories)\n",
-                                    skill_registry.len(),
+                                    reg.len(),
                                     categories.len()
                                 ));
                                 for (cat, info) in categories {
@@ -634,7 +644,7 @@ async fn main() -> anyhow::Result<()> {
                                         }
                                     ));
                                     for name in &info.skill_names {
-                                        if let Some(skill) = skill_registry.get(name) {
+                                        if let Some(skill) = reg.get(name) {
                                             lines.push(format!(
                                                 "- {}: {}",
                                                 skill.name, skill.description
@@ -644,6 +654,7 @@ async fn main() -> anyhow::Result<()> {
                                     lines.push(String::new());
                                 }
                             }
+                            drop(reg);
                             send_text_response(&sender, &lines.join("\n"));
                         }
                         _ => {} // shouldn't reach here

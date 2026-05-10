@@ -1,14 +1,17 @@
+use std::sync::Arc;
+
 use crate::skills::registry::SkillRegistry;
 use crate::tools::base::{Tool, ToolContext, ToolError};
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use tokio::sync::Mutex;
 
 pub struct SkillListTool {
-    registry: SkillRegistry,
+    registry: Arc<Mutex<SkillRegistry>>,
 }
 
 impl SkillListTool {
-    pub fn new(registry: SkillRegistry) -> Self {
+    pub fn new(registry: Arc<Mutex<SkillRegistry>>) -> Self {
         Self { registry }
     }
 }
@@ -44,13 +47,13 @@ impl Tool for SkillListTool {
 
     async fn execute(&self, arguments: Value, _ctx: &ToolContext) -> Result<String, ToolError> {
         let category = arguments.get("category").and_then(|v| v.as_str());
+        let registry = self.registry.lock().await;
 
         match category {
             Some(cat) => {
-                let skills = self.registry.list_by_category(cat);
+                let skills = registry.list_by_category(cat);
                 if skills.is_empty() {
-                    let cats: Vec<String> = self
-                        .registry
+                    let cats: Vec<String> = registry
                         .categories()
                         .keys()
                         .map(|s| format!("- {}", s))
@@ -77,9 +80,9 @@ impl Tool for SkillListTool {
                 ))
             }
             None => {
-                let categories = self.registry.categories();
+                let categories = registry.categories();
                 if categories.is_empty() {
-                    let skills = self.registry.list_skills();
+                    let skills = registry.list_skills();
                     if skills.is_empty() {
                         return Ok("No skills available.".into());
                     }
@@ -95,7 +98,7 @@ impl Tool for SkillListTool {
                 }
                 let mut lines = vec![format!(
                     "Skill categories ({} total skills):\n",
-                    self.registry.len()
+                    registry.len()
                 )];
                 let mut cats: Vec<_> = categories.iter().collect();
                 cats.sort_by_key(|(k, _)| *k);

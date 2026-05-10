@@ -10,3 +10,4 @@ pub mod index_cache;
 pub mod loader;
 pub mod registry;
 pub mod types;
+pub mod validation;

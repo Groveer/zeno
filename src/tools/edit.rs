@@ -167,9 +167,9 @@ impl Tool for EditTool {
 /// Result of the fuzzy matching chain.
 /// On success: (new_content, match_count, strategy_name, None)
 /// On failure: (original_content, 0, None, error_message)
-type FuzzyResult = (String, usize, &'static str, Option<String>);
+pub(crate) type FuzzyResult = (String, usize, &'static str, Option<String>);
 
-fn fuzzy_find_and_replace(
+pub(crate) fn fuzzy_find_and_replace(
     content: &str,
     old_string: &str,
     new_string: &str,

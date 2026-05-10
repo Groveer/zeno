@@ -1,15 +1,18 @@
+use std::path::Path;
+use std::sync::Arc;
+
 use crate::skills::registry::SkillRegistry;
 use crate::tools::base::{Tool, ToolContext, ToolError};
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use std::path::Path;
+use tokio::sync::Mutex;
 
 pub struct SkillViewTool {
-    registry: SkillRegistry,
+    registry: Arc<Mutex<SkillRegistry>>,
 }
 
 impl SkillViewTool {
-    pub fn new(registry: SkillRegistry) -> Self {
+    pub fn new(registry: Arc<Mutex<SkillRegistry>>) -> Self {
         Self { registry }
     }
 }
@@ -56,11 +59,12 @@ impl Tool for SkillViewTool {
             return Ok("Specify a skill name to view.".into());
         }
 
-        let skill = match self.registry.get_fuzzy(name) {
+        let registry = self.registry.lock().await;
+
+        let skill = match registry.get_fuzzy(name) {
             Some(s) => s,
             None => {
-                let available: Vec<String> = self
-                    .registry
+                let available: Vec<String> = registry
                     .list_skills()
                     .iter()
                     .map(|s| format!("{} ({})", s.name, s.category))
