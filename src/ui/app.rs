@@ -45,23 +45,30 @@ fn truncate_str(s: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
     }
-    let total_width: usize = s
-        .chars()
-        .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
-        .sum();
+    let total_width = crate::utils::display_width(s);
     if total_width <= max_width {
         return s.to_string();
     }
     let mut out = String::new();
     let mut w = 0usize;
-    for c in s.chars() {
-        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        let cw = crate::utils::char_width(c, next);
         if w + cw > max_width.saturating_sub(1) {
             out.push('…');
             break;
         }
         out.push(c);
         w += cw;
+        // Skip VS16 if consumed as part of emoji sequence
+        if next == Some('\u{FE0F}') {
+            i += 2;
+        } else {
+            i += 1;
+        }
     }
     out
 }

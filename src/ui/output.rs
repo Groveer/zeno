@@ -191,7 +191,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut OutputState) {
     }
 }
 
-use crate::utils::display_width;
+use crate::utils::{char_width, display_width};
 
 /// Wrap a single styled line to fit within `max_width` terminal columns.
 /// Returns multiple lines if the original line is too wide.
@@ -228,44 +228,34 @@ fn wrap_line(line: Line<'static>, max_width: usize) -> Vec<Line<'static>> {
             let room = max_width - current_width;
 
             // Find how many chars fit in `room` columns
-            // Uses display_width logic: base char + VS16 = width 2
             let mut byte_end = remaining.len();
             let mut used_width = 0;
             let chars: Vec<char> = remaining.chars().collect();
             let mut ci = 0;
             #[allow(clippy::explicit_counter_loop)]
             for (i, ch) in remaining.char_indices() {
-                let w = if ci + 1 < chars.len() && chars[ci + 1] == '\u{FE0F}' {
-                    // Emoji presentation sequence: width 2, will skip VS16 next iter
-                    2
-                } else if ch == '\u{FE0F}' {
-                    // VS16 was already counted with its base char
-                    0
-                } else {
-                    unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0)
-                };
+                let next = chars.get(ci + 1).copied();
+                let w = char_width(ch, next);
                 if used_width + w > room {
                     byte_end = i;
                     break;
                 }
                 used_width += w;
                 byte_end = remaining.len();
-                ci += 1;
+                // Skip VS16 if it was consumed as part of an emoji sequence
+                if next == Some('\u{FE0F}') {
+                    ci += 2;
+                } else {
+                    ci += 1;
+                }
             }
 
             if byte_end == 0 {
                 // Single char wider than room — force it onto current line
                 let ch = remaining.chars().next().unwrap();
                 byte_end = ch.len_utf8();
-                used_width = if let Some(next) = remaining.chars().nth(1) {
-                    if next == '\u{FE0F}' {
-                        2
-                    } else {
-                        unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0)
-                    }
-                } else {
-                    unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0)
-                };
+                let next = remaining.chars().nth(1);
+                used_width = char_width(ch, next);
             }
 
             let (chunk, rest) = remaining.split_at(byte_end);

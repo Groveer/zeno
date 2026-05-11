@@ -878,10 +878,7 @@ impl InputState {
         let (row, col_byte) = self.cursor_row_col();
         let line = self.line_content(row);
         let byte_end = col_byte.min(line.len());
-        line[..byte_end]
-            .chars()
-            .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0) as u16)
-            .sum()
+        crate::utils::display_width(&line[..byte_end]) as u16
     }
 
     /// Return the cursor row index (0-based).
@@ -1014,10 +1011,7 @@ pub fn render(
     };
 
     // Available width for text (excluding prompt)
-    let prompt_display_width: u16 = prompt
-        .chars()
-        .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0) as u16)
-        .sum();
+    let prompt_display_width: u16 = crate::utils::display_width(&prompt) as u16;
     let text_area_width = content_area.width.saturating_sub(prompt_display_width);
 
     // Compute horizontal scroll offset for the current line
@@ -1047,8 +1041,10 @@ pub fn render(
                 // Need to skip h_scroll display columns
                 let mut col: u16 = 0;
                 let mut byte_start = 0;
-                for (byte_idx, c) in line_str.char_indices() {
-                    let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0) as u16;
+                let chars: Vec<char> = line_str.chars().collect();
+                for (ci, (byte_idx, c)) in line_str.char_indices().enumerate() {
+                    let next = chars.get(ci + 1).copied();
+                    let w = crate::utils::char_width(c, next) as u16;
                     if col + w > h_scroll {
                         // This character straddles the scroll boundary
                         byte_start = byte_idx;

@@ -1046,14 +1046,21 @@ mod tests {
     fn test_table_cjk_alignment() {
         // CJK characters are display-width 2; verify that all data rows
         // have the same total display width (so │ borders line up).
+        // Note: uses crate::utils::display_width() for measurement because
+        // Line.width() uses unicode-width which under-reports PUA icons ( = 1
+        // instead of 2). display_width() correctly reports the terminal width.
         let md = "| 功能 | 说明 | 状态 |\n|:-----|:------:|------:|\n| 渲染 | 支持 |  |\n| 表格 | 支持 |  |\n| ABC | DEF | G |";
         let lines = render_markdown(md);
 
-        // Collect the display width of each data row (lines containing │)
+        // Collect the display width of each data row (lines containing │).
+        // Use crate::utils::display_width() for correct PUA/emoji measurement.
         let row_widths: Vec<usize> = lines
             .iter()
             .filter(|l| l.spans.iter().any(|s| s.content.contains('│')))
-            .map(|l| l.width())
+            .map(|l| {
+                let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                crate::utils::display_width(&text)
+            })
             .collect();
 
         // All rows should have the same width
