@@ -1,6 +1,7 @@
 //! Bash/shell command execution tool with optional rtk routing.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -83,7 +84,8 @@ impl BashTool {
 
     /// Check if rtk can route this command. Uses `rtk rewrite` as the single
     /// source of truth — no hardcoded prefix lists to maintain.
-    async fn maybe_rtk_route(&self, cmd: &str) -> Option<String> {
+    /// Returns the rewritten command and an optional cd directory to set as cwd.
+    async fn maybe_rtk_route(&self, cmd: &str) -> Option<(String, Option<PathBuf>)> {
         if !self.use_rtk {
             return None;
         }
@@ -94,14 +96,22 @@ impl BashTool {
         if trimmed.is_empty() {
             return None;
         }
+
+        // Extract a leading `cd <dir> &&` or `cd <dir>;` prefix if present.
+        // LLMs commonly prepend `cd /path &&` before the actual command.
+        // We strip it, route the inner command through rtk, then execute with
+        // the cd directory set as the process's current_dir instead of via shell.
+        let (cd_dir, inner_cmd) = Self::strip_cd_prefix(trimmed);
+
         // Skip compound commands (pipes, chains) — rtk proxy can't handle them
-        if trimmed.contains('|') || trimmed.contains("&&") || trimmed.contains("||") {
+        if inner_cmd.contains('|') || inner_cmd.contains("&&") || inner_cmd.contains("||") {
             return None;
         }
+
         // Ask rtk to rewrite — this is the authoritative check
         let Ok(output) = tokio::process::Command::new("rtk")
             .arg("rewrite")
-            .args(trimmed.split_whitespace())
+            .args(inner_cmd.split_whitespace())
             .output()
             .await
         else {
@@ -110,10 +120,40 @@ impl BashTool {
         if output.status.code() == Some(3) {
             let rewritten = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !rewritten.is_empty() {
-                return Some(rewritten);
+                return Some((rewritten, cd_dir));
             }
         }
         None
+    }
+
+    /// Strip a leading `cd <dir> &&` or `cd <dir>;` prefix from a command.
+    /// Returns `(Some(dir_path), inner_command)` if a cd prefix was found,
+    /// or `(None, original_command)` if not.
+    ///
+    /// Examples:
+    /// - `"cd /home/user && cargo test"` → `(Some("/home/user"), "cargo test")`
+    /// - `"cd ..; ls"` → `(Some(".."), "ls")`
+    /// - `"cargo test"` → `(None, "cargo test")`
+    fn strip_cd_prefix(cmd: &str) -> (Option<PathBuf>, &str) {
+        let trimmed = cmd.trim();
+        if let Some(rest) = trimmed.strip_prefix("cd ") {
+            // Find where the directory path ends (next ` && ` or `; `)
+            if let Some(sep_pos) = rest.find(" && ") {
+                let dir = rest[..sep_pos].trim();
+                let remaining = rest[sep_pos + 4..].trim();
+                if !dir.is_empty() && !remaining.is_empty() {
+                    return (Some(PathBuf::from(dir)), remaining);
+                }
+            }
+            if let Some(sep_pos) = rest.find("; ") {
+                let dir = rest[..sep_pos].trim();
+                let remaining = rest[sep_pos + 2..].trim();
+                if !dir.is_empty() && !remaining.is_empty() {
+                    return (Some(PathBuf::from(dir)), remaining);
+                }
+            }
+        }
+        (None, trimmed)
     }
 }
 
@@ -238,12 +278,16 @@ impl Tool for BashTool {
             .unwrap_or(self.timeout_secs);
 
         // Try rtk routing first
-        if let Some(rtk_cmd_str) = self.maybe_rtk_route(cmd).await {
+        if let Some((rtk_cmd_str, cd_override)) = self.maybe_rtk_route(cmd).await {
             tracing::debug!(rtk_command = %rtk_cmd_str, "Routing through rtk");
             let parts: Vec<&str> = rtk_cmd_str.split_whitespace().collect();
             if let Some((program, args)) = parts.split_first() {
                 let mut rtk_cmd = tokio::process::Command::new(program);
-                rtk_cmd.args(args).current_dir(&ctx.cwd);
+                // Use the cd-override directory if one was extracted from the command,
+                // otherwise fall back to the context's cwd.
+                rtk_cmd
+                    .args(args)
+                    .current_dir(cd_override.as_ref().unwrap_or(&ctx.cwd));
                 for (k, v) in &self.env {
                     rtk_cmd.env(k, v);
                 }
@@ -331,5 +375,87 @@ impl Tool for BashTool {
         }
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod rtk_tests {
+    use super::*;
+
+    #[test]
+    fn test_strip_cd_prefix_none() {
+        let (dir, cmd) = BashTool::strip_cd_prefix("cargo test");
+        assert!(dir.is_none());
+        assert_eq!(cmd, "cargo test");
+        let (dir, cmd) = BashTool::strip_cd_prefix("ls -la");
+        assert!(dir.is_none());
+        assert_eq!(cmd, "ls -la");
+        let (dir, cmd) = BashTool::strip_cd_prefix("");
+        assert!(dir.is_none());
+        assert_eq!(cmd, "");
+    }
+
+    #[test]
+    fn test_strip_cd_prefix_with_and() {
+        let (dir, inner) = BashTool::strip_cd_prefix("cd /home/user && cargo test");
+        assert_eq!(dir, Some(PathBuf::from("/home/user")));
+        assert_eq!(inner, "cargo test");
+    }
+
+    #[test]
+    fn test_strip_cd_prefix_with_semicolon() {
+        let (dir, inner) = BashTool::strip_cd_prefix("cd ..; ls");
+        assert_eq!(dir, Some(PathBuf::from("..")));
+        assert_eq!(inner, "ls");
+    }
+
+    #[test]
+    fn test_strip_cd_prefix_nested_path() {
+        let (dir, inner) =
+            BashTool::strip_cd_prefix("cd /home/guo/Develop/zeno && cargo test 2>&1");
+        assert_eq!(dir, Some(PathBuf::from("/home/guo/Develop/zeno")));
+        assert_eq!(inner, "cargo test 2>&1");
+    }
+
+    #[tokio::test]
+    async fn test_rtk_route_with_cd_prefix() {
+        let tool = BashTool::new(true, HashMap::new());
+        let result = tool.maybe_rtk_route("cd /tmp && ls").await;
+        assert!(
+            result.is_some(),
+            "rtk should route 'ls' even with cd prefix"
+        );
+        let (rewritten, cd_dir) = result.unwrap();
+        assert_eq!(rewritten, "rtk ls");
+        assert_eq!(cd_dir, Some(PathBuf::from("/tmp")));
+    }
+
+    #[tokio::test]
+    async fn test_rtk_route_disabled_with_cd() {
+        let tool = BashTool::new(false, HashMap::new());
+        let result = tool.maybe_rtk_route("cd /tmp && ls").await;
+        assert!(result.is_none(), "should not route when disabled");
+    }
+
+    #[tokio::test]
+    async fn test_rtk_route_simple() {
+        let tool = BashTool::new(true, HashMap::new());
+        let result = tool.maybe_rtk_route("ls").await;
+        assert!(result.is_some());
+        let (rewritten, cd_dir) = result.unwrap();
+        assert_eq!(rewritten, "rtk ls");
+        assert!(cd_dir.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_rtk_skip_real_compound() {
+        let tool = BashTool::new(true, HashMap::new());
+        // Real compound commands with pipes should still be skipped
+        assert!(tool.maybe_rtk_route("ls | head").await.is_none());
+        assert!(
+            tool.maybe_rtk_route("cargo test && cargo clippy")
+                .await
+                .is_none()
+        );
     }
 }
