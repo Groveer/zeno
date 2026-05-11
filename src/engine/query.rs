@@ -1708,6 +1708,107 @@ fn summarize_tool_output(tool_name: &str, output: &str, _input_json: &str) -> St
                 output.to_string()
             }
         }
+        // skill_view: LLM reads the content — user just needs to know what was loaded
+        "skill_view" => {
+            let input = parse_tool_input(_input_json);
+            let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+            let line_count = output.lines().count();
+            if let Some(fp) = input.get("file_path").and_then(|v| v.as_str()) {
+                format!("{} ({}, {} lines)", name, fp, line_count)
+            } else {
+                format!("{} ({} lines)", name, line_count)
+            }
+        }
+        // skill_list: compact listing — user just needs category + count
+        "skill_list" => {
+            let line_count = output.lines().count();
+            let first_line = output.lines().next().unwrap_or("");
+            // First line usually has the count, e.g. "Skills in 'foo' (5):" or "Skill categories (12 total skills):"
+            if !first_line.is_empty() {
+                first_line.to_string()
+            } else {
+                format!("({} lines)", line_count)
+            }
+        }
+        // mcp_list_tools: full schemas are for LLM — user just needs the count
+        "mcp_list_tools" => {
+            let input = parse_tool_input(_input_json);
+            let server = input
+                .get("server_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let tool_count = output.lines().filter(|l| l.starts_with('-')).count();
+            if tool_count > 0 {
+                format!("{}: {} tool(s)", server, tool_count)
+            } else {
+                let line_count = output.lines().count();
+                format!("{}: ({} lines)", server, line_count)
+            }
+        }
+        // mcp_describe_tool: single tool schema — for LLM
+        "mcp_describe_tool" => {
+            let input = parse_tool_input(_input_json);
+            let server = input
+                .get("server_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let tool_name = input
+                .get("tool_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let line_count = output.lines().count();
+            format!("{}/{} ({} lines)", server, tool_name, line_count)
+        }
+        // mcp_list_servers: status summary
+        "mcp_list_servers" => {
+            let connected = output.lines().filter(|l| l.contains('●')).count();
+            let total = output
+                .lines()
+                .filter(|l| l.contains('●') || l.contains('○'))
+                .count();
+            if total > 0 {
+                format!("{}/{} servers connected", connected, total)
+            } else {
+                let line_count = output.lines().count();
+                format!("({} lines)", line_count)
+            }
+        }
+        // delegate_task: JSON result — extract summary fields
+        "delegate_task" => {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(output) {
+                if let Some(error) = val.get("error").and_then(|v| v.as_str()) {
+                    return format!("⚠ delegate_task: {}", error);
+                }
+                // Batch mode: array of results
+                if let Some(results) = val.as_array() {
+                    let total = results.len();
+                    let success_count = results
+                        .iter()
+                        .filter(|r| {
+                            r.get("exit_reason")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s == "success" || s == "completed")
+                                .unwrap_or(false)
+                        })
+                        .count();
+                    return format!("{}/{} tasks completed", success_count, total);
+                }
+                // Single task mode: object with summary
+                if let Some(summary) = val.get("summary").and_then(|v| v.as_str()) {
+                    let preview: String = summary.chars().take(80).collect();
+                    if summary.len() > preview.len() {
+                        return format!("delegate_task: {}…", preview);
+                    }
+                    return format!("delegate_task: {}", preview);
+                }
+                if let Some(reason) = val.get("exit_reason").and_then(|v| v.as_str()) {
+                    return format!("delegate_task: exit_reason={}", reason);
+                }
+            }
+            // Fallback: show line count
+            let line_count = output.lines().count();
+            format!("delegate_task ({} lines)", line_count)
+        }
         _ => output.to_string(),
     }
 }
