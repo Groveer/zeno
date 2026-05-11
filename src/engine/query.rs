@@ -1606,10 +1606,107 @@ fn summarize_tool_output(tool_name: &str, output: &str, _input_json: &str) -> St
 
             result_lines.join("\n")
         }
-        // todo: only show the action result line, not the full task list (shown in side panel)
+        // todo: show action result + plan + progress, skip individual task items
         "todo" => {
-            // Take only the first line (the ✅/📋 action summary), skip the full task list
-            output.lines().next().unwrap_or(output).to_string()
+            let lines: Vec<&str> = output.lines().collect();
+            if lines.is_empty() {
+                return output.to_string();
+            }
+
+            // First line is the action result (e.g. "✅ Created plan with 4 tasks.")
+            let action_line = lines[0];
+            let mut result = action_line.to_string();
+
+            // Check if there's a plan line (starts with "📋 Plan:")
+            if let Some(plan_line) = lines.iter().find(|l| l.starts_with("📋 Plan:")) {
+                result.push('\n');
+                result.push_str(plan_line);
+            }
+
+            // Check if there's a "X tasks, Y/Z completed" line
+            if let Some(progress_line) = lines
+                .iter()
+                .find(|l| l.contains("tasks") && l.contains("completed"))
+            {
+                result.push('\n');
+                result.push_str(progress_line);
+            }
+
+            // Show the task that was just updated (if any)
+            // Task lines look like "  T1 description (status)"
+            // Show only the first task line as a preview
+            let task_lines: Vec<&&str> = lines
+                .iter()
+                .filter(|l| l.trim().starts_with("T") && l.contains('('))
+                .take(3)
+                .collect();
+            if !task_lines.is_empty() {
+                result.push('\n');
+                for tl in task_lines {
+                    result.push_str(tl);
+                }
+            }
+
+            result
+        }
+        // memory: parse JSON response into a readable summary
+        "memory" => {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(output) {
+                let success = val
+                    .get("success")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let target = val
+                    .get("target")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("memory");
+                let entry_count = val.get("entry_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                let usage = val.get("usage").and_then(|v| v.as_str()).unwrap_or("");
+                let message = val.get("message").and_then(|v| v.as_str());
+                let error = val.get("error").and_then(|v| v.as_str());
+
+                if !success {
+                    if let Some(err) = error {
+                        return format!("⚠ memory {} error: {}", target, err);
+                    }
+                    return format!("⚠ memory {} failed", target);
+                }
+
+                let mut result = if let Some(msg) = message {
+                    format!("✓ memory {}: {}", target, msg)
+                } else {
+                    format!("✓ memory {} ok", target)
+                };
+
+                if !usage.is_empty() {
+                    result.push_str(&format!(" ({})", usage));
+                }
+
+                // Show entries as a compact list
+                if let Some(entries) = val.get("entries").and_then(|v| v.as_array()) {
+                    if !entries.is_empty() {
+                        result.push_str(&format!("\n  {} entries:", entry_count));
+                        for entry in entries.iter().take(5) {
+                            if let Some(text) = entry.as_str() {
+                                let preview: String = text.chars().take(80).collect();
+                                if text.len() > preview.len() {
+                                    result.push_str(&format!("\n  · {}…", preview));
+                                } else {
+                                    result.push_str(&format!("\n  · {}", preview));
+                                }
+                            }
+                        }
+                        if entries.len() > 5 {
+                            result.push_str(&format!("\n  … and {} more", entries.len() - 5));
+                        }
+                    }
+                }
+
+                result
+            } else {
+                // Not JSON — show as-is
+                output.to_string()
+            }
         }
         _ => output.to_string(),
     }
