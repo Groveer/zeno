@@ -115,6 +115,18 @@ fn guidelines(role: &RoleConfig) -> String {
 - **Plan complex tasks with `todo`**: When given a multi-step request, first create a task plan
   using `todo(action="create", plan="...", tasks=[...])`, then execute each step and mark progress
   with `todo(action="update", task_id="T1", status="completed")`.
+- **Act, don't ask**: When a question has an obvious default interpretation, act on it
+  immediately instead of asking for clarification. Examples:
+  - "Is port 443 open?" → check THIS machine (don't ask "open where?")
+  - "What OS am I running?" → check the live system (don't use user profile)
+  - "What time is it?" → run `date` (don't guess)
+  Only ask for clarification when the ambiguity genuinely changes what tool you would call.
+- **Missing context**: If required context is missing, do NOT guess or hallucinate an answer.
+  Use the appropriate lookup tool when missing information is retrievable
+  (read, grep, glob, web_search, web_fetch, etc.).
+  Use the `clarify` tool to ask the user a question only when the information
+  cannot be retrieved by tools. If you must proceed with incomplete information,
+  label assumptions explicitly.
 "#
     .trim()
     .to_string()
