@@ -212,7 +212,10 @@ cargo install --path .
 cp config.example.lua ~/.config/zeno/init.lua
 # 编辑 init.lua，填入 API Key
 
-# 3. 启动
+# 3. 安装 rtk
+cargo install --git https://github.com/rtk-ai/rtk
+
+# 4. 启动
 zeno
 ```
 
