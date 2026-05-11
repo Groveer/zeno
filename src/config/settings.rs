@@ -42,6 +42,9 @@ pub struct Settings {
     /// Delegation config for sub-agents (delegate_task tool).
     #[serde(default)]
     pub delegation: DelegationConfig,
+    /// Skill management config (curator, background review, lifecycle).
+    #[serde(default)]
+    pub skills: SkillsConfig,
 }
 
 impl Default for Settings {
@@ -65,6 +68,7 @@ impl Default for Settings {
             auxiliary: AuxiliaryConfig::default(),
             llm: LlmConfig::default(),
             delegation: DelegationConfig::default(),
+            skills: SkillsConfig::default(),
             log_retention_days: 3,
         }
     }
@@ -447,6 +451,40 @@ impl Default for DelegationConfig {
         Self {
             max_concurrent_children: 3,
             child_timeout: 300.0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Skills (curator, background review, lifecycle)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct SkillsConfig {
+    /// Enable the background review fork (runs after every N turns).
+    pub background_review_enabled: bool,
+    /// How many turns between background review runs. 0 = disabled.
+    pub review_interval_turns: u32,
+    /// Enable the curator (periodic consolidation + lifecycle transitions).
+    pub curator_enabled: bool,
+    /// How often the curator runs (in hours).
+    pub curator_interval_hours: u64,
+    /// Days without activity before a skill is marked stale.
+    pub stale_after_days: u64,
+    /// Days without activity before a skill is archived.
+    pub archive_after_days: u64,
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self {
+            background_review_enabled: true,
+            review_interval_turns: 10,
+            curator_enabled: true,
+            curator_interval_hours: 168, // 7 days
+            stale_after_days: 30,
+            archive_after_days: 90,
         }
     }
 }

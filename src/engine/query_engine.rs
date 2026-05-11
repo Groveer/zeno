@@ -61,6 +61,11 @@ pub struct QueryEngine {
     /// Cloned into ToolContext so delegate_task can report progress.
     pub sub_agent_tx:
         Option<tokio::sync::mpsc::UnboundedSender<crate::engine::sub_agent::SubAgentEvent>>,
+    /// Turn counter for background skill review scheduling.
+    pub turns_since_skill_review: u32,
+    /// Optional cancellation token for background review tasks.
+    /// When the app exits, this token is cancelled so background reviews stop.
+    pub background_cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
 /// Inject user text into a steer slot without interrupting the agent.
@@ -129,6 +134,8 @@ impl QueryEngine {
             memory_manager: None,
             client_factory: None,
             sub_agent_tx: None,
+            turns_since_skill_review: 0,
+            background_cancel: None,
         }
     }
 

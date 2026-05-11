@@ -102,13 +102,20 @@ impl Tool for SkillManageTool {
                     - `patch`: Find-and-replace within a skill file. Requires `name`, `old_string`, `new_string`. Optional: `file_path` to patch a supporting file.\n\
                     - `edit`: Full rewrite of a skill's SKILL.md. Requires `name` and `content`.\n\
                     - `delete`: Remove a skill. Requires `name`.\n\
-                    - `write_file`: Add/overwrite a supporting file. Requires `name`, `file_path`, `content`.",
+                    - `write_file`: Add/overwrite a supporting file. Requires `name`, `file_path`, `content`.\n\
+                    - `pin`: Mark a skill as pinned (excluded from auto-stale/archive transitions). Requires `name`.\n\
+                    - `unpin`: Remove pinned status from a skill. Requires `name`.\n\
+                    - `restore`: Restore an archived skill back to the active skills directory. Requires `name`.\n\
+                    - `list-archived`: List all archived skill names. No arguments needed.\n\
+                    - `curator_pause`: Pause the curator (stop automatic lifecycle maintenance). No arguments needed.\n\
+                    - `curator_resume`: Resume the curator. No arguments needed.\n\
+                    - `curator_status`: Show whether the curator is paused. No arguments needed.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["create", "patch", "edit", "delete", "write_file"],
+                            "enum": ["create", "patch", "edit", "delete", "write_file", "pin", "unpin", "restore", "list-archived", "curator_pause", "curator_resume", "curator_status"],
                             "description": "The management action to perform."
                         },
                         "name": {
@@ -142,7 +149,7 @@ impl Tool for SkillManageTool {
         })
     }
 
-    async fn execute(&self, arguments: Value, _ctx: &ToolContext) -> Result<String, ToolError> {
+    async fn execute(&self, arguments: Value, ctx: &ToolContext) -> Result<String, ToolError> {
         let action = arguments["action"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing 'action'".into()))?;
@@ -169,13 +176,21 @@ impl Tool for SkillManageTool {
         }
 
         match action {
-            "create" => self.action_create(name, &arguments).await,
+            "create" => self.action_create(name, &arguments, ctx).await,
             "patch" => self.action_patch(name, &arguments).await,
             "edit" => self.action_edit(name, &arguments).await,
             "delete" => self.action_delete(name).await,
             "write_file" => self.action_write_file(name, &arguments).await,
+            "pin" => self.action_pin(name).await,
+            "unpin" => self.action_unpin(name).await,
+            "restore" => self.action_restore(name).await,
+            "list-archived" => self.action_list_archived().await,
+            "curator_pause" => Ok(self.action_curator_pause()),
+            "curator_resume" => Ok(self.action_curator_resume()),
+            "curator_status" => Ok(self.action_curator_status()),
             _ => Err(ToolError::InvalidArguments(format!(
-                "Unknown action '{}'. Use: create, patch, edit, delete, write_file.",
+                "Unknown action '{}'. Use: create, patch, edit, delete, write_file, pin, unpin, \
+                 restore, list-archived, curator_pause, curator_resume, curator_status.",
                 action
             ))),
         }
@@ -211,7 +226,12 @@ impl SkillManageTool {
         true // If not found in registry, assume user-created
     }
 
-    async fn action_create(&self, name: &str, args: &Value) -> Result<String, ToolError> {
+    async fn action_create(
+        &self,
+        name: &str,
+        args: &Value,
+        ctx: &ToolContext,
+    ) -> Result<String, ToolError> {
         let content = args["content"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("create requires 'content'".into()))?;
@@ -258,6 +278,13 @@ impl SkillManageTool {
 
         // Reload the skill registry
         self.reload_skill_registry().await;
+
+        // Mark as agent-created if this is a background review fork
+        if let Some(ref deps) = ctx.sub_agent_deps {
+            if deps.write_origin == crate::skills::provenance::BACKGROUND_REVIEW {
+                crate::skills::usage::mark_agent_created(name);
+            }
+        }
 
         let mut result = format!("Skill '{}' created at {}", name, skill_md.display());
         if let Some(cat) = category {
@@ -347,6 +374,9 @@ impl SkillManageTool {
 
         self.reload_skill_registry().await;
 
+        // Bump patch telemetry (best-effort)
+        crate::skills::usage::bump_patch(name);
+
         let strategy_info = if strategy != "exact" {
             format!(" [fuzzy: {}]", strategy)
         } else {
@@ -386,6 +416,9 @@ impl SkillManageTool {
             .map_err(|e| ToolError::Execution(format!("Failed to write SKILL.md: {}", e)))?;
 
         self.reload_skill_registry().await;
+
+        // Bump patch telemetry (best-effort)
+        crate::skills::usage::bump_patch(name);
 
         Ok(format!(
             "Skill '{}' updated at {}.",
@@ -427,6 +460,9 @@ impl SkillManageTool {
 
         self.reload_skill_registry().await;
 
+        // Clean up usage telemetry
+        crate::skills::usage::forget(name);
+
         Ok(format!(
             "Skill '{}' deleted (removed {})",
             name,
@@ -466,11 +502,86 @@ impl SkillManageTool {
 
         self.reload_skill_registry().await;
 
+        // Bump patch telemetry (best-effort)
+        crate::skills::usage::bump_patch(name);
+
         Ok(format!(
             "Written supporting file: {} ({} bytes)",
             target.display(),
             content.len(),
         ))
+    }
+
+    /// Pin a skill (exclude from auto-stale/archive transitions).
+    async fn action_pin(&self, name: &str) -> Result<String, ToolError> {
+        // Verify the skill exists
+        self.find_skill(name).await.ok_or_else(|| {
+            ToolError::NotFound(format!(
+                "Skill '{}' not found. Use skill_list() to see available skills.",
+                name
+            ))
+        })?;
+        crate::skills::usage::set_pinned(name, true);
+        Ok(format!(
+            "Skill '{}' pinned (excluded from auto-archival).",
+            name
+        ))
+    }
+
+    /// Unpin a skill.
+    async fn action_unpin(&self, name: &str) -> Result<String, ToolError> {
+        self.find_skill(name).await.ok_or_else(|| {
+            ToolError::NotFound(format!(
+                "Skill '{}' not found. Use skill_list() to see available skills.",
+                name
+            ))
+        })?;
+        crate::skills::usage::set_pinned(name, false);
+        Ok(format!("Skill '{}' unpinned.", name))
+    }
+
+    /// Restore an archived skill back to the active skills directory.
+    async fn action_restore(&self, name: &str) -> Result<String, ToolError> {
+        let user_skills_dir = Self::user_skills_dir();
+        let target_dir = user_skills_dir.join(name);
+        let (ok, msg) = crate::skills::usage::restore_skill(name, &target_dir);
+        if ok {
+            self.reload_skill_registry().await;
+            Ok(msg)
+        } else {
+            Err(ToolError::Execution(msg))
+        }
+    }
+
+    /// List all archived skill names.
+    async fn action_list_archived(&self) -> Result<String, ToolError> {
+        let names = crate::skills::usage::list_archived();
+        if names.is_empty() {
+            Ok("No archived skills.".to_string())
+        } else {
+            Ok(format!("Archived skills:\n{}", names.join("\n")))
+        }
+    }
+
+    /// Pause the curator.
+    fn action_curator_pause(&self) -> String {
+        crate::engine::curator::set_paused(true);
+        "Curator paused. Automatic lifecycle maintenance will not run.".to_string()
+    }
+
+    /// Resume the curator.
+    fn action_curator_resume(&self) -> String {
+        crate::engine::curator::set_paused(false);
+        "Curator resumed.".to_string()
+    }
+
+    /// Show curator status.
+    fn action_curator_status(&self) -> String {
+        if crate::engine::curator::is_paused() {
+            "Curator is **paused**. Automatic lifecycle maintenance is disabled.".to_string()
+        } else {
+            "Curator is **active**. Automatic lifecycle maintenance will run when idle.".to_string()
+        }
     }
 
     /// Validate a supporting file path and resolve it against the skill directory.

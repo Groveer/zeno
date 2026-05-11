@@ -821,14 +821,14 @@ impl QueryEngine {
                     let (tx, _) = tokio::sync::mpsc::unbounded_channel();
                     tx
                 });
-                let deps = SubAgentDeps {
-                    client_factory: factory.clone(),
-                    tool_registry: self.tools.clone(),
-                    settings: self.settings.clone(),
+                let deps = SubAgentDeps::new(
+                    factory.clone(),
+                    self.tools.clone(),
+                    self.settings.clone(),
                     progress_tx,
-                    delegation_config: self.settings.delegation.clone(),
-                    cost_tracker: self.sub_agent_cost_tracker.clone(),
-                };
+                    self.settings.delegation.clone(),
+                    self.sub_agent_cost_tracker.clone(),
+                );
                 ctx = ctx.with_sub_agent_deps(deps);
             }
             let mut tool_results: Vec<ContentBlock> = Vec::new();
@@ -1048,6 +1048,50 @@ impl QueryEngine {
             }
         }
 
+        // ── Background skill review ──────────────────────────────────
+        // After the conversation turn completes, check if we should spawn
+        // a background review to capture learnings into the skill library.
+        self.turns_since_skill_review += 1;
+        if crate::engine::review::should_run_review(
+            self.turns_since_skill_review,
+            &self.settings.skills,
+        ) {
+            // Build a compact conversation summary for the review agent
+            let conversation_summary = self.build_conversation_summary();
+
+            // Check if we have sub-agent deps available
+            if let Some(ref factory) = self.client_factory {
+                let deps = SubAgentDeps::new(
+                    factory.clone(),
+                    self.tools.clone(),
+                    self.settings.clone(),
+                    self.sub_agent_tx.clone().unwrap_or_else(|| {
+                        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+                        tx
+                    }),
+                    self.settings.delegation.clone(),
+                    self.sub_agent_cost_tracker.clone(),
+                )
+                .with_write_origin(crate::skills::provenance::BACKGROUND_REVIEW);
+
+                crate::engine::review::spawn_background_review(
+                    deps,
+                    self.cwd.clone(),
+                    conversation_summary,
+                    self.background_cancel.clone(),
+                );
+
+                // Reset the counter so the next review triggers after
+                // another `review_interval_turns` turns.
+                self.turns_since_skill_review = 0;
+
+                tracing::info!(
+                    turn = self.turns_since_skill_review,
+                    "Background skill review spawned"
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -1144,6 +1188,51 @@ impl QueryEngine {
                 entry.content = new_blocks;
             }
         }
+    }
+
+    /// Build a compact summary of the conversation for the background review agent.
+    /// Extracts the key user requests and assistant responses from recent turns.
+    fn build_conversation_summary(&self) -> String {
+        let entries = self.history.entries_raw();
+        let total = entries.len();
+        // Take the last 10 entries for the summary
+        let start = if total > 10 { total - 10 } else { 0 };
+        let mut lines = Vec::new();
+        for entry in &entries[start..] {
+            for block in &entry.content {
+                match block {
+                    crate::api::types::ContentBlock::Text { text } => {
+                        let role = if entry.role == crate::api::types::Role::User {
+                            "User"
+                        } else {
+                            "Assistant"
+                        };
+                        let preview: String = text.chars().take(2000).collect();
+                        if !preview.trim().is_empty() {
+                            lines.push(format!("{}: {}", role, preview));
+                        }
+                    }
+                    crate::api::types::ContentBlock::ToolUse { name, input, .. } => {
+                        let input_str = serde_json::to_string(input).unwrap_or_default();
+                        let preview: String = input_str.chars().take(500).collect();
+                        lines.push(format!("Tool call: {} ({})", name, preview));
+                    }
+                    crate::api::types::ContentBlock::ToolResult {
+                        content, is_error, ..
+                    } => {
+                        let label = if is_error.unwrap_or(false) {
+                            "Tool error"
+                        } else {
+                            "Tool result"
+                        };
+                        let preview: String = content.chars().take(500).collect();
+                        lines.push(format!("{}: {}", label, preview));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        lines.join("\n")
     }
 }
 

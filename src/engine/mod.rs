@@ -1,9 +1,11 @@
 pub mod carryover;
 pub mod compact;
 pub mod cost_tracker;
+pub mod curator;
 pub mod messages;
 pub mod query;
 pub mod query_engine;
+pub mod review;
 pub mod session;
 pub mod stream_events;
 pub mod sub_agent;

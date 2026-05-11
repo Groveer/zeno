@@ -503,6 +503,12 @@ async fn main() -> anyhow::Result<()> {
         let mut eng = engine.lock().await;
         eng.sub_agent_tx = Some(app.sub_agent_sender());
     }
+    // Share the background cancellation token so background review tasks
+    // can be cancelled on shutdown.
+    {
+        let mut eng = engine.lock().await;
+        eng.background_cancel = Some(app.background_cancel_token());
+    }
     app.set_status(ui::status_bar::StatusInfo {
         model: model.to_string(),
         provider: provider_name.to_string(),
@@ -1045,6 +1051,47 @@ async fn main() -> anyhow::Result<()> {
             idle_frames += 1;
         }
 
+        // ── Curator: background skill maintenance (idle-only) ──────────
+        // Runs periodically when the system is idle. Lock order: engine → skill_registry
+        // (consistent across all code paths to avoid deadlock).
+        if !is_active && crate::engine::curator::should_run_now(&settings.skills) {
+            let background_cancel = app.background_cancel_token();
+
+            // Build deps first (engine lock), then pass to curator (skill_registry lock).
+            let deps = {
+                let eng = engine.lock().await;
+                eng.client_factory.as_ref().map(|factory| {
+                    crate::tools::base::SubAgentDeps::new(
+                        factory.clone(),
+                        eng.tools.clone(),
+                        settings.clone(),
+                        eng.sub_agent_tx.clone().unwrap_or_else(|| {
+                            let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+                            tx
+                        }),
+                        settings.delegation.clone(),
+                        eng.sub_agent_cost_tracker.clone(),
+                    )
+                    .with_write_origin(crate::skills::provenance::BACKGROUND_REVIEW)
+                })
+            };
+
+            let cwd_option = deps.as_ref().map(|_| cwd.clone());
+            let registry = skill_registry.lock().await;
+            let summary = crate::engine::curator::run_curator_pass(
+                &*registry,
+                deps,
+                cwd_option,
+                &settings.skills,
+                Some(background_cancel),
+            );
+            drop(registry);
+
+            if summary != "No lifecycle transitions needed." {
+                tracing::info!(summary = %summary, "Curator lifecycle maintenance");
+            }
+        }
+
         // 4. Handle keyboard/mouse input with adaptive poll timeout.
         //    Idle: 100ms (10fps), Active: 16ms (60fps) for responsive input.
         let poll_ms = if is_active { 16u64 } else { 100u64 };
@@ -1076,6 +1123,8 @@ async fn main() -> anyhow::Result<()> {
         if app.should_quit() {
             // Cancel any running LLM task so the engine lock is released quickly.
             app.cancel_running();
+            // Cancel background tasks (curator, review) so they stop promptly.
+            app.cancel_background();
             break;
         }
     }

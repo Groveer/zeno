@@ -14,8 +14,8 @@ use mlua::{Lua, LuaOptions, LuaSerdeExt, StdLib, Value};
 
 use super::paths;
 use super::settings::{
-    AuxiliaryConfig, McpServerConfig, PermissionMode, ProviderConfig, Settings, ToolsConfig,
-    WebSearchConfig,
+    AuxiliaryConfig, McpServerConfig, PermissionMode, ProviderConfig, Settings, SkillsConfig,
+    ToolsConfig, WebSearchConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -369,6 +369,14 @@ fn build_settings(lua: &Lua) -> anyhow::Result<Settings> {
     // --- compact_threshold ---
     if let Ok(v) = overrides.get::<f64>("compact_threshold") {
         settings.llm.compact_threshold = v.clamp(0.0, 1.0);
+    }
+
+    // --- skills (background review + curator) ---
+    if let Ok(skills) = overrides.get::<mlua::Table>("skills") {
+        match lua.from_value::<SkillsConfig>(Value::Table(skills)) {
+            Ok(val) => settings.skills = val,
+            Err(e) => tracing::warn!(error = %e, "Failed to parse skills config from Lua"),
+        }
     }
 
     Ok(settings)

@@ -342,11 +342,12 @@ async fn run_single_sub_agent(
     history.push_user(goal);
 
     // Build tool context (no ask_user channel for sub-agents)
+    // Pass sub_agent_deps through so skill_manage can read write_origin provenance.
     let ctx = ToolContext {
         cwd,
         ask_sender: None,
         mcp_manager: None,
-        sub_agent_deps: None,
+        sub_agent_deps: Some(deps.clone()),
         cancel_token: None,
     };
 

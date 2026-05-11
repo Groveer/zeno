@@ -1,6 +1,7 @@
 //! Shared utility functions.
 
 pub mod diff;
+pub mod time;
 
 /// Return the terminal display width of a single character.
 ///

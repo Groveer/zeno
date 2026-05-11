@@ -310,6 +310,29 @@ zn.llm_max_retries(3) -- retry on empty response or transient error (default: 3)
 zn.compact_threshold(0.33)
 
 -- ═══════════════════════════════════════════════
+-- Skills (Background Review & Curator)
+-- ═══════════════════════════════════════════════
+-- Zeno can automatically maintain its skill library by:
+--   1. Reviewing conversations after every N turns to extract learnings
+--   2. Periodically consolidating narrow skills into broader class-level skills
+--   3. Automatically archiving skills that haven't been used in a while
+--
+-- All settings below use sensible defaults — uncomment to customize.
+
+-- zn.skills({
+--   -- Background review: after every 10 turns, review the conversation
+--   -- and create/update skills based on learnings.
+--   background_review_enabled = true,    -- false to disable
+--   review_interval_turns = 10,          -- 0 to disable
+--
+--   -- Curator: automatic lifecycle maintenance when idle.
+--   curator_enabled = true,              -- false to disable
+--   curator_interval_hours = 168,        -- every 7 days
+--   stale_after_days = 30,               -- 30 days unused → stale
+--   archive_after_days = 90,             -- 90 days unused → archived
+-- })
+
+-- ═══════════════════════════════════════════════
 -- Paths
 -- ═══════════════════════════════════════════════
 

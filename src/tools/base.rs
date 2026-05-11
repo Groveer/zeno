@@ -59,13 +59,50 @@ pub struct SubAgentDeps {
     pub delegation_config: DelegationConfig,
     /// Shared cost tracker — sub-agents fold their token usage into this.
     pub cost_tracker: Arc<Mutex<CostTracker>>,
+    /// Write origin for skill_manage provenance tracking.
+    /// "foreground" (default) = user-directed, "background_review" = agent-autonomous.
+    pub write_origin: String,
 }
 
 impl std::fmt::Debug for SubAgentDeps {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SubAgentDeps")
             .field("settings", &self.settings)
+            .field("write_origin", &self.write_origin)
             .finish()
+    }
+}
+
+impl SubAgentDeps {
+    /// Create a new `SubAgentDeps` with the standard foreground write origin.
+    pub fn new(
+        client_factory: Arc<
+            dyn Fn(&str, &ProviderConfig) -> Box<dyn crate::api::client::SupportsStreamingMessages>
+                + Send
+                + Sync,
+        >,
+        tool_registry: Arc<ToolRegistry>,
+        settings: Arc<Settings>,
+        progress_tx: tokio::sync::mpsc::UnboundedSender<SubAgentEvent>,
+        delegation_config: DelegationConfig,
+        cost_tracker: Arc<Mutex<CostTracker>>,
+    ) -> Self {
+        Self {
+            client_factory,
+            tool_registry,
+            settings,
+            progress_tx,
+            delegation_config,
+            cost_tracker,
+            write_origin: String::from("foreground"),
+        }
+    }
+
+    /// Set the write origin for skill_manage provenance tracking.
+    /// Use `"background_review"` for autonomous background tasks.
+    pub fn with_write_origin(mut self, origin: &str) -> Self {
+        self.write_origin = origin.to_string();
+        self
     }
 }
 

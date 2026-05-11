@@ -94,6 +94,9 @@ pub struct App {
     /// Cancellation token shared with the running LLM task.
     /// Pressing Ctrl+C while Running cancels this token instead of quitting.
     cancel_token: CancellationToken,
+    /// Cancellation token for background tasks (curator, review).
+    /// Cancelled once on exit so background work stops promptly.
+    background_cancel_token: CancellationToken,
     /// Set to true whenever something changed that requires a re-render.
     /// The main loop skips terminal::draw() when this is false and mode is Idle.
     render_dirty: bool,
@@ -156,6 +159,7 @@ impl App {
             ask_question: None,
             permission_queue: Vec::new(),
             cancel_token: CancellationToken::new(),
+            background_cancel_token: CancellationToken::new(),
             render_dirty: true,
             permission_allow_all: false,
             steer_queue: Vec::new(),
@@ -946,6 +950,16 @@ impl App {
     /// Cancel the current running query (used by the exit path).
     pub fn cancel_running(&self) {
         self.cancel_token.cancel();
+    }
+
+    /// Cancel background tasks (curator, review) — called once on shutdown.
+    pub fn cancel_background(&self) {
+        self.background_cancel_token.cancel();
+    }
+
+    /// Get the background cancellation token for long-running tasks.
+    pub fn background_cancel_token(&self) -> CancellationToken {
+        self.background_cancel_token.clone()
     }
 
     /// Drain the permission queue. When `permission_allow_all` is set,

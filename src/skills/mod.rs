@@ -8,6 +8,8 @@
 pub mod builtin;
 pub mod index_cache;
 pub mod loader;
+pub mod provenance;
 pub mod registry;
 pub mod types;
+pub mod usage;
 pub mod validation;

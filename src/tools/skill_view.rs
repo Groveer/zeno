@@ -83,6 +83,12 @@ impl Tool for SkillViewTool {
             }
         };
 
+        // Bump view telemetry (best-effort)
+        crate::skills::usage::bump_view(&skill.name);
+        // Bump use telemetry (best-effort) — skill_view means the skill is
+        // actively loaded for use.
+        crate::skills::usage::bump_use(&skill.name);
+
         if let Some(fp) = file_path
             && let Some(ref skill_path) = skill.path
         {
