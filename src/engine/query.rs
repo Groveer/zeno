@@ -1152,7 +1152,13 @@ impl QueryEngine {
     /// auxiliary vision model and replaced with text descriptions.
     async fn preprocess_images(&mut self, sender: &tokio::sync::mpsc::UnboundedSender<UiEvent>) {
         // Anthropic handles images natively — no preprocessing needed
-        if self.settings.active_provider == "anthropic" {
+        let is_anthropic = self
+            .settings
+            .providers
+            .get(&self.settings.active_provider)
+            .map(|p| p.api_type == crate::config::settings::ApiType::Anthropic)
+            .unwrap_or(false);
+        if is_anthropic {
             return;
         }
 

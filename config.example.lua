@@ -14,25 +14,21 @@ local zn = require("zeno")
 -- Providers
 -- ═══════════════════════════════════════════════
 
--- Anthropic (default)
-zn.provider("anthropic", {
-	api_key = "ANTHROPIC_API_KEY",  -- auto-detected as env var name
-  base_url = "https://api.anthropic.com",
-  default_model = "claude-sonnet-4-20250514",
-})
+-- Provider names are arbitrary — the `api_type` field determines which
+-- API format to use. Default is "openai" (Chat Completions).
+--
+-- Supported api_type values:
+--   "openai" (default)    → POST /v1/chat/completions, Bearer auth
+--   "openai-responses"    → POST /v1/responses, Bearer auth
+--   "anthropic"           → POST /v1/messages, x-api-key auth
+--
+-- When omitted, api_type defaults to "openai".
 
--- OpenAI compatible
-zn.provider("openai", {
-	api_key = "OPENAI_API_KEY",  -- auto-detected as env var name
-  base_url = "https://api.openai.com/v1",
-  default_model = "gpt-4o",
-})
-
--- Custom OpenAI-compatible endpoint (e.g. Groveer, DeepSeek, local Ollama)
--- zn.provider("groveer", {
---   api_key = "GROVEER_API_KEY",  -- auto-detected as env var name
---   base_url = "https://cpa.groveer.com/v1",
---   default_model = "glm-5.1",
+-- zn.provider("openai", {
+--   api_key = "OPENAI_API_KEY",
+--   base_url = "https://api.openai.com/v1",
+--   default_model = "gpt-4o",
+--   -- api_type defaults to "openai", no need to set
 -- })
 --
 -- ═══════════════════════════════════════════════

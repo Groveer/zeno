@@ -93,6 +93,40 @@ impl Default for Settings {
 // Provider
 // ---------------------------------------------------------------------------
 
+/// API protocol type for an LLM provider.
+///
+/// Determines the request format, authentication method, and endpoint path
+/// used when communicating with the provider's API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub enum ApiType {
+    /// OpenAI Chat Completions API format (default).
+    ///
+    /// - Endpoint: `POST /v1/chat/completions`
+    /// - Auth: `Authorization: Bearer <key>`
+    /// - Compatible with: OpenAI, DeepSeek, Ollama, Groq, Together, etc.
+    #[serde(rename = "openai")]
+    OpenAi,
+    /// OpenAI Responses API format (newer OpenAI API).
+    ///
+    /// - Endpoint: `POST /v1/responses`
+    /// - Auth: `Authorization: Bearer <key>`
+    #[serde(rename = "openai-responses")]
+    OpenAiResponses,
+    /// Anthropic Messages API format.
+    ///
+    /// - Endpoint: `POST /v1/messages`
+    /// - Auth: `x-api-key` header
+    /// - Compatible with: Anthropic, Anthropic-compatible proxies
+    #[serde(rename = "anthropic")]
+    Anthropic,
+}
+
+impl Default for ApiType {
+    fn default() -> Self {
+        Self::OpenAi
+    }
+}
+
 /// Configuration for an LLM provider (e.g. "anthropic", "openai").
 ///
 /// The `api_key` field supports auto-detection:
@@ -100,7 +134,7 @@ impl Default for Settings {
 ///   environment variable names first; if the env var doesn't exist, the
 ///   value is used as a literal key.
 /// - Other patterns (e.g. `"sk-abc123"`) are used as literal API keys directly.
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ProviderConfig {
     /// API key or environment variable name (auto-detected).
     ///
@@ -116,6 +150,29 @@ pub struct ProviderConfig {
     /// If set, overrides the top-level `max_tokens` setting.
     #[serde(default)]
     pub max_output_tokens: Option<u32>,
+    /// API protocol type: "openai" (default), "openai-responses", or "anthropic".
+    ///
+    /// Determines the request format, auth method, and endpoint path.
+    /// - `"openai"` (default) → Chat Completions API (`/v1/chat/completions`)
+    /// - `"openai-responses"` → Responses API (`/v1/responses`)
+    /// - `"anthropic"` → Messages API (`/v1/messages`)
+    ///
+    /// Most providers (OpenAI, DeepSeek, Ollama, Groq, etc.) use `"openai"`.
+    /// Only Anthropic and Anthropic-compatible proxies use `"anthropic"`.
+    #[serde(default)]
+    pub api_type: ApiType,
+}
+
+impl Default for ProviderConfig {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            base_url: String::new(),
+            default_model: String::new(),
+            max_output_tokens: None,
+            api_type: ApiType::OpenAi,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -355,6 +412,7 @@ mod tests {
             base_url: String::new(),
             default_model: String::new(),
             max_output_tokens: None,
+            api_type: ApiType::OpenAi,
         };
         // env var doesn't exist → fallback to literal
         assert_eq!(resolve_api_key(&provider).unwrap(), "ANTHROPIC_API_KEY");

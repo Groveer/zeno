@@ -205,7 +205,7 @@ async fn main() -> anyhow::Result<()> {
             "Provider '{}' not configured. Add it to ~/.config/zeno/init.lua\n\
              \n\
              local zn = require 'zeno'\n\
-             zn.provider(\"anthropic\", {{ api_key = \"ANTHROPIC_API_KEY\", base_url = \"https://api.anthropic.com\", default_model = \"claude-sonnet-4-20250514\" }})\n\
+             zn.provider(\"anthropic\", {{ api_key = \"ANTHROPIC_API_KEY\", base_url = \"https://api.anthropic.com\", default_model = \"claude-sonnet-4-20250514\", api_type = \"anthropic\" }})\n\
              zn.provider(\"openai\", {{ api_key = \"OPENAI_API_KEY\", base_url = \"https://api.openai.com/v1\", default_model = \"gpt-4o\" }})\n\
              zn.set_provider(\"anthropic\")",
             provider_name
@@ -215,9 +215,13 @@ async fn main() -> anyhow::Result<()> {
     // Build API client
     let api_key = settings::resolve_api_key(provider_config)?;
     let base_url = provider_config.base_url.clone();
-    let client: Box<dyn api::client::SupportsStreamingMessages> = match provider_name.as_str() {
-        "anthropic" => Box::new(api::anthropic::AnthropicClient::new(api_key, base_url)),
-        _ => Box::new(api::openai::OpenAIClient::new(api_key, base_url)),
+    let client: Box<dyn api::client::SupportsStreamingMessages> = match provider_config.api_type {
+        settings::ApiType::Anthropic => {
+            Box::new(api::anthropic::AnthropicClient::new(api_key, base_url))
+        }
+        settings::ApiType::OpenAi | settings::ApiType::OpenAiResponses => {
+            Box::new(api::openai::OpenAIClient::new(api_key, base_url))
+        }
     };
 
     // Build tool registry
@@ -275,14 +279,18 @@ async fn main() -> anyhow::Result<()> {
             + Send
             + Sync,
     > = Arc::new({
-        move |name: &str, config: &ProviderConfig| {
+        move |_name: &str, config: &ProviderConfig| {
             let api_key = settings::resolve_api_key(config).unwrap_or_default();
             let base_url = config.base_url.clone();
-            match name {
-                "anthropic" => Box::new(api::anthropic::AnthropicClient::new(api_key, base_url))
-                    as Box<dyn api::client::SupportsStreamingMessages>,
-                _ => Box::new(api::openai::OpenAIClient::new(api_key, base_url))
-                    as Box<dyn api::client::SupportsStreamingMessages>,
+            match config.api_type {
+                settings::ApiType::Anthropic => {
+                    Box::new(api::anthropic::AnthropicClient::new(api_key, base_url))
+                        as Box<dyn api::client::SupportsStreamingMessages>
+                }
+                settings::ApiType::OpenAi | settings::ApiType::OpenAiResponses => {
+                    Box::new(api::openai::OpenAIClient::new(api_key, base_url))
+                        as Box<dyn api::client::SupportsStreamingMessages>
+                }
             }
         }
     });

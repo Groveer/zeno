@@ -1031,6 +1031,7 @@ async fn create_subagent_client(
         base_url,
         default_model: model.clone(),
         max_output_tokens: provider_config.max_output_tokens,
+        api_type: provider_config.api_type,
     };
 
     let client = (deps.client_factory)(&provider_name, &effective_config);

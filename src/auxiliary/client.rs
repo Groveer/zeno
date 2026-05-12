@@ -269,10 +269,18 @@ pub(super) async fn call_resolved_raw(
         }
     }
 
-    let url = format!(
-        "{}/chat/completions",
-        provider.base_url.trim_end_matches('/')
-    );
+    let url = match provider.api_type {
+        crate::config::settings::ApiType::Anthropic => {
+            format!("{}/v1/messages", provider.base_url.trim_end_matches('/'))
+        }
+        crate::config::settings::ApiType::OpenAi => format!(
+            "{}/chat/completions",
+            provider.base_url.trim_end_matches('/')
+        ),
+        crate::config::settings::ApiType::OpenAiResponses => {
+            format!("{}/v1/responses", provider.base_url.trim_end_matches('/'))
+        }
+    };
 
     let retry_config = RetryConfig::for_auxiliary();
     let label = format!("auxiliary/{}", provider.provider_name);
@@ -288,9 +296,10 @@ pub(super) async fn call_resolved_raw(
             let client = client.clone();
             let url = url.clone();
             let api_key = provider.api_key.clone();
+            let api_type = provider.api_type;
             let body = body.clone();
             async move {
-                match do_api_call(&client, &url, &api_key, &body).await {
+                match do_api_call(&client, &url, &api_key, &api_type, &body).await {
                     Ok(result) => Ok(result),
                     Err((err, retry_no_temp, retry_mc)) => {
                         // --- Parameter-adaptation retries (domain-specific) ---
@@ -298,7 +307,7 @@ pub(super) async fn call_resolved_raw(
                         // modify the request body before retrying.
                         if retry_no_temp
                             && let Some(result) = retry_without_temperature(
-                                &client, &url, &api_key, &body, max_tokens,
+                                &client, &url, &api_key, &api_type, &body, max_tokens,
                             )
                             .await
                         {
@@ -306,7 +315,7 @@ pub(super) async fn call_resolved_raw(
                         }
                         if retry_mc
                             && let Some(result) = retry_with_max_completion_tokens(
-                                &client, &url, &api_key, &body, max_tokens,
+                                &client, &url, &api_key, &api_type, &body, max_tokens,
                             )
                             .await
                         {
@@ -329,15 +338,23 @@ async fn do_api_call(
     client: &reqwest::Client,
     url: &str,
     api_key: &str,
+    api_type: &crate::config::settings::ApiType,
     body: &serde_json::Value,
 ) -> Result<AuxiliaryResult, (AuxiliaryError, bool, bool)> {
-    let resp = client
-        .post(url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Content-Type", "application/json")
-        .json(body)
-        .send()
-        .await;
+    let mut req = client.post(url).header("Content-Type", "application/json");
+
+    // Set auth header based on API type
+    req = match api_type {
+        crate::config::settings::ApiType::Anthropic => req
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01"),
+        crate::config::settings::ApiType::OpenAi
+        | crate::config::settings::ApiType::OpenAiResponses => {
+            req.header("Authorization", format!("Bearer {}", api_key))
+        }
+    };
+
+    let resp = req.json(body).send().await;
 
     match resp {
         Ok(resp) => {
@@ -444,6 +461,7 @@ async fn retry_without_temperature(
     client: &reqwest::Client,
     url: &str,
     api_key: &str,
+    api_type: &crate::config::settings::ApiType,
     body: &serde_json::Value,
     max_tokens: u32,
 ) -> Option<AuxiliaryResult> {
@@ -457,13 +475,20 @@ async fn retry_without_temperature(
         obj.remove("temperature");
     }
 
-    match do_api_call(client, url, api_key, &retry_body).await {
+    match do_api_call(client, url, api_key, api_type, &retry_body).await {
         Ok(result) => Some(result),
         Err((_, _, retry_mc)) => {
             // If max_completion_tokens retry is also needed, try it
             if retry_mc {
-                retry_with_max_completion_tokens(client, url, api_key, &retry_body, max_tokens)
-                    .await
+                retry_with_max_completion_tokens(
+                    client,
+                    url,
+                    api_key,
+                    api_type,
+                    &retry_body,
+                    max_tokens,
+                )
+                .await
             } else {
                 None
             }
@@ -479,6 +504,7 @@ async fn retry_with_max_completion_tokens(
     client: &reqwest::Client,
     url: &str,
     api_key: &str,
+    api_type: &crate::config::settings::ApiType,
     body: &serde_json::Value,
     max_tokens: u32,
 ) -> Option<AuxiliaryResult> {
@@ -495,7 +521,9 @@ async fn retry_with_max_completion_tokens(
         retry_body["max_completion_tokens"] = serde_json::json!(max_tokens);
     }
 
-    do_api_call(client, url, api_key, &retry_body).await.ok()
+    do_api_call(client, url, api_key, api_type, &retry_body)
+        .await
+        .ok()
 }
 
 // ---------------------------------------------------------------------------

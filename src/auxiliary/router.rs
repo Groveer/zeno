@@ -192,6 +192,8 @@ pub struct ResolvedProvider {
     pub max_tokens: u32,
     /// Temperature for this call.
     pub temperature: f64,
+    /// API protocol type (openai, openai-responses, anthropic).
+    pub api_type: crate::config::settings::ApiType,
 }
 
 // ---------------------------------------------------------------------------
@@ -397,6 +399,7 @@ fn build_resolved(
         extra_body: task_config.extra_body.clone(),
         max_tokens,
         temperature,
+        api_type: provider.api_type,
     }
 }
 
@@ -446,6 +449,7 @@ mod tests {
                 base_url: "https://api.example.com/v1".into(),
                 default_model: "test-model".into(),
                 max_output_tokens: None,
+                api_type: ApiType::OpenAi,
             },
         );
         providers.insert(
@@ -455,6 +459,7 @@ mod tests {
                 base_url: "https://fallback.example.com/v1".into(),
                 default_model: "fallback-model".into(),
                 max_output_tokens: None,
+                api_type: ApiType::OpenAi,
             },
         );
 
