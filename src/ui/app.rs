@@ -732,7 +732,11 @@ impl App {
         // Decide layout: if todo_state is present, split output area horizontally
         // with the side panel on the right. Input and status bar span full width.
         let side_panel_width: u16 = 40;
-        let has_side_panel = self.todo_state.is_some() && full.width > side_panel_width + 20;
+        let has_side_panel = self
+            .todo_state
+            .as_ref()
+            .is_some_and(|s| Self::has_active_todo(s))
+            && full.width > side_panel_width + 20;
 
         let (output_area, side_area) = if has_side_panel {
             let areas = Layout::default()
@@ -818,6 +822,25 @@ impl App {
             let cursor_y = input_area.y + 1 + cursor_row.saturating_sub(v_scroll);
 
             frame.set_cursor_position((cursor_x, cursor_y));
+        }
+    }
+
+    /// Returns true if the todo side panel should be visible.
+    /// The panel is hidden when there are no todo_state, or when
+    /// the task list is empty or all tasks are completed.
+    fn has_active_todo(state: &std::sync::Arc<tokio::sync::Mutex<TodoState>>) -> bool {
+        match state.try_lock() {
+            Ok(s) => {
+                if s.tasks.is_empty() {
+                    return false;
+                }
+                let all_completed = s.tasks.iter().all(|t| t.status == "completed");
+                !all_completed
+            }
+            Err(_) => {
+                // Contended lock means something is happening — show the panel
+                true
+            }
         }
     }
 

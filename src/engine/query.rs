@@ -1862,48 +1862,15 @@ fn summarize_tool_output(tool_name: &str, output: &str, _input_json: &str) -> St
 
             result_lines.join("\n")
         }
-        // todo: show action result + plan + progress, skip individual task items
+        // todo: only show the action result line (e.g. "✅ Updated T1 → in_progress").
+        // The right-side UI panel already renders the full task list with progress,
+        // so showing plan/task details here would be redundant and noisy.
         "todo" => {
-            let lines: Vec<&str> = output.lines().collect();
-            if lines.is_empty() {
-                return output.to_string();
+            if let Some(action_line) = output.lines().next() {
+                action_line.to_string()
+            } else {
+                output.to_string()
             }
-
-            // First line is the action result (e.g. "✅ Created plan with 4 tasks.")
-            let action_line = lines[0];
-            let mut result = action_line.to_string();
-
-            // Check if there's a plan line (starts with "📋 Plan:")
-            if let Some(plan_line) = lines.iter().find(|l| l.starts_with("📋 Plan:")) {
-                result.push('\n');
-                result.push_str(plan_line);
-            }
-
-            // Check if there's a "X tasks, Y/Z completed" line
-            if let Some(progress_line) = lines
-                .iter()
-                .find(|l| l.contains("tasks") && l.contains("completed"))
-            {
-                result.push('\n');
-                result.push_str(progress_line);
-            }
-
-            // Show the task that was just updated (if any)
-            // Task lines look like "  T1 description (status)"
-            // Show only the first task line as a preview
-            let task_lines: Vec<&&str> = lines
-                .iter()
-                .filter(|l| l.trim().starts_with("T") && l.contains('('))
-                .take(3)
-                .collect();
-            if !task_lines.is_empty() {
-                result.push('\n');
-                for tl in task_lines {
-                    result.push_str(tl);
-                }
-            }
-
-            result
         }
         // memory: parse JSON response into a readable summary
         "memory" => {
