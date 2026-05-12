@@ -516,6 +516,10 @@ pub struct EngineConfig {
     /// Maximum auto-continue attempts per user input.
     pub max_auto_continue: u32,
     /// Per-event stream timeout in seconds.
+    ///
+    /// If the stream produces no event within this duration, it's considered
+    /// stalled and triggers a retry (up to `llm.max_retries` times).
+    /// Set to `0` to disable the timeout (wait indefinitely for stream events).
     pub stream_timeout_secs: u64,
     /// Per-tool execution timeout in seconds.
     pub tool_timeout_secs: u64,

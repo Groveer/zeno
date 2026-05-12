@@ -492,38 +492,61 @@ impl QueryEngine {
                 let mut stream_failed = false;
 
                 loop {
-                    let event = tokio::select! {
-                        event = tokio::time::timeout(
-                            std::time::Duration::from_secs(self.settings.engine.stream_timeout_secs),
-                            stream.next(),
-                        ) => {
-                            match event {
-                                Ok(Some(e)) => e,
-                                Ok(None) => break, // stream ended
-                                Err(_elapsed) => {
-                                    // Stream stalled — no event for stream_timeout_secs
-                                    tracing::warn!(
-                                        timeout_secs = self.settings.engine.stream_timeout_secs,
-                                        "Stream event timeout — no token from LLM for too long"
-                                    );
-                                    let _ = sender.send(UiEvent::Error(
-                                        format!("Stream timed out after {}s of inactivity. The LLM may be stalled or the network may be down.", self.settings.engine.stream_timeout_secs)
-                                    ));
-                                    stream_failed = true;
-                                    break;
+                    let event = if self.settings.engine.stream_timeout_secs == 0 {
+                        // No timeout — wait indefinitely for the next stream event
+                        tokio::select! {
+                            event = stream.next() => {
+                                match event {
+                                    Some(e) => e,
+                                    None => break, // stream ended
                                 }
                             }
-                        }
-                        _ = cancel.cancelled() => {
-                            tracing::info!(event = "cancelled", phase = "stream_consumption", "query_tui: cancelled during stream consumption");
-                            if !assistant_text.trim().is_empty() {
-                                let blocks = vec![ContentBlock::Text {
-                                    text: assistant_text.clone(),
-                                }];
-                                self.history.push_assistant_blocks(blocks);
+                            _ = cancel.cancelled() => {
+                                tracing::info!(event = "cancelled", phase = "stream_consumption", "query_tui: cancelled during stream consumption");
+                                if !assistant_text.trim().is_empty() {
+                                    let blocks = vec![ContentBlock::Text {
+                                        text: assistant_text.clone(),
+                                    }];
+                                    self.history.push_assistant_blocks(blocks);
+                                }
+                                self.handle_interrupt(sender);
+                                return Ok(());
                             }
-                            self.handle_interrupt(sender);
-                            return Ok(());
+                        }
+                    } else {
+                        tokio::select! {
+                            event = tokio::time::timeout(
+                                std::time::Duration::from_secs(self.settings.engine.stream_timeout_secs),
+                                stream.next(),
+                            ) => {
+                                match event {
+                                    Ok(Some(e)) => e,
+                                    Ok(None) => break, // stream ended
+                                    Err(_elapsed) => {
+                                        // Stream stalled — no event for stream_timeout_secs
+                                        tracing::warn!(
+                                            timeout_secs = self.settings.engine.stream_timeout_secs,
+                                            "Stream event timeout — no token from LLM for too long"
+                                        );
+                                        let _ = sender.send(UiEvent::Error(
+                                            format!("Stream timed out after {}s of inactivity. The LLM may be stalled or the network may be down.", self.settings.engine.stream_timeout_secs)
+                                        ));
+                                        stream_failed = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            _ = cancel.cancelled() => {
+                                tracing::info!(event = "cancelled", phase = "stream_consumption", "query_tui: cancelled during stream consumption");
+                                if !assistant_text.trim().is_empty() {
+                                    let blocks = vec![ContentBlock::Text {
+                                        text: assistant_text.clone(),
+                                    }];
+                                    self.history.push_assistant_blocks(blocks);
+                                }
+                                self.handle_interrupt(sender);
+                                return Ok(());
+                            }
                         }
                     };
 
@@ -641,28 +664,6 @@ impl QueryEngine {
                 // Got a non-empty response — done retrying
                 break 'retry;
             } // end 'retry loop
-
-            // If we exhausted retries with an API/stream error (and never
-            // got any text or tools), provide a helpful message instead of
-            // aborting the entire query loop. This allows the LLM to decide
-            // whether to retry on its own.
-            if let (true, true, Some(err_msg)) = (
-                assistant_text.trim().is_empty(),
-                tool_uses.is_empty(),
-                &last_error,
-            ) {
-                let user_msg = format!(
-                    "[System] The API stream was interrupted after all retry attempts: {}. \
-                     You may retry your request or try a different approach.",
-                    err_msg
-                );
-                self.history.push_user(&user_msg);
-                let _ = sender.send(UiEvent::Status(
-                    "Stream interrupted — retry context passed to LLM".into(),
-                ));
-                turn += 1;
-                continue; // next turn: LLM sees the error and can decide to retry
-            }
 
             // --- Output-side [DONE] sentinel detection ---
             // If the LLM included "[DONE]" in its text, it explicitly signals
