@@ -1721,6 +1721,16 @@ fn summarize_tool_output(tool_name: &str, output: &str, _input_json: &str) -> St
     }
 
     match tool_name {
+        // bash: only show command in TUI, result is for LLM only
+        "bash" => {
+            // Just indicate completion; the command itself is shown in ToolStart
+            let line_count = output.lines().count();
+            if output.is_empty() || output == "(no output)" {
+                "(no output)".to_string()
+            } else {
+                format!("({} lines)", line_count)
+            }
+        }
         // read: for LLM consumption — user just needs to know what was read
         "read" | "read_file" => {
             // Parse line number range from output like "   1 | ..." and footer "(showing lines X-Y of Z total)"
