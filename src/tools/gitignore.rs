@@ -120,6 +120,10 @@ impl GitIgnoreMatcher {
         let mut ignored = false;
         for p in &self.patterns {
             if p.dir_only && !is_dir {
+                // Path is inside a matched directory (e.g. "build/" matches "build/output.o")
+                if rel_path.starts_with(&format!("{}/", p.raw)) {
+                    ignored = !p.negated;
+                }
                 continue;
             }
 
@@ -165,8 +169,12 @@ fn simple_gitignore_match(pattern: &str, text: &str) -> bool {
         } else if pi < p.len() && p[pi] == '*' {
             // Check for ** (matches across directories)
             if pi + 1 < p.len() && p[pi + 1] == '*' {
-                // ** matches everything — skip to end of pattern
+                // ** matches across directories
                 pi += 2;
+                // Skip trailing / so **/foo matches "foo" at root level
+                if pi < p.len() && p[pi] == '/' {
+                    pi += 1;
+                }
                 // If ** is at end, it matches everything
                 if pi >= p.len() {
                     return true;

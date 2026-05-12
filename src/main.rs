@@ -227,6 +227,8 @@ async fn main() -> anyhow::Result<()> {
         registry.register(Box::new(tools::bash::BashTool::new(
             tc.use_rtk,
             tc.bash_env.clone(),
+            tc.readonly_commands.clone(),
+            tc.destructive_commands.clone(),
         )))?;
     }
     if tc.read {
@@ -239,10 +241,10 @@ async fn main() -> anyhow::Result<()> {
         registry.register(Box::new(tools::edit::EditTool::new()))?;
     }
     if tc.glob {
-        registry.register(Box::new(tools::glob::GlobTool::new()))?;
+        registry.register(Box::new(tools::glob::GlobTool::new(tc.skip_dirs.clone())))?;
     }
     if tc.grep {
-        registry.register(Box::new(tools::grep::GrepTool::new()))?;
+        registry.register(Box::new(tools::grep::GrepTool::new(tc.skip_dirs.clone())))?;
     }
     if tc.web_search {
         registry.register(Box::new(tools::web_search::WebSearchTool::with_config(

@@ -114,28 +114,29 @@ fn is_inside_git_repo(path: &Path) -> bool {
     }
     false
 }
-const SAFE_PATH_PREFIXES: &[&str] = &[
+const BUILTIN_SAFE_PATH_PREFIXES: &[&str] = &[
     "/tmp/",
     "/tmp", // exact match
     "/var/tmp/",
     "/var/tmp", // exact match
 ];
 
-/// Check if a path is in a system temp directory.
-fn is_in_tmp_dir(path: &Path) -> bool {
-    SAFE_PATH_PREFIXES
+/// Check if a path is in a system temp directory or user-configured safe paths.
+fn is_in_tmp_dir(path: &Path, extra_safe_paths: &[String]) -> bool {
+    BUILTIN_SAFE_PATH_PREFIXES
         .iter()
         .any(|prefix| path.starts_with(prefix))
+        || extra_safe_paths.iter().any(|p| path.starts_with(p))
 }
 
 /// Check if a path is in the "safe zone" — CWD or a system temp directory.
-fn is_in_safe_zone(path: &Path, cwd: &Path) -> bool {
+fn is_in_safe_zone(path: &Path, cwd: &Path, extra_safe_paths: &[String]) -> bool {
     // CWD check (both canonical and raw)
     let canon_cwd = canonicalize_safe(cwd);
     if path.starts_with(&canon_cwd) || path.starts_with(cwd) {
         return true;
     }
-    is_in_tmp_dir(path)
+    is_in_tmp_dir(path, extra_safe_paths)
 }
 
 /// Destructive shell commands that require user confirmation.
@@ -198,7 +199,11 @@ const DESTRUCTIVE_GIT_PATTERNS: &[&str] = &[
 /// Returns true only for commands that can cause data loss or system damage.
 /// Handles compound commands (e.g. `git status && rm file`) by splitting on
 /// shell operators and checking each sub-command.
-fn is_destructive_command(cmd: &str) -> bool {
+fn is_destructive_command(
+    cmd: &str,
+    extra_prefixes: &[String],
+    extra_git_patterns: &[String],
+) -> bool {
     let trimmed = cmd.trim();
 
     // Split on shell operators to handle compound commands
@@ -212,14 +217,22 @@ fn is_destructive_command(cmd: &str) -> bool {
         }
 
         // Check destructive prefixes
-        for prefix in DESTRUCTIVE_PREFIXES {
+        for prefix in DESTRUCTIVE_PREFIXES
+            .iter()
+            .copied()
+            .chain(extra_prefixes.iter().map(|s| s.as_str()))
+        {
             if sub.starts_with(prefix) {
                 return true;
             }
         }
 
         // Check destructive git patterns
-        for pattern in DESTRUCTIVE_GIT_PATTERNS {
+        for pattern in DESTRUCTIVE_GIT_PATTERNS
+            .iter()
+            .copied()
+            .chain(extra_git_patterns.iter().map(|s| s.as_str()))
+        {
             if sub.contains(pattern) {
                 return true;
             }
@@ -295,6 +308,9 @@ pub fn evaluate_permission(
     file_path: Option<&Path>,
     command: Option<&str>,
     cwd: &Path,
+    extra_destructive_commands: &[String],
+    extra_destructive_git_patterns: &[String],
+    safe_paths: &[String],
 ) -> PermissionDecision {
     // 0. Trusted path check — bypasses all other checks
     if let Some(path) = file_path {
@@ -389,7 +405,11 @@ pub fn evaluate_permission(
                         || cmd.contains("..\\");
 
                     // Destructive commands always require confirmation
-                    if is_destructive_command(cmd) {
+                    if is_destructive_command(
+                        cmd,
+                        extra_destructive_commands,
+                        extra_destructive_git_patterns,
+                    ) {
                         tracing::info!(
                             tool_name = "bash",
                             permission_decision = "requires_confirmation",
@@ -485,10 +505,10 @@ pub fn evaluate_permission(
             // --- File-based tools (write, edit, glob, grep, read): ---
             if let Some(path) = file_path {
                 // Temp dirs: always auto-allow (transient files, no data loss concern)
-                if is_in_safe_zone(path, cwd) {
+                if is_in_safe_zone(path, cwd, safe_paths) {
                     // Write/Edit tools in CWD: only auto-allow if git repo
                     // (git provides history/revertibility; non-git = irreversible)
-                    if WRITE_TOOLS.contains(&tool_name) && !is_in_tmp_dir(path) {
+                    if WRITE_TOOLS.contains(&tool_name) && !is_in_tmp_dir(path, safe_paths) {
                         if is_inside_git_repo(cwd) {
                             tracing::debug!(
                                 tool_name = %tool_name,
@@ -586,12 +606,34 @@ mod tests {
 
     /// Helper: evaluate with no trusted paths and no file/command.
     fn eval_simple(mode: &PermissionMode, tool: &str, ro: bool) -> PermissionDecision {
-        evaluate_permission(mode, &[], tool, ro, None, None, Path::new("/tmp/work"))
+        evaluate_permission(
+            mode,
+            &[],
+            tool,
+            ro,
+            None,
+            None,
+            Path::new("/tmp/work"),
+            &[],
+            &[],
+            &[],
+        )
     }
 
     /// Helper: evaluate bash command in CWD.
     fn eval_bash(mode: &PermissionMode, cmd: &str, cwd: &str) -> PermissionDecision {
-        evaluate_permission(mode, &[], "bash", false, None, Some(cmd), Path::new(cwd))
+        evaluate_permission(
+            mode,
+            &[],
+            "bash",
+            false,
+            None,
+            Some(cmd),
+            Path::new(cwd),
+            &[],
+            &[],
+            &[],
+        )
     }
 
     /// Helper: evaluate file tool with a path in CWD.
@@ -604,6 +646,9 @@ mod tests {
             Some(Path::new(path)),
             None,
             Path::new(cwd),
+            &[],
+            &[],
+            &[],
         )
     }
 
@@ -822,6 +867,9 @@ mod tests {
             Some(Path::new("/data/projects/lib/main.rs")),
             None,
             Path::new("/home/user/proj"),
+            &[],
+            &[],
+            &[],
         );
         assert!(d.allowed);
         assert!(!d.requires_confirmation);
@@ -870,36 +918,40 @@ mod tests {
 
     #[test]
     fn destructive_rm() {
-        assert!(is_destructive_command("rm -rf /"));
-        assert!(is_destructive_command("rm file.txt"));
+        assert!(is_destructive_command("rm -rf /", &[], &[]));
+        assert!(is_destructive_command("rm file.txt", &[], &[]));
     }
 
     #[test]
     fn destructive_sudo() {
-        assert!(is_destructive_command("sudo apt install vim"));
+        assert!(is_destructive_command("sudo apt install vim", &[], &[]));
     }
 
     #[test]
     fn not_destructive_cargo() {
-        assert!(!is_destructive_command("cargo build"));
-        assert!(!is_destructive_command("cargo test"));
+        assert!(!is_destructive_command("cargo build", &[], &[]));
+        assert!(!is_destructive_command("cargo test", &[], &[]));
     }
 
     #[test]
     fn not_destructive_git_add() {
-        assert!(!is_destructive_command("git add ."));
-        assert!(!is_destructive_command("git commit -m \"msg\""));
+        assert!(!is_destructive_command("git add .", &[], &[]));
+        assert!(!is_destructive_command("git commit -m \"msg\"", &[], &[]));
     }
 
     #[test]
     fn destructive_git_push_force() {
-        assert!(is_destructive_command("git push --force origin main"));
-        assert!(is_destructive_command("git push -f origin main"));
+        assert!(is_destructive_command(
+            "git push --force origin main",
+            &[],
+            &[]
+        ));
+        assert!(is_destructive_command("git push -f origin main", &[], &[]));
     }
 
     #[test]
     fn destructive_git_reset_hard() {
-        assert!(is_destructive_command("git reset --hard HEAD~3"));
+        assert!(is_destructive_command("git reset --hard HEAD~3", &[], &[]));
     }
 
     // -- File operations: outside CWD → always requires confirmation --
@@ -937,6 +989,7 @@ mod tests {
         assert!(is_in_safe_zone(
             Path::new("/home/user/proj/src/main.rs"),
             Path::new("/home/user/proj"),
+            &[],
         ));
     }
 
@@ -945,6 +998,7 @@ mod tests {
         assert!(is_in_safe_zone(
             Path::new("/tmp/test.txt"),
             Path::new("/home/user/proj"),
+            &[],
         ));
     }
 
@@ -953,6 +1007,7 @@ mod tests {
         assert!(!is_in_safe_zone(
             Path::new("/etc/hosts"),
             Path::new("/home/user/proj"),
+            &[],
         ));
     }
 }

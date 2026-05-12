@@ -32,22 +32,20 @@ use crate::tools::base::{SubAgentDeps, ToolContext};
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Maximum number of tool-calling turns for a sub-agent.
-const DEFAULT_SUBAGENT_MAX_TURNS: u32 = 30;
+// DEFAULT_SUBAGENT_MAX_TURNS is now configurable via delegation_config.max_turns.
 
-/// Max auto-continuations for sub-agent.
-const SUBAGENT_MAX_AUTO_CONTINUE: u32 = 2;
+// SUBAGENT_MAX_AUTO_CONTINUE is now configurable via delegation_config.max_auto_continue.
 
-/// Tools that sub-agents must never have access to.
-const SUBAGENT_BLOCKED_TOOLS: &[&str] = &[
+/// Built-in tools that sub-agents must never have access to.
+const BUILTIN_SUBAGENT_BLOCKED_TOOLS: &[&str] = &[
     "delegate_task", // No recursive delegation
     "ask_user",      // No user interaction from sub-agents
     "memory",        // No writes to shared memory
     "skill_manage",  // No modification to skill system
 ];
 
-/// Default tools available to sub-agents (read-only safe set).
-const DEFAULT_SUBAGENT_TOOLS: &[&str] = &["read", "glob", "grep", "web_search", "web_fetch"];
+/// Built-in default tools available to sub-agents (read-only safe set).
+const BUILTIN_SUBAGENT_TOOLS: &[&str] = &["read", "glob", "grep", "web_search", "web_fetch"];
 
 // ---------------------------------------------------------------------------
 // Types
@@ -163,7 +161,11 @@ pub async fn run_delegated_task(
     cancel: CancellationToken,
     progress_tx: tokio::sync::mpsc::UnboundedSender<SubAgentEvent>,
 ) -> SubAgentResult {
-    let allowed_tools = build_effective_tools(&extra_tools);
+    let allowed_tools = build_effective_tools(
+        &extra_tools,
+        &deps.delegation_config.default_tools,
+        &deps.delegation_config.blocked_tools,
+    );
     let timeout = deps.delegation_config.child_timeout.max(30.0);
 
     run_single_sub_agent(
@@ -200,7 +202,11 @@ pub async fn run_delegated_tasks_batch(
         return vec![];
     }
 
-    let allowed_tools = build_effective_tools(&extra_tools);
+    let allowed_tools = build_effective_tools(
+        &extra_tools,
+        &deps.delegation_config.default_tools,
+        &deps.delegation_config.blocked_tools,
+    );
     let max_concurrent = max_concurrent.max(1);
 
     // Use a semaphore to limit concurrency
@@ -305,14 +311,31 @@ pub async fn run_delegated_tasks_batch(
 }
 
 /// Build the effective tool list for sub-agents: defaults + extras - blocked.
-pub fn build_effective_tools(extra_tools: &[String]) -> Vec<String> {
-    let mut tools: Vec<String> = DEFAULT_SUBAGENT_TOOLS
+/// If the user configured `default_tools` or `blocked_tools` in DelegationConfig,
+/// those override the built-in defaults.
+pub fn build_effective_tools(
+    extra_tools: &[String],
+    config_default_tools: &[String],
+    config_blocked_tools: &[String],
+) -> Vec<String> {
+    // Use user-configured defaults if provided, otherwise built-in
+    let mut tools: Vec<String> = if config_default_tools.is_empty() {
+        BUILTIN_SUBAGENT_TOOLS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        config_default_tools.to_vec()
+    };
+
+    let blocked: Vec<&str> = BUILTIN_SUBAGENT_BLOCKED_TOOLS
         .iter()
-        .map(|s| s.to_string())
+        .copied()
+        .chain(config_blocked_tools.iter().map(|s| s.as_str()))
         .collect();
 
     for tool in extra_tools {
-        if !SUBAGENT_BLOCKED_TOOLS.contains(&tool.as_str()) && !tools.contains(tool) {
+        if !blocked.contains(&tool.as_str()) && !tools.contains(tool) {
             tools.push(tool.clone());
         }
     }
@@ -439,7 +462,7 @@ async fn run_single_sub_agent(
         }
 
         turn += 1;
-        if turn > DEFAULT_SUBAGENT_MAX_TURNS {
+        if turn > deps.delegation_config.max_turns {
             break;
         }
 
@@ -565,7 +588,7 @@ async fn run_single_sub_agent(
 
         // Empty response
         if assistant_text.trim().is_empty() && collected_tool_uses.is_empty() {
-            if auto_continue_count < SUBAGENT_MAX_AUTO_CONTINUE {
+            if auto_continue_count < deps.delegation_config.max_auto_continue {
                 auto_continue_count += 1;
                 let _ = progress_tx.send(SubAgentEvent::Status {
                     task_index,
@@ -604,7 +627,8 @@ async fn run_single_sub_agent(
         if collected_tool_uses.is_empty() {
             // If this sub-agent has already executed tools, treat text as final summary.
             // Only auto-continue if no tools have been executed yet (premature text-only response).
-            if !has_executed_tools && auto_continue_count < SUBAGENT_MAX_AUTO_CONTINUE {
+            if !has_executed_tools && auto_continue_count < deps.delegation_config.max_auto_continue
+            {
                 auto_continue_count += 1;
                 let _ = progress_tx.send(SubAgentEvent::Status {
                     task_index,
@@ -772,7 +796,7 @@ async fn run_single_sub_agent(
     SubAgentResult {
         summary: summary + &file_warning,
         api_calls: turn,
-        exit_reason: if turn >= DEFAULT_SUBAGENT_MAX_TURNS {
+        exit_reason: if turn >= deps.delegation_config.max_turns {
             "max_turns"
         } else {
             "completed"

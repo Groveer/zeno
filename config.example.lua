@@ -58,6 +58,20 @@ zn.provider("openai", {
 --   DOCKER_HOST = "unix:///var/run/docker.sock",
 -- })
 
+-- Bash safety rules (merged with built-in defaults):
+--   readonly_commands     — auto-allowed without permission prompt
+--   destructive_commands  — always require confirmation in "ask" mode
+--   destructive_git_patterns — git commands that always require confirmation
+-- zn.tools({
+--   readonly_commands = { "pnpm list", "just --list", "make -n", "docker ps" },
+--   destructive_commands = { "terraform destroy", "kubectl delete", "helm uninstall" },
+--   destructive_git_patterns = { "git rebase -i", "git cherry-pick" },
+-- })
+
+-- Extra directories to skip during glob/grep traversal.
+-- Merged with built-in defaults (.git, node_modules, target, vendor, etc.).
+-- zn.tools({ skip_dirs = { ".turbo", ".nx", "bazel-out", ".gradle", ".idea" } })
+
 -- ═══════════════════════════════════════════════
 -- Web Search
 -- ═══════════════════════════════════════════════
@@ -308,6 +322,43 @@ zn.llm_max_retries(3) -- retry on empty response or transient error (default: 3)
 -- this fraction of the model's context window (0.0-1.0, default: 0.33).
 -- Set to 0 to disable auto-compaction entirely.
 zn.compact_threshold(0.33)
+
+-- ═══════════════════════════════════════════════
+-- Engine Behavior
+-- ═══════════════════════════════════════════════
+-- Fine-tune the query engine's timeouts and auto-continue limits.
+-- All values use sensible defaults — uncomment to customize.
+
+-- zn.engine({
+--   max_auto_continue = 3,       -- max retries when LLM stops without tool use
+--   stream_timeout_secs = 120,   -- abort if no token for this many seconds
+--   tool_timeout_secs = 180,     -- per-tool execution timeout (bash, read, etc.)
+--   collapse_char_limit = 2400,  -- text blocks larger than this get head/tail collapsed
+--   collapse_head_chars = 900,   -- chars to keep from the beginning
+--   collapse_tail_chars = 500,   -- chars to keep from the end
+-- })
+
+-- ═══════════════════════════════════════════════
+-- Delegation (Sub-agents)
+-- ═══════════════════════════════════════════════
+-- Control sub-agent behavior when spawned via the delegate_task tool.
+-- All values use sensible defaults — uncomment to customize.
+
+-- zn.delegation({
+--   max_concurrent_children = 3,   -- max parallel sub-agents
+--   child_timeout = 300,           -- per-sub-agent timeout in seconds
+--   max_turns = 30,                -- max tool-calling turns per sub-agent
+--   max_auto_continue = 2,         -- auto-continue retries for empty responses
+--   blocked_tools = {},            -- additional tools to block (added to built-in block list)
+--   default_tools = {},            -- override default sub-agent tools (replaces built-in set)
+-- })
+
+-- ═══════════════════════════════════════════════
+-- Safe Paths (Permission Bypass)
+-- ═══════════════════════════════════════════════
+-- Extra directories that are always allowed, bypassing permission prompts.
+-- Built-in safe paths: /tmp/, /var/tmp/.
+-- zn.safe_paths({ "/home/user/sandbox/", "/data/cache/" })
 
 -- ═══════════════════════════════════════════════
 -- Skills (Background Review & Curator)

@@ -4,10 +4,12 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use walkdir::WalkDir;
 
-pub struct GlobTool;
+pub struct GlobTool {
+    skip_dirs: Vec<String>,
+}
 impl GlobTool {
-    pub fn new() -> Self {
-        Self
+    pub fn new(skip_dirs: Vec<String>) -> Self {
+        Self { skip_dirs }
     }
 }
 
@@ -69,13 +71,15 @@ impl Tool for GlobTool {
 
         let pattern_owned = pattern.to_string();
         let base_dir_display = base_dir.display().to_string();
+        let skip_dirs = self.skip_dirs.clone();
 
         // Offload blocking filesystem traversal to tokio's blocking thread pool
         // so we don't starve the async worker threads.
-        let matches =
-            tokio::task::spawn_blocking(move || glob_sync(&base_dir, &pattern_owned, limit))
-                .await
-                .map_err(|e| ToolError::Execution(format!("Task join error: {}", e)))?;
+        let matches = tokio::task::spawn_blocking(move || {
+            glob_sync(&base_dir, &pattern_owned, limit, &skip_dirs)
+        })
+        .await
+        .map_err(|e| ToolError::Execution(format!("Task join error: {}", e)))?;
 
         if matches.is_empty() {
             return Ok(format!(
@@ -96,8 +100,8 @@ impl Tool for GlobTool {
     }
 }
 
-/// Directories that are commonly large, vendored, or not useful to search.
-const SKIPPED_DIRS: &[&str] = &[
+/// Built-in directories that are commonly large, vendored, or not useful to search.
+const DEFAULT_SKIPPED_DIRS: &[&str] = &[
     ".git",
     "node_modules",
     "target",
@@ -115,12 +119,17 @@ const SKIPPED_DIRS: &[&str] = &[
     ".cache",
 ];
 
-fn is_skipped_glob_dir(name: &str) -> bool {
-    SKIPPED_DIRS.contains(&name)
+fn is_skipped_glob_dir(name: &str, extra_skip_dirs: &[String]) -> bool {
+    DEFAULT_SKIPPED_DIRS.contains(&name) || extra_skip_dirs.iter().any(|d| d == name)
 }
 
 /// Synchronous glob implementation — safe to run on a blocking thread.
-fn glob_sync(base_dir: &std::path::Path, pattern: &str, limit: usize) -> Vec<String> {
+fn glob_sync(
+    base_dir: &std::path::Path,
+    pattern: &str,
+    limit: usize,
+    extra_skip_dirs: &[String],
+) -> Vec<String> {
     let has_doublestar = pattern.contains("**");
     let mut matches = Vec::new();
 
@@ -138,7 +147,7 @@ fn glob_sync(base_dir: &std::path::Path, pattern: &str, limit: usize) -> Vec<Str
         // Skip common large/vendored directories
         if entry.file_type().is_dir()
             && let Some(name) = entry.file_name().to_str()
-            && is_skipped_glob_dir(name)
+            && is_skipped_glob_dir(name, extra_skip_dirs)
         {
             continue;
         }

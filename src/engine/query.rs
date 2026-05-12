@@ -43,22 +43,8 @@ use crate::tools::base::{SubAgentDeps, ToolContext};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
-/// Maximum number of auto-continue attempts per user input.
-/// Prevents infinite loops when the LLM keeps stopping without
-/// making progress.
-const MAX_AUTO_CONTINUE: u32 = 3;
-
-/// Per-event stream timeout in seconds.
-/// If the LLM doesn't produce any token/event for this long,
-/// the stream is considered stalled and we abort with an error.
-/// Prevents indefinite hangs due to network issues or server stalls.
-const STREAM_EVENT_TIMEOUT_SECS: u64 = 120;
-
-/// Per-tool execution timeout in seconds.
-/// Individual tool calls (bash, read, write, etc.) that exceed this
-/// limit are treated as errors. Prevents a single stuck tool from
-/// blocking the entire parallel batch indefinitely.
-const TOOL_EXECUTION_TIMEOUT_SECS: u64 = 180;
+// MAX_AUTO_CONTINUE, STREAM_EVENT_TIMEOUT_SECS, TOOL_EXECUTION_TIMEOUT_SECS
+// are now configurable via settings.engine and loaded from init.lua.
 
 /// A collected tool use from the stream.
 #[derive(Debug, Clone)]
@@ -508,20 +494,20 @@ impl QueryEngine {
                 loop {
                     let event = tokio::select! {
                         event = tokio::time::timeout(
-                            std::time::Duration::from_secs(STREAM_EVENT_TIMEOUT_SECS),
+                            std::time::Duration::from_secs(self.settings.engine.stream_timeout_secs),
                             stream.next(),
                         ) => {
                             match event {
                                 Ok(Some(e)) => e,
                                 Ok(None) => break, // stream ended
                                 Err(_elapsed) => {
-                                    // Stream stalled — no event for STREAM_EVENT_TIMEOUT_SECS
+                                    // Stream stalled — no event for stream_timeout_secs
                                     tracing::warn!(
-                                        timeout_secs = STREAM_EVENT_TIMEOUT_SECS,
+                                        timeout_secs = self.settings.engine.stream_timeout_secs,
                                         "Stream event timeout — no token from LLM for too long"
                                     );
                                     let _ = sender.send(UiEvent::Error(
-                                        format!("Stream timed out after {}s of inactivity. The LLM may be stalled or the network may be down.", STREAM_EVENT_TIMEOUT_SECS)
+                                        format!("Stream timed out after {}s of inactivity. The LLM may be stalled or the network may be down.", self.settings.engine.stream_timeout_secs)
                                     ));
                                     stream_failed = true;
                                     break;
@@ -721,11 +707,13 @@ impl QueryEngine {
                     max_retries + 1
                 )));
 
-                if auto_continue_count < MAX_AUTO_CONTINUE && self.carryover.has_pending_goal() {
+                if auto_continue_count < self.settings.engine.max_auto_continue
+                    && self.carryover.has_pending_goal()
+                {
                     auto_continue_count += 1;
                     tracing::info!(
                         auto_continue = auto_continue_count,
-                        max_auto_continue = MAX_AUTO_CONTINUE,
+                        max_auto_continue = self.settings.engine.max_auto_continue,
                         "auto-continue: injecting continuation for empty response"
                     );
                     let _ = sender.send(UiEvent::Status(
@@ -752,7 +740,7 @@ impl QueryEngine {
             //
             // If the stop_reason was MaxTokens, the output was truncated.
             // Auto-continue by injecting a "continue" message so the model
-            // resumes from where it left off (up to MAX_AUTO_CONTINUE times).
+            // resumes from where it left off (up to max_auto_continue times).
             //
             // If the LLM signaled [DONE] (detected above), skip auto-continue.
             // Otherwise, check if there's a pending goal and loop again.
@@ -760,13 +748,13 @@ impl QueryEngine {
                 let is_max_tokens = matches!(last_stop_reason, Some(StopReason::MaxTokens));
 
                 if is_max_tokens
-                    && auto_continue_count < MAX_AUTO_CONTINUE
+                    && auto_continue_count < self.settings.engine.max_auto_continue
                     && !assistant_text.trim().is_empty()
                 {
                     auto_continue_count += 1;
                     tracing::info!(
                         auto_continue = auto_continue_count,
-                        max_auto_continue = MAX_AUTO_CONTINUE,
+                        max_auto_continue = self.settings.engine.max_auto_continue,
                         reason = "max_tokens",
                         "auto-continue: output truncated, requesting continuation"
                     );
@@ -781,13 +769,13 @@ impl QueryEngine {
                 }
 
                 if !done_signaled
-                    && auto_continue_count < MAX_AUTO_CONTINUE
+                    && auto_continue_count < self.settings.engine.max_auto_continue
                     && self.carryover.has_pending_goal()
                 {
                     auto_continue_count += 1;
                     tracing::info!(
                         auto_continue = auto_continue_count,
-                        max_auto_continue = MAX_AUTO_CONTINUE,
+                        max_auto_continue = self.settings.engine.max_auto_continue,
                         reason = "pending_goal",
                         "auto-continue: model stopped without tool use, goal still pending"
                     );
@@ -908,6 +896,10 @@ impl QueryEngine {
                             self.hook_executor.as_ref(),
                             &cancel,
                             Some(&*self.tool_cache),
+                            &self.settings.tools.destructive_commands,
+                            &self.settings.tools.destructive_git_patterns,
+                            self.settings.engine.tool_timeout_secs,
+                            &self.settings.safe_paths,
                         )
                     })
                     .collect();
@@ -967,6 +959,10 @@ impl QueryEngine {
                         self.hook_executor.as_ref(),
                         &cancel,
                         Some(&*self.tool_cache),
+                        &self.settings.tools.destructive_commands,
+                        &self.settings.tools.destructive_git_patterns,
+                        self.settings.engine.tool_timeout_secs,
+                        &self.settings.safe_paths,
                     )
                     .await;
                     tool_results.push(result);
@@ -1286,6 +1282,10 @@ async fn execute_single_tool_tui_catch(
     hook_executor: Option<&HookExecutor>,
     cancel: &CancellationToken,
     tool_cache: Option<&std::sync::Mutex<crate::tools::cache::ToolCache>>,
+    destructive_commands: &[String],
+    destructive_git_patterns: &[String],
+    tool_timeout_secs: u64,
+    safe_paths: &[String],
 ) -> ContentBlock {
     match execute_single_tool_tui(
         permission_mode,
@@ -1298,6 +1298,10 @@ async fn execute_single_tool_tui_catch(
         hook_executor,
         cancel,
         tool_cache,
+        destructive_commands,
+        destructive_git_patterns,
+        tool_timeout_secs,
+        safe_paths,
     )
     .await
     {
@@ -1328,6 +1332,10 @@ async fn execute_single_tool_tui(
     hook_executor: Option<&HookExecutor>,
     cancel: &CancellationToken,
     tool_cache: Option<&std::sync::Mutex<crate::tools::cache::ToolCache>>,
+    destructive_commands: &[String],
+    destructive_git_patterns: &[String],
+    tool_timeout_secs: u64,
+    safe_paths: &[String],
 ) -> Option<ContentBlock> {
     let input = parse_tool_input(&tu.input_json);
 
@@ -1413,6 +1421,9 @@ async fn execute_single_tool_tui(
             resolved.file_path.as_deref(),
             resolved.command.as_deref(),
             &ctx.cwd,
+            destructive_commands,
+            destructive_git_patterns,
+            safe_paths,
         );
 
         if decision.allowed {
@@ -1521,7 +1532,7 @@ async fn execute_single_tool_tui(
     }
 
     match tokio::time::timeout(
-        std::time::Duration::from_secs(TOOL_EXECUTION_TIMEOUT_SECS),
+        std::time::Duration::from_secs(tool_timeout_secs),
         tools.execute(&tu.name, input.clone(), ctx),
     )
     .await
@@ -1639,12 +1650,12 @@ async fn execute_single_tool_tui(
         Err(_elapsed) => {
             let timeout_msg = format!(
                 "Tool '{}' timed out after {}s. The command may be stuck or the output may be too large.",
-                tu.name, TOOL_EXECUTION_TIMEOUT_SECS,
+                tu.name, tool_timeout_secs,
             );
             tracing::warn!(
                 tool_name = %tu.name,
                 tool_id = %tu.id,
-                timeout_secs = TOOL_EXECUTION_TIMEOUT_SECS,
+                timeout_secs = tool_timeout_secs,
                 "Tool execution timed out"
             );
             let _ = sender.send(UiEvent::ToolError {

@@ -14,8 +14,8 @@ use mlua::{Lua, LuaOptions, LuaSerdeExt, StdLib, Value};
 
 use super::paths;
 use super::settings::{
-    AuxiliaryConfig, McpServerConfig, PermissionMode, ProviderConfig, Settings, SkillsConfig,
-    ToolsConfig, WebSearchConfig,
+    AuxiliaryConfig, DelegationConfig, EngineConfig, McpServerConfig, PermissionMode,
+    ProviderConfig, Settings, SkillsConfig, ToolsConfig, WebSearchConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -377,6 +377,27 @@ fn build_settings(lua: &Lua) -> anyhow::Result<Settings> {
             Ok(val) => settings.skills = val,
             Err(e) => tracing::warn!(error = %e, "Failed to parse skills config from Lua"),
         }
+    }
+
+    // --- engine ---
+    if let Ok(engine) = overrides.get::<mlua::Table>("engine") {
+        match lua.from_value::<EngineConfig>(Value::Table(engine)) {
+            Ok(val) => settings.engine = val,
+            Err(e) => tracing::warn!(error = %e, "Failed to parse engine config from Lua"),
+        }
+    }
+
+    // --- delegation ---
+    if let Ok(delegation) = overrides.get::<mlua::Table>("delegation") {
+        match lua.from_value::<DelegationConfig>(Value::Table(delegation)) {
+            Ok(val) => settings.delegation = val,
+            Err(e) => tracing::warn!(error = %e, "Failed to parse delegation config from Lua"),
+        }
+    }
+
+    // --- safe_paths ---
+    if let Ok(paths) = overrides.get::<Vec<String>>("safe_paths") {
+        settings.safe_paths = paths;
     }
 
     Ok(settings)
@@ -741,6 +762,36 @@ fn register_zeno_api(lua: &Lua, table: &mlua::Table) -> anyhow::Result<()> {
             entry.set("fn", func)?;
             hooks.set(hooks.len()? + 1, entry)?;
             lua.set_named_registry_value("_rc_hooks", hooks)?;
+            Ok(())
+        })?,
+    )?;
+
+    // --- Engine ---
+    // zn.engine({ max_auto_continue = 3, stream_timeout_secs = 120, ... })
+    table.set(
+        "engine",
+        lua.create_function(move |lua, opts: mlua::Table| {
+            get_overrides(lua)?.set("engine", opts)?;
+            Ok(())
+        })?,
+    )?;
+
+    // --- Delegation ---
+    // zn.delegation({ max_concurrent_children = 3, child_timeout = 300, ... })
+    table.set(
+        "delegation",
+        lua.create_function(move |lua, opts: mlua::Table| {
+            get_overrides(lua)?.set("delegation", opts)?;
+            Ok(())
+        })?,
+    )?;
+
+    // --- Safe paths ---
+    // zn.safe_paths({ "/tmp/", "/var/tmp/", "/home/user/sandbox/" })
+    table.set(
+        "safe_paths",
+        lua.create_function(move |lua, paths: Vec<String>| {
+            get_overrides(lua)?.set("safe_paths", paths)?;
             Ok(())
         })?,
     )?;

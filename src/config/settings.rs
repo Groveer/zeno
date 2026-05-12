@@ -51,6 +51,12 @@ pub struct Settings {
     /// Skill management config (curator, background review, lifecycle).
     #[serde(default)]
     pub skills: SkillsConfig,
+    /// Engine behavior config (timeouts, auto-continue, collapse thresholds).
+    #[serde(default)]
+    pub engine: EngineConfig,
+    /// Extra paths that are always allowed (in addition to /tmp and /var/tmp).
+    #[serde(default)]
+    pub safe_paths: Vec<String>,
 }
 
 impl Default for Settings {
@@ -77,6 +83,8 @@ impl Default for Settings {
             skills: SkillsConfig::default(),
             log_retention_days: 3,
             response_format: None,
+            engine: EngineConfig::default(),
+            safe_paths: Vec::new(),
         }
     }
 }
@@ -130,6 +138,23 @@ pub struct ToolsConfig {
     pub grep: bool,
     pub web_search: bool,
     pub web_fetch: bool,
+    /// Directories to skip during glob and grep traversal.
+    /// Merged with a built-in default list (`.git`, `node_modules`, etc.).
+    /// User additions are appended; the defaults are always included.
+    #[serde(default)]
+    pub skip_dirs: Vec<String>,
+    /// Extra bash read-only commands (appended to built-in defaults).
+    /// These are recognized as safe by `is_read_only` to skip permission prompts.
+    #[serde(default)]
+    pub readonly_commands: Vec<String>,
+    /// Extra destructive bash commands (appended to built-in defaults).
+    /// These always require user confirmation in "ask" mode.
+    #[serde(default)]
+    pub destructive_commands: Vec<String>,
+    /// Extra destructive git patterns (appended to built-in defaults).
+    /// These always require user confirmation in "ask" mode.
+    #[serde(default)]
+    pub destructive_git_patterns: Vec<String>,
 }
 
 impl Default for ToolsConfig {
@@ -145,6 +170,10 @@ impl Default for ToolsConfig {
             grep: true,
             web_search: true,
             web_fetch: true,
+            skip_dirs: Vec::new(),
+            readonly_commands: Vec::new(),
+            destructive_commands: Vec::new(),
+            destructive_git_patterns: Vec::new(),
         }
     }
 }
@@ -451,6 +480,16 @@ pub struct DelegationConfig {
     /// Timeout per sub-agent in seconds.
     /// Default: 300 (5 minutes). Minimum: 30.
     pub child_timeout: f64,
+    /// Maximum number of tool-calling turns for a sub-agent.
+    pub max_turns: u32,
+    /// Max auto-continuations for sub-agent.
+    pub max_auto_continue: u32,
+    /// Tools that sub-agents must never have access to.
+    #[serde(default)]
+    pub blocked_tools: Vec<String>,
+    /// Default tools available to sub-agents.
+    #[serde(default)]
+    pub default_tools: Vec<String>,
 }
 
 impl Default for DelegationConfig {
@@ -458,6 +497,45 @@ impl Default for DelegationConfig {
         Self {
             max_concurrent_children: 3,
             child_timeout: 300.0,
+            max_turns: 30,
+            max_auto_continue: 2,
+            blocked_tools: Vec::new(),
+            default_tools: Vec::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Engine
+// ---------------------------------------------------------------------------
+
+/// Configuration for the query engine behavior.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct EngineConfig {
+    /// Maximum auto-continue attempts per user input.
+    pub max_auto_continue: u32,
+    /// Per-event stream timeout in seconds.
+    pub stream_timeout_secs: u64,
+    /// Per-tool execution timeout in seconds.
+    pub tool_timeout_secs: u64,
+    /// Context collapse char limit.
+    pub collapse_char_limit: usize,
+    /// Context collapse head chars.
+    pub collapse_head_chars: usize,
+    /// Context collapse tail chars.
+    pub collapse_tail_chars: usize,
+}
+
+impl Default for EngineConfig {
+    fn default() -> Self {
+        Self {
+            max_auto_continue: 3,
+            stream_timeout_secs: 120,
+            tool_timeout_secs: 180,
+            collapse_char_limit: 2400,
+            collapse_head_chars: 900,
+            collapse_tail_chars: 500,
         }
     }
 }

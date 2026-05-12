@@ -28,10 +28,7 @@ const MAX_PTL_RETRIES: usize = 3;
 /// Marker text injected when PTL retry truncates oldest rounds.
 const PTL_RETRY_MARKER: &str = "[earlier conversation truncated for compaction retry]";
 
-// Context collapse thresholds
-const CONTEXT_COLLAPSE_CHAR_LIMIT: usize = 2400;
-const CONTEXT_COLLAPSE_HEAD_CHARS: usize = 900;
-const CONTEXT_COLLAPSE_TAIL_CHARS: usize = 500;
+// Context collapse thresholds are now configurable via settings.engine.
 
 // ---------------------------------------------------------------------------
 // Types
@@ -197,7 +194,13 @@ pub fn micro_compact(history: &mut ConversationHistory, keep_recent: usize) -> b
 ///
 /// Only modifies entries *before* the `keep_recent` boundary (using
 /// `find_safe_split_point` to preserve tool_use/result pairs).
-pub fn context_collapse(history: &mut ConversationHistory, keep_recent: usize) -> bool {
+pub fn context_collapse(
+    history: &mut ConversationHistory,
+    keep_recent: usize,
+    collapse_char_limit: usize,
+    collapse_head_chars: usize,
+    collapse_tail_chars: usize,
+) -> bool {
     let entries = history.entries_raw();
     let total = entries.len();
     if total <= keep_recent + 2 {
@@ -215,17 +218,17 @@ pub fn context_collapse(history: &mut ConversationHistory, keep_recent: usize) -
     for entry in entries.iter_mut().take(cutoff) {
         for block in &mut entry.content {
             if let ContentBlock::Text { text } = block
-                && text.len() > CONTEXT_COLLAPSE_CHAR_LIMIT
+                && text.len() > collapse_char_limit
             {
                 // Use char boundaries — byte-slicing a UTF-8 string can panic
                 // when the offset falls in the middle of a multi-byte char.
                 let head_end = text
                     .char_indices()
-                    .nth(CONTEXT_COLLAPSE_HEAD_CHARS)
+                    .nth(collapse_head_chars)
                     .map_or(text.len(), |(i, _)| i);
                 let tail_start = text
                     .char_indices()
-                    .nth_back(CONTEXT_COLLAPSE_TAIL_CHARS)
+                    .nth_back(collapse_tail_chars)
                     .map_or(0, |(i, _)| i);
                 let head = text[..head_end].trim_end();
                 let tail = text[tail_start..].trim_start();
@@ -509,7 +512,13 @@ pub async fn auto_compact_if_needed(
     }
 
     // Step 2: context collapse (deterministic, reduces LLM input size)
-    context_collapse(history, config.keep_recent);
+    context_collapse(
+        history,
+        config.keep_recent,
+        settings.engine.collapse_char_limit,
+        settings.engine.collapse_head_chars,
+        settings.engine.collapse_tail_chars,
+    );
 
     // Step 3: full compact with PTL retry
     let mut attempt = 0;
@@ -624,7 +633,7 @@ mod tests {
         h.push_user("another prompt");
 
         // All text is short — collapse should not modify anything
-        let changed = context_collapse(&mut h, 1);
+        let changed = context_collapse(&mut h, 1, 2400, 900, 500);
         assert!(!changed);
     }
 
@@ -643,7 +652,7 @@ mod tests {
         }]);
         h.push_user("keep this");
 
-        let changed = context_collapse(&mut h, 1);
+        let changed = context_collapse(&mut h, 1, 2400, 900, 500);
         assert!(changed);
 
         // The first entry's text should now contain "[collapsed"

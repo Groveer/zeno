@@ -9,11 +9,13 @@ use walkdir::WalkDir;
 
 use super::base::{Tool, ToolContext, ToolError};
 
-pub struct GrepTool;
+pub struct GrepTool {
+    skip_dirs: Vec<String>,
+}
 
 impl GrepTool {
-    pub fn new() -> Self {
-        Self
+    pub fn new(skip_dirs: Vec<String>) -> Self {
+        Self { skip_dirs }
     }
 }
 
@@ -93,6 +95,7 @@ impl Tool for GrepTool {
         let pattern_owned = pattern.to_string();
         let include_owned = include.map(String::from);
         let base_path_display = base_path.display().to_string();
+        let skip_dirs = self.skip_dirs.clone();
 
         // Offload all blocking filesystem I/O (WalkDir traversal, file reads,
         // regex matching) to tokio's blocking thread pool so we don't starve
@@ -105,6 +108,7 @@ impl Tool for GrepTool {
                 include_owned.as_deref(),
                 context,
                 limit,
+                &skip_dirs,
             )
         })
         .await
@@ -137,6 +141,7 @@ fn grep_sync(
     include: Option<&str>,
     context: usize,
     limit: usize,
+    extra_skip_dirs: &[String],
 ) -> (usize, Vec<String>) {
     // Max number of file entries to scan (prevent OOM on huge repos)
     const MAX_FILE_ENTRIES: usize = 10_000;
@@ -153,8 +158,7 @@ fn grep_sync(
                 break;
             }
 
-            // Skip common large/vendored directories
-            if entry.file_type().is_dir() && is_skipped_dir(entry.path()) {
+            if entry.file_type().is_dir() && is_skipped_dir(entry.path(), extra_skip_dirs) {
                 continue;
             }
             if !entry.file_type().is_file() {
@@ -288,8 +292,8 @@ fn simple_glob_match(pattern: &str, path: &Path) -> bool {
     }
 }
 
-/// Directories that are commonly large, vendored, or not useful to search.
-const SKIPPED_DIRS: &[&str] = &[
+/// Built-in directories that are commonly large, vendored, or not useful to search.
+const DEFAULT_SKIPPED_DIRS: &[&str] = &[
     ".git",
     "node_modules",
     "target",
@@ -308,9 +312,9 @@ const SKIPPED_DIRS: &[&str] = &[
 ];
 
 /// Check if a directory should be skipped during traversal.
-fn is_skipped_dir(path: &Path) -> bool {
+fn is_skipped_dir(path: &Path, extra_skip_dirs: &[String]) -> bool {
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        SKIPPED_DIRS.contains(&name)
+        DEFAULT_SKIPPED_DIRS.contains(&name) || extra_skip_dirs.iter().any(|d| d == name)
     } else {
         false
     }
