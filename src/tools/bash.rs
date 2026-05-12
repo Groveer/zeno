@@ -268,6 +268,15 @@ impl Tool for BashTool {
     }
 
     async fn execute(&self, arguments: Value, ctx: &ToolContext) -> Result<String, ToolError> {
+        // Rate limit check: prevent runaway bash execution
+        if let Some(ref limiter) = ctx.rate_limiter {
+            if let Ok(mut limiter) = limiter.lock() {
+                limiter
+                    .check_and_record()
+                    .map_err(|msg| ToolError::Timeout(msg))?;
+            }
+        }
+
         let cmd = arguments["command"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing 'command'".into()))?;

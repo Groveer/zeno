@@ -24,9 +24,9 @@ pub const MAX_SKILL_CONTENT_CHARS: usize = 100_000;
 
 /// Result of frontmatter validation.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct FrontmatterInfo {
     /// Parsed `name` field (if present and valid).
+    #[allow(dead_code, reason = "public API field, consumed by skill_manage tool")]
     pub name: Option<String>,
     /// Parsed `description` field (if present and valid).
     pub description: Option<String>,

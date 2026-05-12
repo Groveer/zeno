@@ -124,6 +124,9 @@ fn glob_sync(base_dir: &std::path::Path, pattern: &str, limit: usize) -> Vec<Str
     let has_doublestar = pattern.contains("**");
     let mut matches = Vec::new();
 
+    // Load gitignore patterns for the base directory
+    let gitignore = crate::tools::gitignore::GitIgnoreMatcher::load(base_dir);
+
     for entry in WalkDir::new(base_dir)
         .max_depth(if has_doublestar { 30 } else { 3 })
         .into_iter()
@@ -145,6 +148,12 @@ fn glob_sync(base_dir: &std::path::Path, pattern: &str, limit: usize) -> Vec<Str
         }
         let relative = path.strip_prefix(base_dir).unwrap_or(path);
         let rel_str = relative.to_string_lossy();
+
+        // Skip gitignored files
+        if gitignore.is_ignored(&rel_str, false) {
+            continue;
+        }
+
         if glob_matches(pattern, &rel_str) {
             matches.push(format!("{}", relative.display()));
         }

@@ -145,6 +145,9 @@ fn grep_sync(
     let mut match_count = 0;
 
     if base_path.is_dir() {
+        // Load gitignore patterns for the base directory
+        let gitignore = crate::tools::gitignore::GitIgnoreMatcher::load(base_path);
+
         for entry in WalkDir::new(base_path).into_iter().filter_map(|e| e.ok()) {
             if match_count >= limit {
                 break;
@@ -164,6 +167,14 @@ fn grep_sync(
             }
 
             let path = entry.path().to_path_buf();
+
+            // Skip gitignored files
+            if let Ok(rel) = path.strip_prefix(base_path) {
+                let rel_str = rel.to_string_lossy();
+                if gitignore.is_ignored(&rel_str, false) {
+                    continue;
+                }
+            }
 
             // Skip binary files: read first 8KB and check for null bytes
             if is_likely_binary_sync(&path) {

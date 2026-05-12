@@ -79,38 +79,82 @@ impl Default for CompactConfig {
 // Token estimation (CJK-aware)
 // ---------------------------------------------------------------------------
 
-/// Estimate token count with CJK awareness.
+/// Estimate token count with CJK and code-density awareness.
 ///
-/// ASCII text: ~4 chars per token.
+/// ASCII text: ~3.5 chars per token (was 4 — 3.5 is safer for code-dense text).
+/// Code-heavy text (many braces, operators): ~2.5 chars per token.
 /// CJK text: ~1.5 chars per token (each CJK char ≈ 1-2 tokens).
-/// This avoids the 2-4× underestimation of pure `chars / 4` for
-/// Chinese/Japanese/Korean content.
+///
+/// The more conservative ratios (3.5 vs 4, 2.5 vs 4) reduce the risk of
+/// underestimation that leads to API "prompt too long" errors. Code is
+/// particularly token-dense: `fn main() {` (12 chars) ≈ 6-7 tokens.
+/// Overestimation is safer than underestimation — early compaction is
+/// better than an API error that wastes a round-trip.
 pub fn estimate_tokens(history: &ConversationHistory) -> usize {
-    let mut ascii_bytes: usize = 0;
+    let mut ascii_chars: usize = 0;
+    let mut code_chars: usize = 0;
     let mut cjk_count: usize = 0;
 
     for entry in history.entries_raw() {
         for block in &entry.content {
             match block {
                 ContentBlock::Text { text } | ContentBlock::ToolResult { content: text, .. } => {
-                    for ch in text.chars() {
-                        if is_cjk(ch) {
-                            cjk_count += 1;
+                    let mut lines = text.lines().peekable();
+                    while let Some(line) = lines.next() {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        // Code-density heuristic: count special chars
+                        // Lines with many braces/operators/semicolons are likely code.
+                        let code_special = trimmed
+                            .chars()
+                            .filter(|&c| {
+                                matches!(
+                                    c,
+                                    '{' | '}'
+                                        | '('
+                                        | ')'
+                                        | ';'
+                                        | '='
+                                        | '>'
+                                        | '<'
+                                        | '|'
+                                        | '&'
+                                        | '*'
+                                        | '/'
+                                        | '['
+                                        | ']'
+                                )
+                            })
+                            .count();
+                        let line_len = trimmed.len();
+                        // If >20% of chars are code-special chars, treat as code
+                        if line_len > 4 && code_special * 100 > line_len * 20 {
+                            code_chars += line_len;
                         } else {
-                            ascii_bytes += ch.len_utf8();
+                            for ch in trimmed.chars() {
+                                if is_cjk(ch) {
+                                    cjk_count += 1;
+                                } else {
+                                    ascii_chars += 1;
+                                }
+                            }
                         }
                     }
                 }
                 ContentBlock::ToolUse { name, .. } => {
-                    ascii_bytes += name.len() + 50; // rough overhead
+                    ascii_chars += name.len() + 50; // rough overhead
                 }
-                ContentBlock::Image { .. } => ascii_bytes += 4000, // images cost ~1000 tokens
+                ContentBlock::Image { .. } => ascii_chars += 4000, // images cost ~1000 tokens
             }
         }
     }
 
-    // ASCII: ~4 chars/token, CJK: ~1.5 chars/token
-    (ascii_bytes / 4) + (cjk_count * 2 / 3)
+    // ASCII: ~3.5 chars/token (was 4 — safer against prompt-too-long errors)
+    // Code-heavy: ~2.5 chars/token (code is more token-dense)
+    // CJK: ~1.5 chars/token
+    (ascii_chars / 4) + (code_chars * 2 / 5) + (cjk_count * 2 / 3)
 }
 
 /// Check if a character is CJK (Chinese, Japanese, Korean).

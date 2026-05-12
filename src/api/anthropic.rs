@@ -124,6 +124,7 @@ impl SupportsStreamingMessages for AnthropicClient {
         messages: &[Message],
         tools: &[serde_json::Value],
         max_tokens: Option<u32>,
+        _response_format: Option<&serde_json::Value>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ApiError>> + Send>>, ApiError> {
         let url = format!("{}/v1/messages", self.base_url);
         let body = self.build_request_body(model, system, messages, tools, max_tokens);

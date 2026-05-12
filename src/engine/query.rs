@@ -48,6 +48,18 @@ use tokio_util::sync::CancellationToken;
 /// making progress.
 const MAX_AUTO_CONTINUE: u32 = 3;
 
+/// Per-event stream timeout in seconds.
+/// If the LLM doesn't produce any token/event for this long,
+/// the stream is considered stalled and we abort with an error.
+/// Prevents indefinite hangs due to network issues or server stalls.
+const STREAM_EVENT_TIMEOUT_SECS: u64 = 120;
+
+/// Per-tool execution timeout in seconds.
+/// Individual tool calls (bash, read, write, etc.) that exceed this
+/// limit are treated as errors. Prevents a single stuck tool from
+/// blocking the entire parallel batch indefinitely.
+const TOOL_EXECUTION_TIMEOUT_SECS: u64 = 180;
+
 /// A collected tool use from the stream.
 #[derive(Debug, Clone)]
 struct CollectedToolUse {
@@ -56,8 +68,8 @@ struct CollectedToolUse {
     input_json: String,
 }
 
-/// Parse tool input JSON, returning an error value for the LLM if parsing fails
-/// instead of silently defaulting to an empty object.
+/// Parse tool input JSON, returning a descriptive error value if parsing fails.
+/// The error is structured so tool validation can reject it properly.
 fn parse_tool_input(input_json: &str) -> Value {
     if input_json.is_empty() {
         Value::Object(Default::default())
@@ -68,7 +80,10 @@ fn parse_tool_input(input_json: &str) -> Value {
                 raw_len = input_json.len(),
                 "Failed to parse tool input JSON"
             );
-            Value::Object(Default::default())
+            // Return a descriptive error object so validation can reject it
+            serde_json::json!({
+                "_parse_error": format!("Failed to parse tool input JSON: {}", e)
+            })
         })
     }
 }
@@ -410,6 +425,7 @@ impl QueryEngine {
                             &messages,
                             &tool_schemas,
                             self.effective_max_tokens(),
+                            self.settings.response_format.as_ref(),
                         ) => {
                         match result {
                             Ok(s) => Ok(s),
@@ -454,6 +470,7 @@ impl QueryEngine {
                                                         &retry_messages,
                                                         &tool_schemas,
                                                         self.effective_max_tokens(),
+                                                        self.settings.response_format.as_ref(),
                                                     ) => r.map_err(Some),
                                                 _ = cancel.cancelled() => {
                                                     tracing::info!(event = "cancelled", phase = "retry_stream", "query_tui: cancelled during retry stream");
@@ -490,10 +507,25 @@ impl QueryEngine {
 
                 loop {
                     let event = tokio::select! {
-                        event = stream.next() => {
+                        event = tokio::time::timeout(
+                            std::time::Duration::from_secs(STREAM_EVENT_TIMEOUT_SECS),
+                            stream.next(),
+                        ) => {
                             match event {
-                                Some(e) => e,
-                                None => break, // stream ended
+                                Ok(Some(e)) => e,
+                                Ok(None) => break, // stream ended
+                                Err(_elapsed) => {
+                                    // Stream stalled — no event for STREAM_EVENT_TIMEOUT_SECS
+                                    tracing::warn!(
+                                        timeout_secs = STREAM_EVENT_TIMEOUT_SECS,
+                                        "Stream event timeout — no token from LLM for too long"
+                                    );
+                                    let _ = sender.send(UiEvent::Error(
+                                        format!("Stream timed out after {}s of inactivity. The LLM may be stalled or the network may be down.", STREAM_EVENT_TIMEOUT_SECS)
+                                    ));
+                                    stream_failed = true;
+                                    break;
+                                }
                             }
                         }
                         _ = cancel.cancelled() => {
@@ -813,7 +845,9 @@ impl QueryEngine {
                 sender.clone(),
                 self.mcp_manager.clone(),
             )
-            .with_cancel_token(cancel.clone());
+            .with_cancel_token(cancel.clone())
+            .with_rate_limiter(self.rate_limiter.clone())
+            .with_tool_stats(self.tool_stats.clone());
 
             // Attach sub-agent dependencies if available
             if let Some(ref factory) = self.client_factory {
@@ -873,6 +907,7 @@ impl QueryEngine {
                             sender,
                             self.hook_executor.as_ref(),
                             &cancel,
+                            Some(&*self.tool_cache),
                         )
                     })
                     .collect();
@@ -931,6 +966,7 @@ impl QueryEngine {
                         sender,
                         self.hook_executor.as_ref(),
                         &cancel,
+                        Some(&*self.tool_cache),
                     )
                     .await;
                     tool_results.push(result);
@@ -1249,6 +1285,7 @@ async fn execute_single_tool_tui_catch(
     sender: &tokio::sync::mpsc::UnboundedSender<crate::engine::tui_events::UiEvent>,
     hook_executor: Option<&HookExecutor>,
     cancel: &CancellationToken,
+    tool_cache: Option<&std::sync::Mutex<crate::tools::cache::ToolCache>>,
 ) -> ContentBlock {
     match execute_single_tool_tui(
         permission_mode,
@@ -1260,6 +1297,7 @@ async fn execute_single_tool_tui_catch(
         sender,
         hook_executor,
         cancel,
+        tool_cache,
     )
     .await
     {
@@ -1289,6 +1327,7 @@ async fn execute_single_tool_tui(
     sender: &tokio::sync::mpsc::UnboundedSender<crate::engine::tui_events::UiEvent>,
     hook_executor: Option<&HookExecutor>,
     cancel: &CancellationToken,
+    tool_cache: Option<&std::sync::Mutex<crate::tools::cache::ToolCache>>,
 ) -> Option<ContentBlock> {
     let input = parse_tool_input(&tu.input_json);
 
@@ -1457,14 +1496,79 @@ async fn execute_single_tool_tui(
         });
     }
 
-    match tools.execute(&tu.name, input.clone(), ctx).await {
-        Ok(result) => {
+    // --- Tool result cache lookup (read-only tools only) ---
+    let cacheable_tools = ["read", "glob", "grep"];
+    if cacheable_tools.contains(&tu.name.as_str()) {
+        if let Some(cache) = tool_cache {
+            if let Ok(mut cache) = cache.lock() {
+                if let Some(cached) = cache.get(&tu.name, &input) {
+                    tracing::debug!(
+                        tool_name = %tu.name,
+                        "Tool result cache hit"
+                    );
+                    let _ = sender.send(UiEvent::ToolOutput {
+                        name: tu.name.clone(),
+                        output: format!("(cached) {} chars", cached.len()),
+                    });
+                    return Some(ContentBlock::ToolResult {
+                        tool_use_id: tu.id.clone(),
+                        content: cached.to_string(),
+                        is_error: None,
+                    });
+                }
+            }
+        }
+    }
+
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(TOOL_EXECUTION_TIMEOUT_SECS),
+        tools.execute(&tu.name, input.clone(), ctx),
+    )
+    .await
+    {
+        Ok(Ok(result)) => {
+            // Cache result for read-only tools
+            // Cache result for read-only tools
+            if cacheable_tools.contains(&tu.name.as_str()) {
+                if let Some(cache) = tool_cache {
+                    if let Ok(mut cache) = cache.lock() {
+                        cache.insert(&tu.name, &input, result.clone());
+                    }
+                }
+            }
+
+            // Invalidate cache on write/edit
+            if tu.name == "write" || tu.name == "edit" {
+                if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
+                    if let Some(cache) = tool_cache {
+                        if let Ok(mut cache) = cache.lock() {
+                            cache.invalidate_path(std::path::Path::new(path));
+                        }
+                    }
+                }
+            }
             // Show a compact one-line summary in the TUI; full content goes to LLM.
             let display = summarize_tool_output(&tu.name, &result, &tu.input_json);
             let _ = sender.send(UiEvent::ToolOutput {
                 name: tu.name.clone(),
                 output: display,
             });
+
+            // For edit tool, extract diff lines from the result and send a ToolDiff event
+            if tu.name == "edit" {
+                let diff_lines: Vec<&str> = result
+                    .lines()
+                    .skip_while(|l| !l.starts_with('-') && !l.starts_with('+'))
+                    .take_while(|l| l.starts_with('-') || l.starts_with('+') || l.starts_with(' '))
+                    .collect();
+                if !diff_lines.is_empty() {
+                    let diff_text = diff_lines.join("\n");
+                    let _ = sender.send(UiEvent::ToolDiff {
+                        name: tu.name.clone(),
+                        diff: diff_text,
+                    });
+                }
+            }
             tracing::info!(
                 tool_name = %tu.name,
                 tool_id = %tu.id,
@@ -1476,16 +1580,17 @@ async fn execute_single_tool_tui(
             // --- Post-tool-use hook ---
             if let Some(he) = hook_executor {
                 if he.has_hooks_for(HookEvent::PostToolUse) {
-                    let hook_ctx = he.build_context().unwrap();
-                    let _ = hook_ctx.set("tool_name", tu.name.as_str());
-                    let _ = hook_ctx.set(
-                        "tool_input",
-                        crate::hooks::executor::json_to_lua_value(he.lua(), &input),
-                    );
-                    let _ = hook_ctx.set("tool_output", result.clone());
-                    let _ = hook_ctx.set("tool_is_error", false);
-                    let _ = hook_ctx.set("cwd", ctx.cwd.to_string_lossy().to_string());
-                    he.execute(HookEvent::PostToolUse, &hook_ctx).await;
+                    if let Ok(hook_ctx) = he.build_context() {
+                        let _ = hook_ctx.set("tool_name", tu.name.as_str());
+                        let _ = hook_ctx.set(
+                            "tool_input",
+                            crate::hooks::executor::json_to_lua_value(he.lua(), &input),
+                        );
+                        let _ = hook_ctx.set("tool_output", result.clone());
+                        let _ = hook_ctx.set("tool_is_error", false);
+                        let _ = hook_ctx.set("cwd", ctx.cwd.to_string_lossy().to_string());
+                        he.execute(HookEvent::PostToolUse, &hook_ctx).await;
+                    }
                 }
             }
 
@@ -1495,7 +1600,7 @@ async fn execute_single_tool_tui(
                 is_error: None,
             })
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             tracing::warn!(
                 tool_name = %tu.name,
                 tool_id = %tu.id,
@@ -1511,22 +1616,56 @@ async fn execute_single_tool_tui(
             // --- Post-tool-use hook (error case) ---
             if let Some(he) = hook_executor {
                 if he.has_hooks_for(HookEvent::PostToolUse) {
-                    let hook_ctx = he.build_context().unwrap();
-                    let _ = hook_ctx.set("tool_name", tu.name.as_str());
-                    let _ = hook_ctx.set(
-                        "tool_input",
-                        crate::hooks::executor::json_to_lua_value(he.lua(), &input),
-                    );
-                    let _ = hook_ctx.set("tool_output", e.to_string());
-                    let _ = hook_ctx.set("tool_is_error", true);
-                    let _ = hook_ctx.set("cwd", ctx.cwd.to_string_lossy().to_string());
-                    he.execute(HookEvent::PostToolUse, &hook_ctx).await;
+                    if let Ok(hook_ctx) = he.build_context() {
+                        let _ = hook_ctx.set("tool_name", tu.name.as_str());
+                        let _ = hook_ctx.set(
+                            "tool_input",
+                            crate::hooks::executor::json_to_lua_value(he.lua(), &input),
+                        );
+                        let _ = hook_ctx.set("tool_output", e.to_string());
+                        let _ = hook_ctx.set("tool_is_error", true);
+                        let _ = hook_ctx.set("cwd", ctx.cwd.to_string_lossy().to_string());
+                        he.execute(HookEvent::PostToolUse, &hook_ctx).await;
+                    }
                 }
             }
 
             Some(ContentBlock::ToolResult {
                 tool_use_id: tu.id.clone(),
                 content: format!("Error: {}", e),
+                is_error: Some(true),
+            })
+        }
+        Err(_elapsed) => {
+            let timeout_msg = format!(
+                "Tool '{}' timed out after {}s. The command may be stuck or the output may be too large.",
+                tu.name, TOOL_EXECUTION_TIMEOUT_SECS,
+            );
+            tracing::warn!(
+                tool_name = %tu.name,
+                tool_id = %tu.id,
+                timeout_secs = TOOL_EXECUTION_TIMEOUT_SECS,
+                "Tool execution timed out"
+            );
+            let _ = sender.send(UiEvent::ToolError {
+                name: tu.name.clone(),
+                error: timeout_msg.clone(),
+            });
+
+            if let Some(he) = hook_executor {
+                if he.has_hooks_for(HookEvent::PostToolUse) {
+                    if let Ok(hook_ctx) = he.build_context() {
+                        let _ = hook_ctx.set("tool_name", tu.name.as_str());
+                        let _ = hook_ctx.set("tool_is_error", true);
+                        let _ = hook_ctx.set("cwd", ctx.cwd.to_string_lossy().to_string());
+                        he.execute(HookEvent::PostToolUse, &hook_ctx).await;
+                    }
+                }
+            }
+
+            Some(ContentBlock::ToolResult {
+                tool_use_id: tu.id.clone(),
+                content: timeout_msg,
                 is_error: Some(true),
             })
         }

@@ -94,6 +94,8 @@ pub struct App {
     /// Cancellation token shared with the running LLM task.
     /// Pressing Ctrl+C while Running cancels this token instead of quitting.
     cancel_token: CancellationToken,
+    /// RAII guard for the config file watcher (dropped when session ends).
+    _watcher_guard: Option<crate::config::watcher::WatcherGuard>,
     /// Cancellation token for background tasks (curator, review).
     /// Cancelled once on exit so background work stops promptly.
     background_cancel_token: CancellationToken,
@@ -167,11 +169,17 @@ impl App {
             sub_agent_rx,
             sub_agent_tx,
             todo_state: None,
+            _watcher_guard: None,
         }
     }
 
     pub fn event_sender(&self) -> mpsc::UnboundedSender<crate::engine::tui_events::UiEvent> {
         self.event_tx.clone()
+    }
+
+    /// Set the config file watcher guard (dropped on session exit).
+    pub fn set_watcher_guard(&mut self, guard: crate::config::watcher::WatcherGuard) {
+        self._watcher_guard = Some(guard);
     }
 
     /// Set the shared steer slot from the engine so the TUI can inject
@@ -508,6 +516,9 @@ impl App {
                     } else {
                         self.output.push(OutputSegment::ToolError(error));
                     }
+                }
+                UiEvent::ToolDiff { name: _, diff } => {
+                    self.output.push(OutputSegment::Diff(diff));
                 }
                 UiEvent::AskUser {
                     question,

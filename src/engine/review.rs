@@ -8,7 +8,7 @@
 
 use crate::config::settings::SkillsConfig;
 use crate::engine::curator::{BackgroundWorkGuard, try_lock_background_work};
-use crate::engine::sub_agent::{SubAgentResult, run_delegated_task};
+use crate::engine::sub_agent::run_delegated_task;
 use crate::tools::base::SubAgentDeps;
 use tokio_util::sync::CancellationToken;
 
@@ -103,28 +103,119 @@ pub fn spawn_background_review(
             CancellationToken::new()
         };
 
-        let result: SubAgentResult = run_delegated_task(
-            &deps,
-            cwd,
-            goal,
-            None, // no additional context
-            extra_tools,
-            cancel,
-            tx,
-        )
-        .await;
-
-        if result.error.is_some() || result.summary.is_empty() {
-            tracing::debug!(
-                exit_reason = %result.exit_reason,
-                "Background skill review completed with no changes"
-            );
+        // Run the review with a timeout and cancellation support
+        let result = if let Some(ref pc) = parent_cancel {
+            tokio::select! {
+                result = run_delegated_task(
+                    &deps, cwd, goal, None, extra_tools, cancel, tx,
+                ) => Some(result),
+                _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
+                    tracing::warn!("Background skill review timed out after 300s");
+                    None
+                }
+                _ = pc.cancelled() => {
+                    tracing::info!("Background skill review cancelled by shutdown");
+                    None
+                }
+            }
         } else {
-            tracing::info!(
-                summary_len = result.summary.len(),
-                api_calls = result.api_calls,
-                "Background skill review completed"
-            );
+            tokio::select! {
+                result = run_delegated_task(
+                    &deps, cwd, goal, None, extra_tools, cancel, tx,
+                ) => Some(result),
+                _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
+                    tracing::warn!("Background skill review timed out after 300s");
+                    None
+                }
+            }
+        };
+
+        if let Some(result) = result {
+            if let Some(ref err) = result.error {
+                tracing::error!(
+                    exit_reason = %result.exit_reason,
+                    error = %err,
+                    api_calls = result.api_calls,
+                    duration_secs = result.duration_seconds,
+                    "Background skill review failed"
+                );
+            } else if result.summary.is_empty() {
+                tracing::info!(
+                    exit_reason = %result.exit_reason,
+                    "Background skill review completed with no changes"
+                );
+            } else {
+                tracing::info!(
+                    summary_len = result.summary.len(),
+                    api_calls = result.api_calls,
+                    duration_secs = result.duration_seconds,
+                    "Background skill review completed"
+                );
+            }
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::settings::SkillsConfig;
+
+    #[test]
+    fn test_should_run_review_disabled() {
+        let config = SkillsConfig {
+            background_review_enabled: false,
+            review_interval_turns: 5,
+            ..Default::default()
+        };
+        assert!(!should_run_review(5, &config));
+    }
+
+    #[test]
+    fn test_should_run_review_interval_zero() {
+        let config = SkillsConfig {
+            background_review_enabled: true,
+            review_interval_turns: 0,
+            ..Default::default()
+        };
+        assert!(!should_run_review(5, &config));
+    }
+
+    #[test]
+    fn test_should_run_review_turn_zero() {
+        let config = SkillsConfig {
+            background_review_enabled: true,
+            review_interval_turns: 5,
+            ..Default::default()
+        };
+        assert!(!should_run_review(0, &config));
+    }
+
+    #[test]
+    fn test_should_run_review_exact_multiple() {
+        let config = SkillsConfig {
+            background_review_enabled: true,
+            review_interval_turns: 5,
+            ..Default::default()
+        };
+        assert!(should_run_review(5, &config));
+        assert!(should_run_review(10, &config));
+        assert!(should_run_review(15, &config));
+    }
+
+    #[test]
+    fn test_should_run_review_not_multiple() {
+        let config = SkillsConfig {
+            background_review_enabled: true,
+            review_interval_turns: 5,
+            ..Default::default()
+        };
+        assert!(!should_run_review(3, &config));
+        assert!(!should_run_review(7, &config));
+        assert!(!should_run_review(12, &config));
+    }
 }

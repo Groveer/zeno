@@ -66,6 +66,14 @@ pub struct QueryEngine {
     /// Optional cancellation token for background review tasks.
     /// When the app exits, this token is cancelled so background reviews stop.
     pub background_cancel: Option<tokio_util::sync::CancellationToken>,
+    /// Shared tool result cache for read-only tools (read, glob, grep).
+    /// Reduces redundant execution when the LLM calls the same tool
+    /// with the same arguments within a short window.
+    pub tool_cache: crate::tools::cache::SharedToolCache,
+    /// Shared rate limiter for bash tool execution.
+    pub rate_limiter: crate::tools::rate_limiter::SharedRateLimiter,
+    /// Tool usage statistics collector.
+    pub tool_stats: crate::tools::tool_stats::SharedToolStats,
 }
 
 /// Inject user text into a steer slot without interrupting the agent.
@@ -82,7 +90,7 @@ pub fn steer_into_slot(slot: &Arc<Mutex<Option<String>>>, text: &str) -> bool {
     if cleaned.is_empty() {
         return false;
     }
-    let mut guard = slot.lock().unwrap();
+    let mut guard = slot.lock().expect("steer_into_slot: mutex poisoned");
     match guard.as_mut() {
         Some(existing) => {
             existing.push('\n');
@@ -136,6 +144,9 @@ impl QueryEngine {
             sub_agent_tx: None,
             turns_since_skill_review: 0,
             background_cancel: None,
+            tool_cache: crate::tools::cache::new_shared(),
+            rate_limiter: crate::tools::rate_limiter::new_shared(),
+            tool_stats: crate::tools::tool_stats::new_shared(),
         }
     }
 
@@ -186,13 +197,19 @@ impl QueryEngine {
     /// Return the pending steer text (if any) and clear the slot.
     /// Called from the engine thread after appending tool results.
     pub fn drain_steer(&self) -> Option<String> {
-        let mut guard = self.pending_steer.lock().unwrap();
+        let mut guard = self
+            .pending_steer
+            .lock()
+            .expect("pending_steer: mutex poisoned");
         guard.take()
     }
 
     /// Clear any pending steer (e.g. on interrupt).
     pub fn clear_steer(&self) {
-        let mut guard = self.pending_steer.lock().unwrap();
+        let mut guard = self
+            .pending_steer
+            .lock()
+            .expect("pending_steer: mutex poisoned");
         *guard = None;
     }
 

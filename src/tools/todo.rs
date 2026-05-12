@@ -86,7 +86,8 @@ pub struct TodoTool {
 }
 
 impl TodoTool {
-    #[allow(dead_code)]
+    /// Create a new TodoTool (used in tests).
+    #[cfg(test)]
     pub fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(TodoState::default())),
@@ -97,12 +98,6 @@ impl TodoTool {
     /// Used by the TUI to render the same state in the side panel.
     pub fn from_state(state: Arc<Mutex<TodoState>>) -> Self {
         Self { state }
-    }
-
-    /// Get a clone of the shared state handle (for TUI side panel).
-    #[allow(dead_code)]
-    pub fn shared_state(&self) -> Arc<Mutex<TodoState>> {
-        self.state.clone()
     }
 }
 
@@ -343,6 +338,8 @@ mod tests {
             mcp_manager: None,
             sub_agent_deps: None,
             cancel_token: None,
+            rate_limiter: None,
+            tool_stats: None,
         }
     }
 

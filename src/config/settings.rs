@@ -39,6 +39,12 @@ pub struct Settings {
     pub auxiliary: AuxiliaryConfig,
     pub llm: LlmConfig,
     pub log_retention_days: u64,
+    /// Structured output format (response_format) for the API.
+    /// When set to a JSON Schema value, the model is constrained to output
+    /// JSON matching that schema. Currently supported by OpenAI-compatible APIs.
+    /// Set via `zn.response_format({ type = "json_schema", json_schema = { ... } })`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<serde_json::Value>,
     /// Delegation config for sub-agents (delegate_task tool).
     #[serde(default)]
     pub delegation: DelegationConfig,
@@ -70,6 +76,7 @@ impl Default for Settings {
             delegation: DelegationConfig::default(),
             skills: SkillsConfig::default(),
             log_retention_days: 3,
+            response_format: None,
         }
     }
 }

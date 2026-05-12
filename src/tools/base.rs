@@ -124,6 +124,11 @@ pub struct ToolContext {
     /// Cancellation token from the parent engine — tools that spawn background
     /// work (e.g. delegate_task) should link this to their own cancellation.
     pub cancel_token: Option<CancellationToken>,
+    /// Shared rate limiter for tool execution (e.g. bash commands).
+    /// When set, tools check this before executing to prevent runaway agents.
+    pub rate_limiter: Option<crate::tools::rate_limiter::SharedRateLimiter>,
+    /// Tool usage statistics collector (shared across the session).
+    pub tool_stats: Option<crate::tools::tool_stats::SharedToolStats>,
 }
 
 impl ToolContext {
@@ -139,6 +144,8 @@ impl ToolContext {
             mcp_manager,
             sub_agent_deps: None,
             cancel_token: None,
+            rate_limiter: None,
+            tool_stats: None,
         }
     }
 
@@ -151,6 +158,21 @@ impl ToolContext {
     /// Attach a cancellation token to this context.
     pub fn with_cancel_token(mut self, token: CancellationToken) -> Self {
         self.cancel_token = Some(token);
+        self
+    }
+
+    /// Attach a rate limiter to this context.
+    pub fn with_rate_limiter(
+        mut self,
+        limiter: crate::tools::rate_limiter::SharedRateLimiter,
+    ) -> Self {
+        self.rate_limiter = Some(limiter);
+        self
+    }
+
+    /// Attach a tool stats collector to this context.
+    pub fn with_tool_stats(mut self, stats: crate::tools::tool_stats::SharedToolStats) -> Self {
+        self.tool_stats = Some(stats);
         self
     }
 
@@ -189,9 +211,11 @@ pub trait Tool: Send + Sync {
     /// Override for custom validation (type checks, enum values, etc.).
     fn validate_input(&self, arguments: &Value) -> Result<(), ToolError> {
         let schema = self.schema();
-        let required: Vec<&str> = schema
-            .get("function")
-            .and_then(|f| f.get("parameters"))
+        let params = schema.get("function").and_then(|f| f.get("parameters"));
+        let properties = params
+            .and_then(|p| p.get("properties"))
+            .and_then(|p| p.as_object());
+        let required: Vec<&str> = params
             .and_then(|p| p.get("required"))
             .and_then(|r| r.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
@@ -223,6 +247,37 @@ pub trait Tool: Send + Sync {
                 _ => {}
             }
         }
+
+        // Type validation: check provided fields against schema property types
+        if let Some(props) = properties {
+            for (field_name, field_schema) in props {
+                if let Some(value) = obj.get(field_name.as_str()) {
+                    if value.is_null() {
+                        continue; // null is handled by required check above
+                    }
+                    if let Some(expected_type) = field_schema.get("type").and_then(|t| t.as_str()) {
+                        let type_ok = match expected_type {
+                            "string" => value.is_string(),
+                            "integer" | "number" => value.is_number(),
+                            "boolean" => value.is_boolean(),
+                            "array" => value.is_array(),
+                            "object" => value.is_object(),
+                            _ => true, // unknown type, skip validation
+                        };
+                        if !type_ok {
+                            return Err(ToolError::InvalidArguments(format!(
+                                "{}: field '{}' expected type '{}', got {}",
+                                self.name(),
+                                field_name,
+                                expected_type,
+                                value
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -289,13 +344,25 @@ impl ToolRegistry {
         args: Value,
         ctx: &ToolContext,
     ) -> Result<String, ToolError> {
+        let start = std::time::Instant::now();
         let tool = self
             .tools
             .get(name)
             .ok_or_else(|| ToolError::Execution(format!("Unknown tool: {}", name)))?;
         // Validate input against schema before execution
         tool.validate_input(&args)?;
-        tool.execute(args, ctx).await
+        let result = tool.execute(args, ctx).await;
+
+        // Record tool usage statistics
+        let duration = start.elapsed().as_secs_f64();
+        let success = result.is_ok();
+        if let Some(ref stats) = ctx.tool_stats {
+            if let Ok(mut stats) = stats.lock() {
+                stats.record(name, duration, success);
+            }
+        }
+
+        result
     }
 
     /// Get a tool by name (for introspection: is_read_only, validate_input, etc.).

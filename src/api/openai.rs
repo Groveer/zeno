@@ -203,12 +203,17 @@ impl SupportsStreamingMessages for OpenAIClient {
         model: &str,
         system: &str,
         messages: &[Message],
-        tools: &[Value],
+        tools: &[serde_json::Value],
         max_tokens: Option<u32>,
+        response_format: Option<&serde_json::Value>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ApiError>> + Send>>, ApiError> {
         let url = format!("{}/chat/completions", self.base_url);
-        let body = self.build_request_body(model, system, messages, tools, max_tokens);
+        let mut body = self.build_request_body(model, system, messages, tools, max_tokens);
 
+        // Add response_format if provided (OpenAI-compatible only)
+        if let Some(rf) = response_format {
+            body["response_format"] = rf.clone();
+        }
         let response = self
             .http
             .post(&url)

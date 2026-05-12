@@ -208,10 +208,11 @@ pub async fn run_delegated_tasks_batch(
 
     // Create a child cancellation token so we can cancel all tasks at once
     let batch_cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
     let _cancel_link = {
         let bc = batch_cancel.clone();
         tokio::spawn(async move {
-            cancel.cancelled().await;
+            cancel_clone.cancelled().await;
             bc.cancel();
         })
     };
@@ -261,22 +262,41 @@ pub async fn run_delegated_tasks_batch(
 
     // Collect results in order — cancel_link stays alive so Ctrl+C
     // propagates through the entire batch execution.
+    // After cancellation, use a grace timeout to avoid blocking shutdown
+    // on stuck sub-agent tasks.
     let mut results = Vec::with_capacity(n_tasks);
     for handle in handles {
-        match handle.await {
-            Ok(result) => results.push(result),
-            Err(e) => {
-                results.push(SubAgentResult {
+        if cancel.is_cancelled() {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
+                Ok(Ok(result)) => results.push(result),
+                _ => results.push(SubAgentResult {
                     summary: String::new(),
                     api_calls: 0,
-                    exit_reason: "error".into(),
+                    exit_reason: "interrupted".into(),
                     tokens: SubAgentTokenUsage::default(),
                     tool_trace: vec![],
-                    interrupted: false,
-                    error: Some(format!("Sub-agent task panicked: {}", e)),
+                    interrupted: true,
+                    error: None,
                     duration_seconds: 0.0,
                     modified_files: vec![],
-                });
+                }),
+            }
+        } else {
+            match handle.await {
+                Ok(result) => results.push(result),
+                Err(e) => {
+                    results.push(SubAgentResult {
+                        summary: String::new(),
+                        api_calls: 0,
+                        exit_reason: "error".into(),
+                        tokens: SubAgentTokenUsage::default(),
+                        tool_trace: vec![],
+                        interrupted: false,
+                        error: Some(format!("Sub-agent task panicked: {}", e)),
+                        duration_seconds: 0.0,
+                        modified_files: vec![],
+                    });
+                }
             }
         }
     }
@@ -349,6 +369,8 @@ async fn run_single_sub_agent(
         mcp_manager: None,
         sub_agent_deps: Some(deps.clone()),
         cancel_token: None,
+        rate_limiter: None,
+        tool_stats: None,
     };
 
     // Create sub-agent's API client
@@ -426,7 +448,7 @@ async fn run_single_sub_agent(
 
         // Stream API response
         let stream = match client
-            .stream_messages(&model, &system_prompt, &messages, &tool_schemas, None)
+            .stream_messages(&model, &system_prompt, &messages, &tool_schemas, None, None)
             .await
         {
             Ok(s) => s,
@@ -449,62 +471,82 @@ async fn run_single_sub_agent(
         let mut pending_usage: Option<Usage> = None;
 
         loop {
-            let event = stream.next().await;
-            match event {
-                Some(Ok(StreamEvent::TextDelta(delta))) => {
-                    assistant_text.push_str(&delta);
-                }
-                Some(Ok(StreamEvent::ToolUseStart {
-                    id,
-                    name,
-                    input_json,
-                })) => {
-                    if let Some(tool) = current_tool.take() {
-                        collected_tool_uses.push(tool);
-                    }
-                    current_tool = Some(CollectedToolUse {
-                        id,
-                        name,
-                        input_json: input_json.unwrap_or_default(),
-                    });
-                }
-                Some(Ok(StreamEvent::ToolUseDelta { id, delta_json })) => {
-                    if let Some(ref mut tool) = current_tool
-                        && tool.id == id
-                    {
-                        tool.input_json.push_str(&delta_json);
-                    }
-                }
-                Some(Ok(StreamEvent::UsageUpdate(usage))) => {
-                    pending_usage = Some(usage);
-                }
-                Some(Ok(StreamEvent::MessageComplete {
-                    stop_reason: _,
-                    usage,
-                })) => {
-                    let final_usage = if let Some(pending) = pending_usage.take() {
-                        // Anthropic: message_start had input+output+cache, message_delta has
-                        // only output_tokens.  Merge: take input+cache from pending, output
-                        // from usage (message_delta has the final output count).
-                        Usage {
-                            input_tokens: pending.input_tokens,
-                            output_tokens: usage.output_tokens,
-                            cache_read_input_tokens: pending.cache_read_input_tokens,
-                            cache_creation_input_tokens: pending.cache_creation_input_tokens,
-                            reasoning_tokens: pending.reasoning_tokens,
-                        }
-                    } else {
-                        usage
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    tracing::info!(event = "cancelled", phase = "sub_agent_stream", "Sub-agent stream cancelled");
+                    return SubAgentResult {
+                        summary: String::new(),
+                        api_calls: turn,
+                        exit_reason: "interrupted".into(),
+                        tokens: SubAgentTokenUsage {
+                            input_tokens: total_input_tokens,
+                            output_tokens: total_output_tokens,
+                        },
+                        tool_trace,
+                        interrupted: true,
+                        error: None,
+                        duration_seconds: start.elapsed().as_secs_f64(),
+                        modified_files: vec![],
                     };
-                    total_input_tokens += final_usage.input_tokens;
-                    total_output_tokens += final_usage.output_tokens;
                 }
-                Some(Err(e)) => {
-                    tracing::warn!(error = ?e, "Sub-agent stream error");
-                    stream_failed = true;
-                    break;
+                event = stream.next() => {
+                    match event {
+                        Some(Ok(StreamEvent::TextDelta(delta))) => {
+                            assistant_text.push_str(&delta);
+                        }
+                        Some(Ok(StreamEvent::ToolUseStart {
+                            id,
+                            name,
+                            input_json,
+                        })) => {
+                            if let Some(tool) = current_tool.take() {
+                                collected_tool_uses.push(tool);
+                            }
+                            current_tool = Some(CollectedToolUse {
+                                id,
+                                name,
+                                input_json: input_json.unwrap_or_default(),
+                            });
+                        }
+                        Some(Ok(StreamEvent::ToolUseDelta { id, delta_json })) => {
+                            if let Some(ref mut tool) = current_tool
+                                && tool.id == id
+                            {
+                                tool.input_json.push_str(&delta_json);
+                            }
+                        }
+                        Some(Ok(StreamEvent::UsageUpdate(usage))) => {
+                            pending_usage = Some(usage);
+                        }
+                        Some(Ok(StreamEvent::MessageComplete {
+                            stop_reason: _,
+                            usage,
+                        })) => {
+                            let final_usage = if let Some(pending) = pending_usage.take() {
+                                // Anthropic: message_start had input+output+cache, message_delta has
+                                // only output_tokens.  Merge: take input+cache from pending, output
+                                // from usage (message_delta has the final output count).
+                                Usage {
+                                    input_tokens: pending.input_tokens,
+                                    output_tokens: usage.output_tokens,
+                                    cache_read_input_tokens: pending.cache_read_input_tokens,
+                                    cache_creation_input_tokens: pending.cache_creation_input_tokens,
+                                    reasoning_tokens: pending.reasoning_tokens,
+                                }
+                            } else {
+                                usage
+                            };
+                            total_input_tokens += final_usage.input_tokens;
+                            total_output_tokens += final_usage.output_tokens;
+                        }
+                        Some(Err(e)) => {
+                            tracing::warn!(error = ?e, "Sub-agent stream error");
+                            stream_failed = true;
+                            break;
+                        }
+                        None => break,
+                    }
                 }
-                None => break,
             }
         }
 

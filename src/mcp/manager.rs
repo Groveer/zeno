@@ -334,6 +334,34 @@ impl McpManager {
     pub fn get_mut(&mut self, name: &str) -> Option<&mut McpServerState> {
         self.servers.get_mut(name)
     }
+
+    /// Gracefully shut down all connected MCP servers.
+    ///
+    /// Drops all peer connections and running services, which terminates
+    /// stdio child processes and closes HTTP sessions. Sets all servers
+    /// back to `Stopped` status. Safe to call multiple times.
+    pub fn shutdown(&mut self) {
+        let count = self
+            .servers
+            .values()
+            .filter(|s| s.connection.is_some())
+            .count();
+        if count == 0 {
+            return;
+        }
+        tracing::info!(servers = count, "Shutting down MCP servers");
+        for (name, state) in &mut self.servers {
+            if state.connection.is_some() {
+                tracing::debug!(server = %name, "Disconnecting MCP server");
+                // Dropping ServerConnection drops Peer + RunningService,
+                // which terminates the child process (stdio) or HTTP session.
+                state.connection = None;
+                state.status = ServerStatus::Stopped;
+                state.tools_cache.clear();
+            }
+        }
+        tracing::info!("All MCP servers disconnected");
+    }
 }
 
 // ---------------------------------------------------------------------------

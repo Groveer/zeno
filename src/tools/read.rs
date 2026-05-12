@@ -16,6 +16,10 @@ const FULL_READ_THRESHOLD: usize = 500;
 /// Prevents OOM from reading huge single-line files.
 const MAX_FILE_SIZE_BYTES: u64 = 10 * 1024 * 1024;
 
+/// Maximum lines that can be read in a single call.
+/// For larger files, use offset+limit to paginate (e.g. offset=1, limit=5000).
+const MAX_LINES_PER_CALL: u64 = 5000;
+
 pub struct ReadTool;
 
 impl ReadTool {
@@ -35,7 +39,7 @@ impl Tool for ReadTool {
             "type": "function",
             "function": {
                 "name": "read",
-                "description": "Read file contents with line numbers.\n\nBEHAVIOR:\n- Small files (≤500 lines, no params): returns the ENTIRE file.\n- Large files (no params): returns first 500 lines as preview.\n- Use offset+limit to read a specific range (e.g. offset=50, limit=100).\n- Use offset+context to read around a line (e.g. offset=50, context=10 reads lines 40-60).\n- Set limit=2000 to read up to 2000 lines at once.\n\nBEST PRACTICE: For large files, first read without params to get a preview, then use offset+limit to read specific sections.",
+                "description": "Read file contents with line numbers.\n\nBEHAVIOR:\n- Small files (≤500 lines, no params): returns the ENTIRE file.\n- Large files (no params): returns first 500 lines as preview.\n- Use offset+limit to read a specific range (e.g. offset=50, limit=100).\n- Use offset+context to read around a line (e.g. offset=50, context=10 reads lines 40-60).\n- For very large files, paginate by incrementing offset (e.g. offset=1, limit=5000 reads first 5000 lines, then offset=5001, limit=5000).\n- Set limit=5000 to read up to 5000 lines at once.\n\nBEST PRACTICE: For large files, first read without params to get a preview, then use offset+limit to read specific sections. If the file is very large (>5000 lines), paginate in chunks of 5000.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -50,7 +54,7 @@ impl Tool for ReadTool {
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "Max lines to read (default: 500, max: 2000). Use 2000 to read large sections in one call.",
+                            "description": "Max lines to read (default: 500, max: 5000). Use 5000 to read large sections in one call. For files >5000 lines, paginate by incrementing offset.",
                             "default": 500
                         },
                         "context": {
@@ -118,7 +122,7 @@ impl Tool for ReadTool {
                 .get("limit")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(500)
-                .min(2000) as usize;
+                .min(MAX_LINES_PER_CALL) as usize;
             let start = offset.saturating_sub(1);
             let end = (start + limit).min(total_lines);
             (start, end)

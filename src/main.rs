@@ -6,6 +6,7 @@ mod hooks;
 mod mcp;
 mod memory;
 mod permissions;
+mod plugin;
 mod prompts;
 mod skills;
 mod tools;
@@ -75,6 +76,10 @@ fn dispatch_command(input: &str) -> CommandAction {
             let arg = s.strip_prefix("/goal").unwrap_or("").trim().to_string();
             CommandAction::NeedEngine("goal", arg)
         }
+        s if s.starts_with("/image") => {
+            let arg = s.strip_prefix("/image").unwrap_or("").trim().to_string();
+            CommandAction::NeedEngine("image", arg)
+        }
         // Unknown slash command  send to LLM
         _ => CommandAction::Query,
     }
@@ -102,6 +107,8 @@ Available commands:
 /goal clear — Clear goal
 /goal pause — Pause goal
 /goal resume — Resume goal
+/image — Attach a screenshot from clipboard
+/image <path> — Attach an image from file
 
 Navigation:
  / — History (input) or scroll (output)
@@ -426,6 +433,27 @@ async fn main() -> anyhow::Result<()> {
         skill_dirs.clone(),
     )))?;
     let skill_tool_count = registry.names().len() - builtin_tool_count;
+
+    // Load Lua plugins from configured directory and register as tools
+    let plugin_dir =
+        if settings.plugins.dir.is_empty() || settings.plugins.dir == "~/.config/zeno/plugins" {
+            crate::plugin::bridge::default_plugins_dir()
+        } else {
+            let dir = settings
+                .plugins
+                .dir
+                .replace('~', &dirs::home_dir().unwrap_or_default().to_string_lossy());
+            std::path::PathBuf::from(dir)
+        };
+    let plugins = crate::plugin::bridge::load_plugins_from_dir(&plugin_dir);
+    let plugin_count = plugins.len();
+    for plugin_def in plugins {
+        let tool = crate::plugin::bridge::PluginTool::new(plugin_def);
+        registry.register(Box::new(tool))?;
+    }
+    if plugin_count > 0 {
+        tracing::info!(count = plugin_count, dir = %plugin_dir.display(), "Lua plugins loaded and registered as tools");
+    }
     // Initialize MCP manager (lazy — no servers started yet)
     let mcp_manager = std::sync::Arc::new(tokio::sync::Mutex::new(
         mcp::manager::McpManager::from_config(&settings.mcp.servers),
@@ -521,6 +549,20 @@ async fn main() -> anyhow::Result<()> {
         mode: ui::status_bar::AppMode::Idle,
         steer_count: 0,
     });
+
+    // Start config file watcher for hot-reload notification
+    let config_path = config::paths::config_path();
+    if config_path.exists() {
+        match config::watcher::watch_config(config_path, app.event_sender()) {
+            Ok(guard) => {
+                app.set_watcher_guard(guard);
+                tracing::info!("Config file watcher started");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to start config file watcher");
+            }
+        }
+    }
 
     let mut terminal = ui::app::init_terminal()?;
 
@@ -979,6 +1021,170 @@ async fn main() -> anyhow::Result<()> {
                             });
                         }
                     }
+                    "image" => {
+                        use base64::Engine;
+                        // /image <path> — load from file
+                        // /image — try clipboard
+                        let image_data = if arg.is_empty() {
+                            // Try clipboard paste
+                            None
+                        } else {
+                            let path = std::path::Path::new(&arg);
+                            if path.exists() {
+                                match std::fs::read(path) {
+                                    Ok(bytes) => {
+                                        let ext = path
+                                            .extension()
+                                            .and_then(|e| e.to_str())
+                                            .unwrap_or("png");
+                                        let media_type = match ext {
+                                            "png" => "image/png",
+                                            "jpg" | "jpeg" => "image/jpeg",
+                                            "gif" => "image/gif",
+                                            "webp" => "image/webp",
+                                            "bmp" => "image/bmp",
+                                            _ => "image/png",
+                                        };
+                                        Some((
+                                            media_type.to_string(),
+                                            bytes,
+                                            path.display().to_string(),
+                                        ))
+                                    }
+                                    Err(e) => {
+                                        send_text_response(
+                                            &sender,
+                                            &format!("Failed to read image '{}': {}", arg, e),
+                                        );
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                send_text_response(&sender, &format!("File not found: {}", arg));
+                                continue;
+                            }
+                        };
+
+                        if let Some((media_type, bytes, source_path)) = image_data {
+                            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                            let size_kb = bytes.len() / 1024;
+                            if size_kb > 10240 {
+                                send_text_response(
+                                    &sender,
+                                    &format!("Image too large: {} KB (max 10 MB)", size_kb),
+                                );
+                                continue;
+                            }
+
+                            let mut eng = engine.lock().await;
+                            eng.history.push_user_blocks(vec![
+                                ContentBlock::Text {
+                                    text: format!("[Attached image: {}]", source_path),
+                                },
+                                ContentBlock::Image {
+                                    media_type,
+                                    data: b64,
+                                    source_path,
+                                },
+                            ]);
+                            drop(eng);
+
+                            let _ = sender.send(engine::tui_events::UiEvent::Status(format!(
+                                "📷 Image attached ({} KB). Analyze it in your next message.",
+                                size_kb
+                            )));
+                            let _ = sender.send(engine::tui_events::UiEvent::QueryDone {
+                                text: String::new(),
+                                tool_calls: 0,
+                                tokens: 0,
+                            });
+                        } else {
+                            // Try clipboard — run wl-paste or pbpaste
+                            let sender2 = sender.clone();
+                            tokio::spawn(async move {
+                                let _ = sender2.send(engine::tui_events::UiEvent::Status(
+                                    "Reading image from clipboard...".into(),
+                                ));
+                                let result = tokio::process::Command::new("wl-paste")
+                                    .arg("--type")
+                                    .arg("image/png")
+                                    .output()
+                                    .await;
+                                let (media_type, bytes) = match result {
+                                    Ok(output)
+                                        if output.status.success() && !output.stdout.is_empty() =>
+                                    {
+                                        ("image/png".to_string(), output.stdout)
+                                    }
+                                    _ => {
+                                        // Try macOS
+                                        match tokio::process::Command::new("osascript")
+                                            .arg("-e")
+                                            .arg("get the clipboard as «class PNGf»")
+                                            .output()
+                                            .await
+                                        {
+                                            Ok(output)
+                                                if output.status.success()
+                                                    && !output.stdout.is_empty() =>
+                                            {
+                                                ("image/png".to_string(), output.stdout)
+                                            }
+                                            _ => {
+                                                let _ = sender2.send(engine::tui_events::UiEvent::TextDelta(
+                                                    "No image found. Usage:\n  /image <path>  — attach image from file\n  /image         — paste from clipboard (requires wl-paste/xclip)".into(),
+                                                ));
+                                                let _ = sender2.send(
+                                                    engine::tui_events::UiEvent::QueryDone {
+                                                        text: String::new(),
+                                                        tool_calls: 0,
+                                                        tokens: 0,
+                                                    },
+                                                );
+                                                return;
+                                            }
+                                        }
+                                    }
+                                };
+
+                                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                                let size_kb = bytes.len() / 1024;
+                                if size_kb > 10240 {
+                                    let _ = sender2.send(engine::tui_events::UiEvent::TextDelta(
+                                        format!("Image too large: {} KB (max 10 MB)", size_kb),
+                                    ));
+                                    let _ = sender2.send(engine::tui_events::UiEvent::QueryDone {
+                                        text: String::new(),
+                                        tool_calls: 0,
+                                        tokens: 0,
+                                    });
+                                    return;
+                                }
+
+                                let mut eng = engine.lock().await;
+                                eng.history.push_user_blocks(vec![
+                                    ContentBlock::Text {
+                                        text: "[Attached image: clipboard]".into(),
+                                    },
+                                    ContentBlock::Image {
+                                        media_type,
+                                        data: b64,
+                                        source_path: String::new(),
+                                    },
+                                ]);
+                                drop(eng);
+
+                                let _ = sender2.send(engine::tui_events::UiEvent::Status(
+                                    format!("📷 Image from clipboard attached ({} KB). Analyze it in your next message.", size_kb),
+                                ));
+                                let _ = sender2.send(engine::tui_events::UiEvent::QueryDone {
+                                    text: String::new(),
+                                    tool_calls: 0,
+                                    tokens: 0,
+                                });
+                            });
+                        }
+                    }
                     _ => {}
                 },
                 CommandAction::Compact => {
@@ -1222,6 +1428,12 @@ async fn main() -> anyhow::Result<()> {
     {
         let mut mgr = memory_manager.lock().await;
         mgr.shutdown().await;
+    }
+
+    // Gracefully shut down all connected MCP servers
+    {
+        let mut mgr = mcp_manager.lock().await;
+        mgr.shutdown();
     }
 
     Ok(())

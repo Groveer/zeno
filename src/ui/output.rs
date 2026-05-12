@@ -33,6 +33,9 @@ pub enum OutputSegment {
     ToolComplete(String),
     /// Tool error.
     ToolError(String),
+    /// Diff output — shows file change diff with +/- markers.
+    /// Rendered with distinct green/red coloring for additions/removals.
+    Diff(String),
     /// Status message.
     Status(String),
     /// Permission prompt — requires user confirmation (y/n/a).
@@ -547,6 +550,30 @@ fn segment_to_lines(seg: &OutputSegment) -> Vec<Line<'static>> {
                 ),
             ]));
 
+            lines
+        }
+        OutputSegment::Diff(diff) => {
+            // Render diff lines with +/- highlighting (green for +, red for -)
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            for line in diff.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with('+') {
+                    lines.push(Line::from(Span::styled(
+                        trimmed.to_string(),
+                        Style::new().fg(theme::SUCCESS),
+                    )));
+                } else if trimmed.starts_with('-') {
+                    lines.push(Line::from(Span::styled(
+                        trimmed.to_string(),
+                        Style::new().fg(theme::ERROR),
+                    )));
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        line.to_string(),
+                        Style::new().fg(theme::TEXT_DIM),
+                    )));
+                }
+            }
             lines
         }
         OutputSegment::Error(err) => {

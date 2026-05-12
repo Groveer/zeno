@@ -65,6 +65,42 @@ const THREAT_PATTERNS: &[(&str, &str)] = &[
         r#"(?i)\$HOME/\.config/zeno/\.env|\~/\.config/zeno/\.env"#,
         "zeno_env",
     ),
+    // --- Encoding-based bypass detection ---
+    (
+        r"(?i)(?:echo|printf)\s+[A-Za-z0-9+/=]{40,}\s*\|\s*(?:base64|base32|xxd)\s*-d",
+        "base64_encoded_command",
+    ),
+    (
+        r"(?i)(?:echo|printf)\s+[0-9a-fA-F]{40,}\s*\|\s*(?:xxd|hexdump)\s*-r",
+        "hex_encoded_command",
+    ),
+    (
+        r"(?i)(?:python|perl|ruby|php)\s+-[eE]\s+[A-Za-z0-9+/=]{40,}",
+        "script_encoded_payload",
+    ),
+    // --- Obfuscated command detection ---
+    (
+        r"(?i)(?:eval|exec|system|passthru|shell_exec|popen|proc_open|pcntl_exec|assert)\s*\(.*\$\(|preg_replace\s*\(.*\/[a-z]+e",
+        "obfuscated_eval",
+    ),
+    // --- Data exfiltration via DNS/HTTP ---
+    (
+        r"(?i)nslookup\s+[^\s]+\.[^\s]{2,}\s+[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+",
+        "dns_exfil",
+    ),
+    (
+        r"(?i)dig\s+[^\s]+\.[^\s]{2,}\s+@[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+",
+        "dns_exfil_dig",
+    ),
+    // --- Reverse shell patterns ---
+    (
+        r"(?i)(?:bash|sh|nc|ncat|socat|python|perl|ruby|php)\s+-i\s*[<>]?\s*&?\s*/dev/tcp/",
+        "reverse_shell",
+    ),
+    (
+        r"(?i)(?:bash|sh|nc|ncat|socat|python|perl|ruby|php)\s+-i\s*[<>]?\s*&?\s*\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}",
+        "reverse_shell_ip",
+    ),
 ];
 
 /// Compiled regex cache — built once at program startup.

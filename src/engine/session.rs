@@ -58,13 +58,18 @@ pub fn format_timestamp(time: SystemTime) -> String {
     )
 }
 
-/// Generate a timestamp-based session ID (epoch seconds, unique enough).
+/// Generate a unique session ID using epoch microseconds + PID.
+///
+/// Combines sub-millisecond precision (microseconds) with the process ID to
+/// guarantee uniqueness even when multiple sessions start in the same
+/// microsecond. Format: `{epoch_us}-{pid}` (e.g. `1721743567890123-12345`).
 pub fn generate_session_id() -> String {
-    let secs = SystemTime::now()
+    let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    format!("{}", secs)
+        .unwrap_or_default();
+    let micros = duration.as_micros();
+    let pid = std::process::id();
+    format!("{}-{}", micros, pid)
 }
 
 fn is_leap_year(y: i64) -> bool {
@@ -74,7 +79,7 @@ fn is_leap_year(y: i64) -> bool {
 /// Complete session data persisted to disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionData {
-    /// Unique session identifier (epoch seconds).
+    /// Unique session identifier (epoch_us-pid, e.g. "1721743567890123-12345").
     pub id: String,
     /// ISO 8601 timestamp of when the session was saved.
     pub saved_at: String,
@@ -593,4 +598,179 @@ pub fn format_session_list(index: &[SessionIndexEntry]) -> String {
     lines.push("  /resume N     — load session #N from the list above".to_string());
 
     lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::types::{ContentBlock, Role};
+
+    fn make_text_entry(role: Role, text: &str) -> ConversationEntry {
+        ConversationEntry {
+            role,
+            content: vec![ContentBlock::Text { text: text.into() }],
+        }
+    }
+
+    fn make_tool_result_entry(text: &str) -> ConversationEntry {
+        ConversationEntry {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tool1".into(),
+                content: text.into(),
+                is_error: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn test_generate_session_id_unique() {
+        let id1 = generate_session_id();
+        // Sleep for 1 microsecond to ensure different timestamps
+        std::thread::sleep(std::time::Duration::from_micros(1));
+        let id2 = generate_session_id();
+        assert_ne!(id1, id2, "consecutive session IDs must differ");
+    }
+
+    #[test]
+    fn test_generate_session_id_format() {
+        let id = generate_session_id();
+        // Format: "{epoch_ms}-{pid}"
+        assert!(id.contains('-'), "session ID must contain '-' separator");
+        let parts: Vec<&str> = id.split('-').collect();
+        assert_eq!(parts.len(), 2, "session ID must have exactly 2 parts");
+        let pid: u32 = parts[1].parse().expect("second part must be PID");
+        assert!(pid > 0, "PID must be positive");
+    }
+
+    #[test]
+    fn test_is_leap_year() {
+        assert!(is_leap_year(2000));
+        assert!(is_leap_year(2020));
+        assert!(is_leap_year(2024));
+        assert!(!is_leap_year(1900));
+        assert!(!is_leap_year(2023));
+        assert!(!is_leap_year(2100));
+    }
+
+    #[test]
+    fn test_format_timestamp_epoch() {
+        let epoch = std::time::UNIX_EPOCH;
+        let formatted = format_timestamp(epoch);
+        assert_eq!(formatted, "1970-01-01 00:00:00");
+    }
+
+    #[test]
+    fn test_count_user_messages_empty() {
+        assert_eq!(count_user_messages(&[]), 0);
+    }
+
+    #[test]
+    fn test_count_user_messages_mixed() {
+        let entries = vec![
+            make_text_entry(Role::User, "hello"),
+            make_text_entry(Role::Assistant, "hi there"),
+            make_text_entry(Role::User, "how are you?"),
+            make_tool_result_entry("ls output"),
+            make_text_entry(Role::User, "thanks"),
+        ];
+        // 3 user messages with text, 1 tool result (excluded) = 3
+        assert_eq!(count_user_messages(&entries), 3);
+    }
+
+    #[test]
+    fn test_count_user_messages_tool_results_excluded() {
+        let entries = vec![
+            make_tool_result_entry("cat output"),
+            make_tool_result_entry("build log"),
+        ];
+        assert_eq!(count_user_messages(&entries), 0);
+    }
+
+    #[test]
+    fn test_format_session_list_empty() {
+        let result = format_session_list(&[]);
+        assert_eq!(result, "No saved sessions found.");
+    }
+
+    #[test]
+    fn test_format_session_list_non_empty() {
+        let entries = vec![SessionIndexEntry {
+            id: "1".into(),
+            saved_at: "2025-07-23T10:30:00".into(),
+            model: "claude-sonnet-4".into(),
+            provider: "anthropic".into(),
+            total_tokens: 5000,
+            one_liner: "3 msgs, claude — code review".into(),
+            entry_count: 5,
+            title: String::new(),
+        }];
+        let result = format_session_list(&entries);
+        assert!(result.contains("Found 1 saved session(s)"));
+        assert!(result.contains("2025-07-23 10:30:00"));
+        assert!(result.contains("code review"));
+        assert!(result.contains("/resume"));
+    }
+
+    #[test]
+    fn test_extract_final_response_empty() {
+        assert_eq!(extract_final_response(&[]), None);
+    }
+
+    #[test]
+    fn test_extract_final_response_only_user() {
+        let entries = vec![make_text_entry(Role::User, "hello")];
+        assert_eq!(extract_final_response(&entries), None);
+    }
+
+    #[test]
+    fn test_extract_final_response_with_assistant() {
+        let entries = vec![
+            make_text_entry(Role::User, "hello"),
+            make_text_entry(Role::Assistant, "Hello! How can I help?"),
+        ];
+        assert_eq!(
+            extract_final_response(&entries),
+            Some("Hello! How can I help?".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_final_response_last_assistant() {
+        let entries = vec![
+            make_text_entry(Role::User, "q1"),
+            make_text_entry(Role::Assistant, "a1"),
+            make_text_entry(Role::User, "q2"),
+            make_text_entry(Role::Assistant, "a2"),
+        ];
+        assert_eq!(extract_final_response(&entries), Some("a2".to_string()));
+    }
+
+    #[test]
+    fn test_build_one_liner_basic() {
+        let data = SessionData {
+            id: "test-id".into(),
+            saved_at: "2025-07-23T12:00:00".into(),
+            model: "claude-sonnet-4".into(),
+            provider: "anthropic".into(),
+            cwd: "/home/user".into(),
+            entries: vec![
+                make_text_entry(Role::User, "hello"),
+                make_text_entry(Role::Assistant, "world"),
+            ],
+            total_tokens: 1500,
+            summary: "test".into(),
+            final_response: "world".into(),
+            title: String::new(),
+        };
+        let result = build_one_liner(&data);
+        assert!(result.contains("2025-07-23 12:00:00"));
+        assert!(result.contains("1500 tokens"));
+        assert!(result.contains("claude-sonnet-4"));
+        assert!(result.contains("2 entries"));
+    }
 }

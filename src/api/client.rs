@@ -22,5 +22,6 @@ pub trait SupportsStreamingMessages: Send + Sync {
         messages: &[Message],
         tools: &[serde_json::Value],
         max_tokens: Option<u32>,
+        response_format: Option<&serde_json::Value>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ApiError>> + Send>>, ApiError>;
 }

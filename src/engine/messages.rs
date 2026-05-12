@@ -34,6 +34,14 @@ impl ConversationHistory {
         });
     }
 
+    /// Add a user message with multiple content blocks (e.g. text + image).
+    pub fn push_user_blocks(&mut self, blocks: Vec<ContentBlock>) {
+        self.entries.push(ConversationEntry {
+            role: Role::User,
+            content: blocks,
+        });
+    }
+
     /// Add an assistant message with multiple content blocks.
     pub fn push_assistant_blocks(&mut self, blocks: Vec<ContentBlock>) {
         self.entries.push(ConversationEntry {

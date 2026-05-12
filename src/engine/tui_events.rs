@@ -24,6 +24,9 @@ pub enum UiEvent {
     },
     /// Tool execution succeeded.
     ToolOutput { name: String, output: String },
+    /// Diff output from an edit tool — shows file change diff with +/- markers.
+    /// Sent alongside ToolOutput for richer TUI rendering.
+    ToolDiff { name: String, diff: String },
     /// Tool execution failed.
     ToolError { name: String, error: String },
     /// The LLM is asking the user a question (ask_user tool).
