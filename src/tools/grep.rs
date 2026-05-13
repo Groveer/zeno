@@ -279,6 +279,112 @@ fn grep_sync(
     (match_count, results)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- simple_glob_match ---
+
+    #[test]
+    fn test_simple_glob_match_star_dot_ext() {
+        let p = Path::new("main.rs");
+        assert!(simple_glob_match("*.rs", p));
+        assert!(!simple_glob_match("*.py", p));
+    }
+
+    #[test]
+    fn test_simple_glob_match_contains() {
+        let p = Path::new("hello_world.rs");
+        assert!(simple_glob_match("hello", p));
+        assert!(!simple_glob_match("xyz", p));
+    }
+
+    #[test]
+    fn test_simple_glob_match_no_extension() {
+        let p = Path::new("Makefile");
+        assert!(simple_glob_match("Makefile", p));
+        assert!(!simple_glob_match("makefile", p));
+    }
+
+    #[test]
+    fn test_simple_glob_match_empty() {
+        let p = Path::new("foo.rs");
+        assert!(simple_glob_match("", p)); // empty is contained in everything
+    }
+
+    // --- is_skipped_dir ---
+
+    #[test]
+    fn test_is_skipped_dir_default() {
+        assert!(is_skipped_dir(Path::new(".git"), &[]));
+        assert!(is_skipped_dir(Path::new("node_modules"), &[]));
+    }
+
+    #[test]
+    fn test_is_skipped_dir_not() {
+        assert!(!is_skipped_dir(Path::new("src"), &[]));
+    }
+
+    #[test]
+    fn test_is_skipped_dir_extra() {
+        assert!(is_skipped_dir(
+            Path::new("my_build"),
+            &["my_build".to_string()]
+        ));
+    }
+
+    // --- is_likely_binary_sync ---
+
+    #[test]
+    fn test_is_likely_binary_text_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("_test_zeno_grep_text.txt");
+        std::fs::write(&path, b"hello world\n").unwrap();
+        assert!(!is_likely_binary_sync(&path));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn test_is_likely_binary_with_null() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("_test_zeno_grep_bin.bin");
+        std::fs::write(&path, b"hello\x00world\n").unwrap();
+        assert!(is_likely_binary_sync(&path));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn test_is_likely_binary_nonexistent() {
+        assert!(!is_likely_binary_sync(Path::new("/nonexistent/path.bin")));
+    }
+
+    // --- grep_sync helpers (single file mode via the actual grep_sync) ---
+
+    #[test]
+    fn test_grep_sync_single_file_match() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("_test_zeno_grep_sync.txt");
+        std::fs::write(&path, "hello world\nfoo bar\nbaz qux\n").unwrap();
+        let re = regex::Regex::new("foo").unwrap();
+        let (count, results) = grep_sync(&path, &re, "foo", None, 0, 10, &[]);
+        assert_eq!(count, 1);
+        assert!(results[0].contains("foo bar"));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn test_grep_sync_single_file_no_match() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("_test_zeno_grep_sync_none.txt");
+        std::fs::write(&path, "hello world\n").unwrap();
+        let re = regex::Regex::new("zzz").unwrap();
+        let (count, results) = grep_sync(&path, &re, "zzz", None, 0, 10, &[]);
+        assert_eq!(count, 0);
+        assert!(results.is_empty());
+        std::fs::remove_file(&path).unwrap();
+    }
+}
+
 fn simple_glob_match(pattern: &str, path: &Path) -> bool {
     let file_name = match path.file_name().and_then(|n| n.to_str()) {
         Some(n) => n,

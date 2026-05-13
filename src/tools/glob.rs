@@ -119,6 +119,135 @@ const DEFAULT_SKIPPED_DIRS: &[&str] = &[
     ".cache",
 ];
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- glob_matches ---
+
+    #[test]
+    fn test_glob_matches_exact() {
+        assert!(glob_matches("src/main.rs", "src/main.rs"));
+    }
+
+    #[test]
+    fn test_glob_matches_wildcard_single_segment() {
+        assert!(glob_matches("*.rs", "main.rs"));
+        assert!(!glob_matches("*.rs", "main.py"));
+    }
+
+    #[test]
+    fn test_glob_matches_doublestar() {
+        assert!(glob_matches("**/*.rs", "src/main.rs"));
+        assert!(glob_matches("**/*.rs", "a/b/c/lib.rs"));
+        assert!(!glob_matches("**/*.rs", "a/b/c/lib.py"));
+    }
+
+    #[test]
+    fn test_glob_matches_path_prefix() {
+        assert!(glob_matches("src/**", "src/main.rs"));
+        assert!(glob_matches("src/**", "src/engine/query.rs"));
+        assert!(!glob_matches("src/**", "lib/main.rs"));
+    }
+
+    #[test]
+    fn test_glob_matches_no_match() {
+        assert!(!glob_matches("*.toml", "main.rs"));
+    }
+
+    #[test]
+    fn test_glob_matches_question_mark() {
+        assert!(glob_matches("???.rs", "abc.rs"));
+        assert!(!glob_matches("???.rs", "ab.rs"));
+        assert!(!glob_matches("???.rs", "abcd.rs"));
+    }
+
+    #[test]
+    fn test_glob_matches_mixed_wildcard() {
+        assert!(glob_matches("src/*/*.rs", "src/engine/query.rs"));
+        assert!(!glob_matches("src/*/*.rs", "src/a/b/c/lib.rs"));
+    }
+
+    // --- simple_match ---
+
+    #[test]
+    fn test_simple_match_exact() {
+        assert!(simple_match("hello", "hello"));
+    }
+
+    #[test]
+    fn test_simple_match_star() {
+        assert!(simple_match("*.rs", "main.rs"));
+        assert!(simple_match("hello*", "hello_world"));
+        assert!(simple_match("*world", "hello_world"));
+        assert!(simple_match("a*b", "a123b"));
+    }
+
+    #[test]
+    fn test_simple_match_question_mark() {
+        assert!(simple_match("?", "a"));
+        assert!(simple_match("a?c", "abc"));
+        assert!(!simple_match("a?c", "ac"));
+        assert!(!simple_match("a?c", "abbc"));
+    }
+
+    #[test]
+    fn test_simple_match_only_star() {
+        assert!(simple_match("*", "anything_goes"));
+    }
+
+    #[test]
+    fn test_simple_match_star_matches_empty() {
+        assert!(simple_match("a*b", "ab"));
+    }
+
+    #[test]
+    fn test_simple_match_multiple_stars() {
+        assert!(simple_match("a*b*c", "a123b456c"));
+    }
+
+    #[test]
+    fn test_simple_match_no_match() {
+        assert!(!simple_match("hello", "world"));
+    }
+
+    #[test]
+    fn test_simple_match_empty_pattern() {
+        assert!(!simple_match("", "abc"));
+        assert!(simple_match("", ""));
+    }
+
+    #[test]
+    fn test_simple_match_star_at_both_ends() {
+        assert!(simple_match("*test*", "this_is_a_test_file"));
+    }
+
+    // --- is_skipped_glob_dir ---
+
+    #[test]
+    fn test_is_skipped_default_dir() {
+        assert!(is_skipped_glob_dir(".git", &[]));
+        assert!(is_skipped_glob_dir("node_modules", &[]));
+        assert!(is_skipped_glob_dir("target", &[]));
+    }
+
+    #[test]
+    fn test_is_skipped_not_skipped() {
+        assert!(!is_skipped_glob_dir("src", &[]));
+        assert!(!is_skipped_glob_dir("my_project", &[]));
+    }
+
+    #[test]
+    fn test_is_skipped_extra_dirs() {
+        let extra = vec!["build".to_string(), "dist".to_string()];
+        assert!(is_skipped_glob_dir("build", &extra));
+        assert!(is_skipped_glob_dir("dist", &extra));
+        // .git is still skipped
+        assert!(is_skipped_glob_dir(".git", &extra));
+    }
+}
+
+/// Check if a directory should be skipped during glob traversal.
 fn is_skipped_glob_dir(name: &str, extra_skip_dirs: &[String]) -> bool {
     DEFAULT_SKIPPED_DIRS.contains(&name) || extra_skip_dirs.iter().any(|d| d == name)
 }

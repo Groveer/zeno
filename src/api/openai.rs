@@ -506,3 +506,305 @@ fn parse_openai_chunk(
 
     None
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // --- build_request_body ---
+
+    #[test]
+    fn test_build_request_body_system_only() {
+        let client = OpenAIClient::new("test-key".into(), "http://localhost".into());
+        let body =
+            client.build_request_body("gpt-4", "You are a helpful assistant.", &[], &[], None);
+        assert_eq!(body["model"], "gpt-4");
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(
+            body["messages"][0]["content"],
+            "You are a helpful assistant."
+        );
+        assert_eq!(body["stream"], true);
+    }
+
+    #[test]
+    fn test_build_request_body_user_message() {
+        let client = OpenAIClient::new("test-key".into(), "http://localhost".into());
+        let msg = Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "hello".into(),
+            }],
+        };
+        let body = client.build_request_body("gpt-4", "", &[msg], &[], None);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[0]["content"], "hello");
+    }
+
+    #[test]
+    fn test_build_request_body_tool_call() {
+        let client = OpenAIClient::new("test-key".into(), "http://localhost".into());
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "thinking".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_123".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({"path": "main.rs"}),
+                },
+            ],
+        };
+        let body = client.build_request_body("gpt-4", "", &[msg], &[], None);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "assistant");
+        assert_eq!(msgs[0]["content"], "thinking");
+        let calls = msgs[0]["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["function"]["name"], "read");
+    }
+
+    #[test]
+    fn test_build_request_body_tool_result() {
+        let client = OpenAIClient::new("test-key".into(), "http://localhost".into());
+        let msg = Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_123".into(),
+                content: "file content".into(),
+                is_error: None,
+            }],
+        };
+        let body = client.build_request_body("gpt-4", "", &[msg], &[], None);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "tool");
+        assert_eq!(msgs[0]["tool_call_id"], "call_123");
+        assert_eq!(msgs[0]["content"], "file content");
+    }
+
+    #[test]
+    fn test_build_request_body_tool_result_with_steer() {
+        let client = OpenAIClient::new("test-key".into(), "http://localhost".into());
+        let msg = Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_123".into(),
+                    content: "file content".into(),
+                    is_error: None,
+                },
+                ContentBlock::Text {
+                    text: "steer text".into(),
+                },
+            ],
+        };
+        let body = client.build_request_body("gpt-4", "", &[msg], &[], None);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["role"], "tool");
+        assert_eq!(msgs[1]["role"], "user");
+        assert_eq!(msgs[1]["content"], "steer text");
+    }
+
+    #[test]
+    fn test_build_request_body_max_tokens_none() {
+        let client = OpenAIClient::new("test-key".into(), "http://localhost".into());
+        let body = client.build_request_body("gpt-4", "", &[], &[], None);
+        assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn test_build_request_body_max_tokens_some() {
+        let client = OpenAIClient::new("test-key".into(), "http://localhost".into());
+        let body = client.build_request_body("gpt-4", "", &[], &[], Some(4096));
+        assert_eq!(body["max_completion_tokens"], 4096);
+    }
+
+    #[test]
+    fn test_build_request_body_includes_tools() {
+        let client = OpenAIClient::new("test-key".into(), "http://localhost".into());
+        let tools = vec![serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "read",
+                "description": "Read files"
+            }
+        })];
+        let body = client.build_request_body("gpt-4", "", &[], &tools, None);
+        assert!(body.get("tools").is_some());
+        assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(body["parallel_tool_calls"], true);
+    }
+
+    // --- parse_stop_reason ---
+
+    #[test]
+    fn test_parse_stop_reason_end_turn() {
+        assert_eq!(parse_stop_reason("stop"), StopReason::EndTurn);
+    }
+
+    #[test]
+    fn test_parse_stop_reason_tool_use() {
+        assert_eq!(parse_stop_reason("tool_calls"), StopReason::ToolUse);
+    }
+
+    #[test]
+    fn test_parse_stop_reason_max_tokens() {
+        assert_eq!(parse_stop_reason("length"), StopReason::MaxTokens);
+    }
+
+    #[test]
+    fn test_parse_stop_reason_unknown() {
+        assert_eq!(
+            parse_stop_reason("content_filter"),
+            StopReason::StopSequence("content_filter".into())
+        );
+    }
+
+    // --- parse_openai_chunk ---
+
+    fn make_pending() -> Mutex<Option<(String, String)>> {
+        Mutex::new(None)
+    }
+
+    #[test]
+    fn test_parse_openai_chunk_text_delta() {
+        let mut id_map = HashMap::new();
+        let pending = make_pending();
+        let data = r#"{"choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}"#;
+        let result = parse_openai_chunk(data, &mut id_map, &pending);
+        assert!(result.is_some());
+        match result.unwrap() {
+            Ok(StreamEvent::TextDelta(text)) => assert_eq!(text, "hello"),
+            other => panic!("Expected TextDelta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_openai_chunk_tool_use_start() {
+        let mut id_map = HashMap::new();
+        let pending = make_pending();
+        let data = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc","function":{"name":"read","arguments":"{\"path\":\"main.rs\"}"}}]},"finish_reason":null}]}"#;
+        let result = parse_openai_chunk(data, &mut id_map, &pending);
+        assert!(result.is_some());
+        match result.unwrap() {
+            Ok(StreamEvent::ToolUseStart {
+                id,
+                name,
+                input_json,
+            }) => {
+                assert_eq!(id, "call_abc");
+                assert_eq!(name, "read");
+                assert_eq!(input_json, Some("{\"path\":\"main.rs\"}".into()));
+            }
+            other => panic!("Expected ToolUseStart, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_openai_chunk_tool_use_delta() {
+        let mut id_map = HashMap::new();
+        id_map.insert(0, "call_abc".into());
+        let pending = make_pending();
+        let data = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"main.rs\"}"}}]},"finish_reason":null}]}"#;
+        let result = parse_openai_chunk(data, &mut id_map, &pending);
+        assert!(result.is_some());
+        match result.unwrap() {
+            Ok(StreamEvent::ToolUseDelta { id, delta_json }) => {
+                assert_eq!(id, "call_abc");
+                assert_eq!(delta_json, "{\"path\":\"main.rs\"}");
+            }
+            other => panic!("Expected ToolUseDelta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_openai_chunk_usage() {
+        let mut id_map = HashMap::new();
+        let pending = make_pending();
+        let data = r#"{"usage":{"prompt_tokens":10,"completion_tokens":20},"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
+        let result = parse_openai_chunk(data, &mut id_map, &pending);
+        assert!(result.is_some());
+        match result.unwrap() {
+            Ok(StreamEvent::MessageComplete { stop_reason, usage }) => {
+                assert_eq!(stop_reason, StopReason::EndTurn);
+                assert_eq!(usage.input_tokens, 10);
+                assert_eq!(usage.output_tokens, 20);
+            }
+            other => panic!("Expected MessageComplete, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_openai_chunk_usage_with_cache() {
+        let mut id_map = HashMap::new();
+        let pending = make_pending();
+        let data = r#"{"usage":{"prompt_tokens":100,"completion_tokens":30,"prompt_tokens_details":{"cached_tokens":40,"cache_write_tokens":10},"completion_tokens_details":{"reasoning_tokens":5}},"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#;
+        let result = parse_openai_chunk(data, &mut id_map, &pending);
+        assert!(result.is_some());
+        match result.unwrap() {
+            Ok(StreamEvent::MessageComplete { stop_reason, usage }) => {
+                assert_eq!(stop_reason, StopReason::ToolUse);
+                assert_eq!(usage.input_tokens, 50);
+                assert_eq!(usage.cache_read_input_tokens, 40);
+                assert_eq!(usage.cache_creation_input_tokens, 10);
+                assert_eq!(usage.output_tokens, 30);
+                assert_eq!(usage.reasoning_tokens, 5);
+            }
+            other => panic!("Expected MessageComplete, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_openai_chunk_deepseek_pending_reason() {
+        let mut id_map = HashMap::new();
+        let pending = make_pending();
+
+        // First chunk: finish_reason without usage
+        let chunk1 = r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
+        let result1 = parse_openai_chunk(chunk1, &mut id_map, &pending);
+        assert!(result1.is_none(), "finish-reason-only chunk caches reason");
+
+        // Second chunk: usage without finish_reason
+        let chunk2 = r#"{"usage":{"prompt_tokens":5,"completion_tokens":10},"choices":[{"index":0,"delta":{}}]}"#;
+        let result2 = parse_openai_chunk(chunk2, &mut id_map, &pending);
+        assert!(result2.is_some());
+        match result2.unwrap() {
+            Ok(StreamEvent::MessageComplete { stop_reason, usage }) => {
+                assert_eq!(stop_reason, StopReason::EndTurn);
+                assert_eq!(usage.input_tokens, 5);
+                assert_eq!(usage.output_tokens, 10);
+            }
+            other => panic!("Expected MessageComplete, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_openai_chunk_invalid_json() {
+        let mut id_map = HashMap::new();
+        let pending = make_pending();
+        let result = parse_openai_chunk("not json", &mut id_map, &pending);
+        assert!(result.is_some());
+        assert!(result.unwrap().is_err());
+    }
+
+    #[test]
+    fn test_parse_openai_chunk_empty_choices() {
+        let mut id_map = HashMap::new();
+        let pending = make_pending();
+        let data = r#"{"choices":[],"usage":null}"#;
+        let result = parse_openai_chunk(data, &mut id_map, &pending);
+        assert!(result.is_none());
+    }
+}

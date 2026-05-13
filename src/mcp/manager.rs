@@ -427,3 +427,141 @@ async fn connect_server(
 
     anyhow::bail!("MCP server config must have either 'command' or 'url'")
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stdio_config(name: &str) -> (String, McpServerConfig) {
+        let cfg = McpServerConfig {
+            command: Some(vec!["echo".into(), "hello".into()]),
+            url: None,
+            headers: std::collections::HashMap::new(),
+        };
+        (name.to_string(), cfg)
+    }
+
+    fn http_config(name: &str) -> (String, McpServerConfig) {
+        let cfg = McpServerConfig {
+            command: None,
+            url: Some("http://localhost:9999/mcp".into()),
+            headers: std::collections::HashMap::new(),
+        };
+        (name.to_string(), cfg)
+    }
+
+    #[test]
+    fn test_from_config_empty() {
+        let mgr = McpManager::from_config(&HashMap::new());
+        assert_eq!(mgr.summary(), "No MCP servers configured.");
+    }
+
+    #[test]
+    fn test_from_config_single_stdio() {
+        let mut configs = HashMap::new();
+        let (name, cfg) = stdio_config("test-server");
+        configs.insert(name, cfg);
+        let mgr = McpManager::from_config(&configs);
+        assert!(mgr.summary().contains("test-server"));
+        assert!(mgr.summary().contains("stopped"));
+        assert!(mgr.summary().contains("stdio"));
+    }
+
+    #[test]
+    fn test_from_config_single_http() {
+        let mut configs = HashMap::new();
+        let (name, cfg) = http_config("remote-server");
+        configs.insert(name, cfg);
+        let mgr = McpManager::from_config(&configs);
+        assert!(mgr.summary().contains("remote-server"));
+        assert!(mgr.summary().contains("http"));
+    }
+
+    #[test]
+    fn test_from_config_multiple() {
+        let mut configs = HashMap::new();
+        let (n1, c1) = stdio_config("server-a");
+        let (n2, c2) = http_config("server-b");
+        configs.insert(n1, c1);
+        configs.insert(n2, c2);
+        let mgr = McpManager::from_config(&configs);
+        let summary = mgr.summary();
+        assert!(summary.contains("server-a"));
+        assert!(summary.contains("server-b"));
+        assert!(summary.contains("2"));
+    }
+
+    #[test]
+    fn test_get_mut_nonexistent() {
+        let mut mgr = McpManager::from_config(&HashMap::new());
+        assert!(mgr.get_mut("nope").is_none());
+    }
+
+    #[test]
+    fn test_get_mut_existing() {
+        let mut configs = HashMap::new();
+        let (name, cfg) = stdio_config("my-server");
+        configs.insert(name, cfg);
+        let mut mgr = McpManager::from_config(&configs);
+        let state = mgr.get_mut("my-server");
+        assert!(state.is_some());
+        assert_eq!(state.unwrap().status, ServerStatus::Stopped);
+    }
+
+    #[test]
+    fn test_shutdown_no_servers() {
+        let mut mgr = McpManager::from_config(&HashMap::new());
+        mgr.shutdown(); // should not panic
+    }
+
+    #[test]
+    fn test_ensure_connected_nonexistent() {
+        let mut mgr = McpManager::from_config(&HashMap::new());
+        let result = futures::executor::block_on(mgr.ensure_connected("no-such-server"));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("no-such-server"));
+        assert!(err.contains("Available:"));
+    }
+
+    #[test]
+    fn test_ensure_connected_fails_real_stdio() {
+        let mut configs = HashMap::new();
+        configs.insert(
+            "failing".to_string(),
+            McpServerConfig {
+                command: Some(vec!["/nonexistent/binary".into()]),
+                url: None,
+                headers: std::collections::HashMap::new(),
+            },
+        );
+        let mut mgr = McpManager::from_config(&configs);
+        let result = futures::executor::block_on(mgr.ensure_connected("failing"));
+        assert!(result.is_err());
+        let state = mgr.get_mut("failing").unwrap();
+        match &state.status {
+            ServerStatus::Failed(msg) => assert!(!msg.is_empty()),
+            other => panic!("Expected Failed status, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_shutdown_after_failed_connect() {
+        let mut configs = HashMap::new();
+        configs.insert(
+            "failing".to_string(),
+            McpServerConfig {
+                command: Some(vec!["/nonexistent/binary".into()]),
+                url: None,
+                headers: std::collections::HashMap::new(),
+            },
+        );
+        let mut mgr = McpManager::from_config(&configs);
+        let _ = futures::executor::block_on(mgr.ensure_connected("failing"));
+        mgr.shutdown(); // should not panic
+    }
+}
