@@ -206,12 +206,11 @@ pub struct ToolsConfig {
     pub readonly_commands: Vec<String>,
     /// Extra destructive bash commands (appended to built-in defaults).
     /// These always require user confirmation in "ask" mode.
+    /// Matched via `contains()` — substring/wildcard matching, so:
+    ///   `"terraform"`    → matches any command containing "terraform"
+    ///   `"git rebase"`   → matches "git rebase -i", "git rebase --continue", etc.
     #[serde(default)]
     pub destructive_commands: Vec<String>,
-    /// Extra destructive git patterns (appended to built-in defaults).
-    /// These always require user confirmation in "ask" mode.
-    #[serde(default)]
-    pub destructive_git_patterns: Vec<String>,
 }
 
 impl Default for ToolsConfig {
@@ -230,7 +229,6 @@ impl Default for ToolsConfig {
             skip_dirs: Vec::new(),
             readonly_commands: Vec::new(),
             destructive_commands: Vec::new(),
-            destructive_git_patterns: Vec::new(),
         }
     }
 }

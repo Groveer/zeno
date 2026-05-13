@@ -199,11 +199,12 @@ const DESTRUCTIVE_GIT_PATTERNS: &[&str] = &[
 /// Returns true only for commands that can cause data loss or system damage.
 /// Handles compound commands (e.g. `git status && rm file`) by splitting on
 /// shell operators and checking each sub-command.
-fn is_destructive_command(
-    cmd: &str,
-    extra_prefixes: &[String],
-    extra_git_patterns: &[String],
-) -> bool {
+///
+/// Built-in `DESTRUCTIVE_PREFIXES` are matched with `starts_with` (safe for
+/// `rm`, `sudo`, etc.). Built-in `DESTRUCTIVE_GIT_PATTERNS` and user
+/// `extra_commands` are matched with `contains`, giving a wildcard-like effect
+/// — any substring match triggers the destructive check.
+fn is_destructive_command(cmd: &str, extra_commands: &[String]) -> bool {
     let trimmed = cmd.trim();
 
     // Split on shell operators to handle compound commands
@@ -216,22 +217,20 @@ fn is_destructive_command(
             continue;
         }
 
-        // Check destructive prefixes
-        for prefix in DESTRUCTIVE_PREFIXES
-            .iter()
-            .copied()
-            .chain(extra_prefixes.iter().map(|s| s.as_str()))
-        {
+        // Check built-in destructive prefixes (starts_with — precise match)
+        for prefix in DESTRUCTIVE_PREFIXES.iter().copied() {
             if sub.starts_with(prefix) {
                 return true;
             }
         }
 
-        // Check destructive git patterns
+        // Check built-in destructive git patterns + user extra commands
+        // (contains — substring/wildcard match, so "git reset --hard"
+        //  matches any git command involving a hard reset)
         for pattern in DESTRUCTIVE_GIT_PATTERNS
             .iter()
             .copied()
-            .chain(extra_git_patterns.iter().map(|s| s.as_str()))
+            .chain(extra_commands.iter().map(|s| s.as_str()))
         {
             if sub.contains(pattern) {
                 return true;
@@ -309,7 +308,6 @@ pub fn evaluate_permission(
     command: Option<&str>,
     cwd: &Path,
     extra_destructive_commands: &[String],
-    extra_destructive_git_patterns: &[String],
     safe_paths: &[String],
 ) -> PermissionDecision {
     // 0. Trusted path check — bypasses all other checks
@@ -405,11 +403,7 @@ pub fn evaluate_permission(
                         || cmd.contains("..\\");
 
                     // Destructive commands always require confirmation
-                    if is_destructive_command(
-                        cmd,
-                        extra_destructive_commands,
-                        extra_destructive_git_patterns,
-                    ) {
+                    if is_destructive_command(cmd, extra_destructive_commands) {
                         tracing::info!(
                             tool_name = "bash",
                             permission_decision = "requires_confirmation",
@@ -616,7 +610,6 @@ mod tests {
             Path::new("/tmp/work"),
             &[],
             &[],
-            &[],
         )
     }
 
@@ -632,7 +625,6 @@ mod tests {
             Path::new(cwd),
             &[],
             &[],
-            &[],
         )
     }
 
@@ -646,7 +638,6 @@ mod tests {
             Some(Path::new(path)),
             None,
             Path::new(cwd),
-            &[],
             &[],
             &[],
         )
@@ -869,7 +860,6 @@ mod tests {
             Path::new("/home/user/proj"),
             &[],
             &[],
-            &[],
         );
         assert!(d.allowed);
         assert!(!d.requires_confirmation);
@@ -918,40 +908,36 @@ mod tests {
 
     #[test]
     fn destructive_rm() {
-        assert!(is_destructive_command("rm -rf /", &[], &[]));
-        assert!(is_destructive_command("rm file.txt", &[], &[]));
+        assert!(is_destructive_command("rm -rf /", &[]));
+        assert!(is_destructive_command("rm file.txt", &[]));
     }
 
     #[test]
     fn destructive_sudo() {
-        assert!(is_destructive_command("sudo apt install vim", &[], &[]));
+        assert!(is_destructive_command("sudo apt install vim", &[]));
     }
 
     #[test]
     fn not_destructive_cargo() {
-        assert!(!is_destructive_command("cargo build", &[], &[]));
-        assert!(!is_destructive_command("cargo test", &[], &[]));
+        assert!(!is_destructive_command("cargo build", &[]));
+        assert!(!is_destructive_command("cargo test", &[]));
     }
 
     #[test]
     fn not_destructive_git_add() {
-        assert!(!is_destructive_command("git add .", &[], &[]));
-        assert!(!is_destructive_command("git commit -m \"msg\"", &[], &[]));
+        assert!(!is_destructive_command("git add .", &[]));
+        assert!(!is_destructive_command("git commit -m \"msg\"", &[]));
     }
 
     #[test]
     fn destructive_git_push_force() {
-        assert!(is_destructive_command(
-            "git push --force origin main",
-            &[],
-            &[]
-        ));
-        assert!(is_destructive_command("git push -f origin main", &[], &[]));
+        assert!(is_destructive_command("git push --force origin main", &[]));
+        assert!(is_destructive_command("git push -f origin main", &[]));
     }
 
     #[test]
     fn destructive_git_reset_hard() {
-        assert!(is_destructive_command("git reset --hard HEAD~3", &[], &[]));
+        assert!(is_destructive_command("git reset --hard HEAD~3", &[]));
     }
 
     // -- File operations: outside CWD → always requires confirmation --

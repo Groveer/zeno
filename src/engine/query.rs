@@ -898,7 +898,6 @@ impl QueryEngine {
                             &cancel,
                             Some(&*self.tool_cache),
                             &self.settings.tools.destructive_commands,
-                            &self.settings.tools.destructive_git_patterns,
                             self.settings.engine.tool_timeout_secs,
                             &self.settings.safe_paths,
                         )
@@ -961,7 +960,6 @@ impl QueryEngine {
                         &cancel,
                         Some(&*self.tool_cache),
                         &self.settings.tools.destructive_commands,
-                        &self.settings.tools.destructive_git_patterns,
                         self.settings.engine.tool_timeout_secs,
                         &self.settings.safe_paths,
                     )
@@ -1290,7 +1288,6 @@ async fn execute_single_tool_tui_catch(
     cancel: &CancellationToken,
     tool_cache: Option<&std::sync::Mutex<crate::tools::cache::ToolCache>>,
     destructive_commands: &[String],
-    destructive_git_patterns: &[String],
     tool_timeout_secs: u64,
     safe_paths: &[String],
 ) -> ContentBlock {
@@ -1306,7 +1303,6 @@ async fn execute_single_tool_tui_catch(
         cancel,
         tool_cache,
         destructive_commands,
-        destructive_git_patterns,
         tool_timeout_secs,
         safe_paths,
     )
@@ -1340,7 +1336,6 @@ async fn execute_single_tool_tui(
     cancel: &CancellationToken,
     tool_cache: Option<&std::sync::Mutex<crate::tools::cache::ToolCache>>,
     destructive_commands: &[String],
-    destructive_git_patterns: &[String],
     tool_timeout_secs: u64,
     safe_paths: &[String],
 ) -> Option<ContentBlock> {
@@ -1429,7 +1424,6 @@ async fn execute_single_tool_tui(
             resolved.command.as_deref(),
             &ctx.cwd,
             destructive_commands,
-            destructive_git_patterns,
             safe_paths,
         );
 

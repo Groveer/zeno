@@ -1,8 +1,6 @@
 -- zeno configuration
 -- Place at ~/.config/zeno/init.lua
 --
--- Documentation: https://github.com/user/zeno#configuration
---
 -- You can split config into modules and require() them:
 --   local utils = require 'utils'  -- loads ~/.config/zeno/lua/utils.lua
 -- require() is sandboxed: only files under ~/.config/zeno/lua/ are allowed.
@@ -37,9 +35,9 @@ local zn = require("zeno")
 --
 -- Available tools and their defaults:
 --   bash        = true   (shell command execution)
---   file_read   = true   (read file contents)
---   file_write  = true   (create/overwrite files)
---   file_edit   = true   (patch/find-replace in files)
+--   read        = true   (read file contents)
+--   write       = true   (create/overwrite files)
+--   edit        = true   (patch/find-replace in files)
 --   glob        = true   (find files by name pattern)
 --   grep        = true   (search file contents)
 --   web_search  = true   (web search queries)
@@ -56,12 +54,20 @@ local zn = require("zeno")
 
 -- Bash safety rules (merged with built-in defaults):
 --   readonly_commands     — auto-allowed without permission prompt
---   destructive_commands  — always require confirmation in "ask" mode
---   destructive_git_patterns — git commands that always require confirmation
+--   destructive_commands  — always require confirmation in "ask" mode.
+--                          Uses **substring matching** (like wildcards), so:
+--                            "terraform"    → matches any command with "terraform" anywhere
+--                            "git rebase"   → matches "git rebase -i", "git rebase --continue", etc.
+--                            "kubectl"      → matches "kubectl delete pod", "kubectl drain node", etc.
 -- zn.tools({
 --   readonly_commands = { "pnpm list", "just --list", "make -n", "docker ps" },
---   destructive_commands = { "terraform destroy", "kubectl delete", "helm uninstall" },
---   destructive_git_patterns = { "git rebase -i", "git cherry-pick" },
+--   destructive_commands = {
+--     "terraform",                          -- all terraform commands
+--     "kubectl delete", "kubectl drain",    -- specific kubectl subcommands
+--     "helm uninstall",
+--     "git rebase", "git cherry-pick",      -- destructive git operations
+--     "gh repo delete",                     -- GitHub CLI destructive actions
+--   },
 -- })
 
 -- Extra directories to skip during glob/grep traversal.
