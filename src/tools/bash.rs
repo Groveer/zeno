@@ -100,6 +100,11 @@ impl BashTool {
     /// Check if rtk can route this command. Uses `rtk rewrite` as the single
     /// source of truth — no hardcoded prefix lists to maintain.
     /// Returns the rewritten command and an optional cd directory to set as cwd.
+    ///
+    /// rtk natively handles compound commands (|, &&, ||) — it rewrites each
+    /// segment independently and preserves shell operators. The rewritten command
+    /// is then executed via `bash -c`, so all shell syntax (redirects, pipes,
+    /// chains) works correctly.
     async fn maybe_rtk_route(&self, cmd: &str) -> Option<(String, Option<PathBuf>)> {
         if !self.use_rtk {
             return None;
@@ -118,26 +123,22 @@ impl BashTool {
         // the cd directory set as the process's current_dir instead of via shell.
         let (cd_dir, inner_cmd) = Self::strip_cd_prefix(trimmed);
 
-        // Strip common shell redirects that LLMs append (2>&1, 2>/dev/null, etc.).
-        // These are meaningful in a shell but become literal arguments when passed
-        // via Command::new().args() — they confuse rtk and the underlying tool.
-        let clean_cmd = Self::strip_shell_redirects(inner_cmd);
-
-        // Skip compound commands (pipes, chains) — rtk proxy can't handle them
-        if clean_cmd.contains('|') || clean_cmd.contains("&&") || clean_cmd.contains("||") {
-            return None;
-        }
-
-        // Ask rtk to rewrite — this is the authoritative check
+        // Ask rtk to rewrite — this is the authoritative check.
+        // rtk handles redirects (2>&1), pipes (|), and chains (&&, ||) natively
+        // by rewriting each segment independently and preserving operators.
         let Ok(output) = tokio::process::Command::new("rtk")
             .arg("rewrite")
-            .args(clean_cmd.split_whitespace())
+            .args(inner_cmd.split_whitespace())
             .output()
             .await
         else {
             return None;
         };
-        if output.status.code() == Some(3) {
+        // Exit 0 = auto-allowed, exit 3 = ask (rtk signals the caller to prompt,
+        // but we auto-allow since zeno's own permission system handles confirmation).
+        // Both produce rewritten output we can use.
+        let exit_code = output.status.code();
+        if exit_code == Some(0) || exit_code == Some(3) {
             let rewritten = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !rewritten.is_empty() {
                 return Some((rewritten, cd_dir));
@@ -174,41 +175,6 @@ impl BashTool {
             }
         }
         (None, trimmed)
-    }
-
-    /// Strip common shell redirect suffixes that LLMs append to commands.
-    /// These are meaningful in a shell but become literal arguments when passed
-    /// via `Command::new().args()`.
-    ///
-    /// Examples:
-    /// - `"git status 2>&1"` → `"git status"`
-    /// - `"cargo test 2>/dev/null"` → `"cargo test"`
-    /// - `"ls 2>&1 >/dev/null"` → `"ls"`
-    /// - `"git status"` → `"git status"` (unchanged)
-    fn strip_shell_redirects(cmd: &str) -> String {
-        let mut s = cmd.trim().to_string();
-        let redirects = [
-            " 2>&1",
-            " 2>/dev/null",
-            " >/dev/null",
-            " 2>&2",
-            " 1>/dev/null",
-            " &>/dev/null",
-        ];
-        loop {
-            let len_before = s.len();
-            for r in &redirects {
-                s = s.trim_end_matches(r).to_string();
-            }
-            // Also handle no-space variants like "2>&1" at end
-            if s.ends_with("2>&1") {
-                s = s[..s.len() - 5].to_string();
-            }
-            if s.len() == len_before {
-                break;
-            }
-        }
-        s.trim().to_string()
     }
 }
 
@@ -360,50 +326,46 @@ impl Tool for BashTool {
         // Try rtk routing first
         if let Some((rtk_cmd_str, cd_override)) = self.maybe_rtk_route(cmd).await {
             tracing::debug!(rtk_command = %rtk_cmd_str, "Routing through rtk");
-            let parts: Vec<&str> = rtk_cmd_str.split_whitespace().collect();
-            if let Some((program, args)) = parts.split_first() {
-                let mut rtk_cmd = tokio::process::Command::new(program);
-                // Use the cd-override directory if one was extracted from the command,
-                // otherwise fall back to the context's cwd.
-                rtk_cmd
-                    .args(args)
-                    .current_dir(cd_override.as_ref().unwrap_or(&ctx.cwd));
-                for (k, v) in &self.env {
-                    rtk_cmd.env(k, v);
-                }
-                rtk_cmd
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .kill_on_drop(true);
-                let child = rtk_cmd.spawn().map_err(ToolError::Io)?;
-                let output = tokio::time::timeout(
-                    std::time::Duration::from_secs(timeout),
-                    child.wait_with_output(),
-                )
-                .await
-                .map_err(|_| {
-                    ToolError::Timeout(format!("rtk command timed out after {}s", timeout))
-                })?
-                .map_err(ToolError::Io)?;
-
-                if output.status.success() {
-                    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                    let mut result = stdout;
-                    if !stderr.is_empty() {
-                        result.push_str("\n[stderr]\n");
-                        result.push_str(&stderr);
-                    }
-                    if result.is_empty() {
-                        result = "(no output)".into();
-                    }
-                    return Ok(result);
-                }
-                tracing::debug!(
-                    event = "rtk_fallback",
-                    "rtk proxy failed, falling back to raw command"
-                );
+            // rtk rewritten command may contain shell syntax (|, &&, ||, redirects),
+            // so execute via bash -c with the cd directory as working directory
+            let mut bash_cmd = tokio::process::Command::new("bash");
+            bash_cmd
+                .arg("-c")
+                .arg(&rtk_cmd_str)
+                .current_dir(cd_override.as_ref().unwrap_or(&ctx.cwd));
+            for (k, v) in &self.env {
+                bash_cmd.env(k, v);
             }
+            bash_cmd
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true);
+            let child = bash_cmd.spawn().map_err(ToolError::Io)?;
+            let output = tokio::time::timeout(
+                std::time::Duration::from_secs(timeout),
+                child.wait_with_output(),
+            )
+            .await
+            .map_err(|_| ToolError::Timeout(format!("rtk command timed out after {}s", timeout)))?
+            .map_err(ToolError::Io)?;
+
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                let mut result = stdout;
+                if !stderr.is_empty() {
+                    result.push_str("\n[stderr]\n");
+                    result.push_str(&stderr);
+                }
+                if result.is_empty() {
+                    result = "(no output)".into();
+                }
+                return Ok(result);
+            }
+            tracing::debug!(
+                event = "rtk_fallback",
+                "rtk proxy failed, falling back to raw command"
+            );
         }
 
         // Normal execution via bash
@@ -489,41 +451,37 @@ mod rtk_tests {
         assert_eq!(inner, "ls");
     }
 
-    #[test]
-    fn test_strip_shell_redirects() {
-        assert_eq!(
-            BashTool::strip_shell_redirects("git status 2>&1"),
-            "git status"
-        );
-        assert_eq!(
-            BashTool::strip_shell_redirects("cargo test 2>&1"),
-            "cargo test"
-        );
-        assert_eq!(
-            BashTool::strip_shell_redirects("cargo test 2>/dev/null"),
-            "cargo test"
-        );
-        assert_eq!(BashTool::strip_shell_redirects("ls 2>&1 >/dev/null"), "ls");
-        assert_eq!(
-            BashTool::strip_shell_redirects("git status &>/dev/null"),
-            "git status"
-        );
-        assert_eq!(BashTool::strip_shell_redirects("git status"), "git status");
-        assert_eq!(
-            BashTool::strip_shell_redirects("grep -rn foo . 2>&1"),
-            "grep -rn foo ."
-        );
-    }
-
     #[tokio::test]
     async fn test_rtk_route_with_redirect_stripped() {
         let tool = BashTool::new(true, HashMap::new(), vec![], vec![], vec![]);
         let result = tool.maybe_rtk_route("git status 2>&1").await;
-        assert!(result.is_some(), "rtk should route after stripping 2>&1");
+        assert!(result.is_some(), "rtk should route despite 2>&1 redirect");
+    }
+
+    #[tokio::test]
+    async fn test_rtk_route_with_pipe_and_redirect() {
+        let tool = BashTool::new(true, HashMap::new(), vec![], vec![], vec![]);
+        // rtk natively handles pipes — it rewrites the left side and preserves
+        // shell operators, so compound commands should route through rtk.
+        let result = tool.maybe_rtk_route("cargo test 2>&1 | grep error").await;
+        assert!(
+            result.is_some(),
+            "rtk should route pipe commands with redirects"
+        );
         let (rewritten, _) = result.unwrap();
         assert!(
-            !rewritten.contains("2>&1"),
-            "rewritten should not contain shell redirect"
+            rewritten.starts_with("rtk"),
+            "rewritten should start with rtk prefix"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rtk_route_unsupported_returns_none() {
+        let tool = BashTool::new(true, HashMap::new(), vec![], vec![], vec![]);
+        let result = tool.maybe_rtk_route("foobar xyz").await;
+        assert!(
+            result.is_none(),
+            "unsupported commands should not route through rtk"
         );
     }
 }
