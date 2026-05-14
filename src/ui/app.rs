@@ -672,8 +672,7 @@ impl App {
                 UiEvent::ImagePasteFailed => {
                     self.output.push(OutputSegment::Error(
                         "No image in clipboard, or clipboard tool not available.\n\
-                         Usage: Alt+V — paste image from clipboard (requires wl-paste/xclip/osascript)\n\
-                                /image <path> — attach image from file"
+                         Usage: Alt+V — paste image from clipboard (requires wl-paste/xclip/osascript)"
                             .into(),
                     ));
                 }

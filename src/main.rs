@@ -14,12 +14,14 @@ mod ui;
 mod utils;
 
 use api::types::ContentBlock;
+use base64::Engine;
 use config::load as config_load;
 use config::settings;
 use config::settings::ProviderConfig;
 use engine::messages::ConversationHistory;
 use engine::query_engine::QueryEngine;
 use memory::provider::MemoryProvider;
+use regex::Regex;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -76,10 +78,6 @@ fn dispatch_command(input: &str) -> CommandAction {
             let arg = s.strip_prefix("/goal").unwrap_or("").trim().to_string();
             CommandAction::NeedEngine("goal", arg)
         }
-        s if s.starts_with("/image") => {
-            let arg = s.strip_prefix("/image").unwrap_or("").trim().to_string();
-            CommandAction::NeedEngine("image", arg)
-        }
         // Unknown slash command  send to LLM
         _ => CommandAction::Query,
     }
@@ -107,8 +105,6 @@ Available commands:
 /goal clear — Clear goal
 /goal pause — Pause goal
 /goal resume — Resume goal
-/image — Attach a screenshot from clipboard
-/image <path> — Attach an image from file
 
 Navigation:
  / — History (input) or scroll (output)
@@ -1032,170 +1028,6 @@ async fn main() -> anyhow::Result<()> {
                             });
                         }
                     }
-                    "image" => {
-                        use base64::Engine;
-                        // /image <path> — load from file
-                        // /image — try clipboard
-                        let image_data = if arg.is_empty() {
-                            // Try clipboard paste
-                            None
-                        } else {
-                            let path = std::path::Path::new(&arg);
-                            if path.exists() {
-                                match std::fs::read(path) {
-                                    Ok(bytes) => {
-                                        let ext = path
-                                            .extension()
-                                            .and_then(|e| e.to_str())
-                                            .unwrap_or("png");
-                                        let media_type = match ext {
-                                            "png" => "image/png",
-                                            "jpg" | "jpeg" => "image/jpeg",
-                                            "gif" => "image/gif",
-                                            "webp" => "image/webp",
-                                            "bmp" => "image/bmp",
-                                            _ => "image/png",
-                                        };
-                                        Some((
-                                            media_type.to_string(),
-                                            bytes,
-                                            path.display().to_string(),
-                                        ))
-                                    }
-                                    Err(e) => {
-                                        send_text_response(
-                                            &sender,
-                                            &format!("Failed to read image '{}': {}", arg, e),
-                                        );
-                                        continue;
-                                    }
-                                }
-                            } else {
-                                send_text_response(&sender, &format!("File not found: {}", arg));
-                                continue;
-                            }
-                        };
-
-                        if let Some((media_type, bytes, source_path)) = image_data {
-                            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                            let size_kb = bytes.len() / 1024;
-                            if size_kb > 10240 {
-                                send_text_response(
-                                    &sender,
-                                    &format!("Image too large: {} KB (max 10 MB)", size_kb),
-                                );
-                                continue;
-                            }
-
-                            let mut eng = engine.lock().await;
-                            eng.history.push_user_blocks(vec![
-                                ContentBlock::Text {
-                                    text: format!("[Attached image: {}]", source_path),
-                                },
-                                ContentBlock::Image {
-                                    media_type,
-                                    data: b64,
-                                    source_path,
-                                },
-                            ]);
-                            drop(eng);
-
-                            let _ = sender.send(engine::tui_events::UiEvent::Status(format!(
-                                " Image attached ({} KB). Analyze it in your next message.",
-                                size_kb
-                            )));
-                            let _ = sender.send(engine::tui_events::UiEvent::QueryDone {
-                                text: String::new(),
-                                tool_calls: 0,
-                                tokens: 0,
-                            });
-                        } else {
-                            // Try clipboard — run wl-paste or pbpaste
-                            let sender2 = sender.clone();
-                            tokio::spawn(async move {
-                                let _ = sender2.send(engine::tui_events::UiEvent::Status(
-                                    "Reading image from clipboard...".into(),
-                                ));
-                                let result = tokio::process::Command::new("wl-paste")
-                                    .arg("--type")
-                                    .arg("image/png")
-                                    .output()
-                                    .await;
-                                let (media_type, bytes) = match result {
-                                    Ok(output)
-                                        if output.status.success() && !output.stdout.is_empty() =>
-                                    {
-                                        ("image/png".to_string(), output.stdout)
-                                    }
-                                    _ => {
-                                        // Try macOS
-                                        match tokio::process::Command::new("osascript")
-                                            .arg("-e")
-                                            .arg("get the clipboard as «class PNGf»")
-                                            .output()
-                                            .await
-                                        {
-                                            Ok(output)
-                                                if output.status.success()
-                                                    && !output.stdout.is_empty() =>
-                                            {
-                                                ("image/png".to_string(), output.stdout)
-                                            }
-                                            _ => {
-                                                let _ = sender2.send(engine::tui_events::UiEvent::TextDelta(
-                                                    "No image found. Usage:\n  /image <path>  — attach image from file\n  /image         — paste from clipboard (requires wl-paste/xclip)".into(),
-                                                ));
-                                                let _ = sender2.send(
-                                                    engine::tui_events::UiEvent::QueryDone {
-                                                        text: String::new(),
-                                                        tool_calls: 0,
-                                                        tokens: 0,
-                                                    },
-                                                );
-                                                return;
-                                            }
-                                        }
-                                    }
-                                };
-
-                                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                                let size_kb = bytes.len() / 1024;
-                                if size_kb > 10240 {
-                                    let _ = sender2.send(engine::tui_events::UiEvent::TextDelta(
-                                        format!("Image too large: {} KB (max 10 MB)", size_kb),
-                                    ));
-                                    let _ = sender2.send(engine::tui_events::UiEvent::QueryDone {
-                                        text: String::new(),
-                                        tool_calls: 0,
-                                        tokens: 0,
-                                    });
-                                    return;
-                                }
-
-                                let mut eng = engine.lock().await;
-                                eng.history.push_user_blocks(vec![
-                                    ContentBlock::Text {
-                                        text: "[Attached image: clipboard]".into(),
-                                    },
-                                    ContentBlock::Image {
-                                        media_type,
-                                        data: b64,
-                                        source_path: String::new(),
-                                    },
-                                ]);
-                                drop(eng);
-
-                                let _ = sender2.send(engine::tui_events::UiEvent::Status(
-                                    format!(" Image from clipboard attached ({} KB). Analyze it in your next message.", size_kb),
-                                ));
-                                let _ = sender2.send(engine::tui_events::UiEvent::QueryDone {
-                                    text: String::new(),
-                                    tool_calls: 0,
-                                    tokens: 0,
-                                });
-                            });
-                        }
-                    }
                     _ => {}
                 },
                 CommandAction::Compact => {
@@ -1245,11 +1077,68 @@ async fn main() -> anyhow::Result<()> {
                 }
                 CommandAction::Query => {
                     let cancel = app.reset_cancel_token();
-                    let image_blocks = app.take_pending_images();
+                    let mut image_blocks = app.take_pending_images();
+
+                    // Auto-detect image file paths in the query text
+                    let cleaned_text = {
+                        // Use a simple word-boundary scan for paths ending in image extensions
+                        let re = Regex::new(
+                            r"(?i)(?:^|\s)([\w.\-/\\]+\.(?:png|jpe?g|gif|webp|bmp))(?:\s|$)",
+                        )
+                        .unwrap();
+                        let mut text = query_text.clone();
+                        let mut found_any = false;
+                        for cap in re.captures_iter(&query_text) {
+                            let path_str = cap.get(1).unwrap().as_str();
+                            let path = std::path::Path::new(path_str);
+                            if path.exists() {
+                                match std::fs::read(path) {
+                                    Ok(bytes) => {
+                                        let ext = path
+                                            .extension()
+                                            .and_then(|e| e.to_str())
+                                            .unwrap_or("png");
+                                        let media_type = match ext.to_lowercase().as_str() {
+                                            "png" => "image/png",
+                                            "jpg" | "jpeg" => "image/jpeg",
+                                            "gif" => "image/gif",
+                                            "webp" => "image/webp",
+                                            "bmp" => "image/bmp",
+                                            _ => "image/png",
+                                        };
+                                        let b64 = base64::engine::general_purpose::STANDARD
+                                            .encode(&bytes);
+                                        let size_kb = bytes.len() / 1024;
+                                        if size_kb <= 10240 {
+                                            image_blocks.push((media_type.to_string(), b64));
+                                            found_any = true;
+                                            // Remove the path from the text
+                                            text = text.replace(path_str, "");
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // File exists but unreadable — leave text as-is
+                                    }
+                                }
+                            }
+                        }
+                        if found_any {
+                            // Clean up leftover whitespace
+                            let cleaned = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                            if cleaned.is_empty() {
+                                "[Attached image(s)]".to_string()
+                            } else {
+                                cleaned
+                            }
+                        } else {
+                            text
+                        }
+                    };
+
                     tokio::spawn(async move {
                         let mut eng = engine.lock().await;
                         if let Err(e) = eng
-                            .query_tui(&query_text, image_blocks, &sender, cancel)
+                            .query_tui(&cleaned_text, image_blocks, &sender, cancel)
                             .await
                         {
                             let _ = sender.send(engine::tui_events::UiEvent::Error(e.to_string()));
