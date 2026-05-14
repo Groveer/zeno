@@ -97,11 +97,11 @@ and `skill_view` to load a specific skill's full instructions.";
 }
 
 /// Guidelines — always present.
+/// Custom guidelines from the user are appended after the built-in rules,
+/// never replacing them. This ensures operational rules (tool efficiency,
+/// batch calls, etc.) are always in effect.
 fn guidelines(role: &RoleConfig) -> String {
-    if let Some(ref custom) = role.guidelines {
-        return format!("## Guidelines\n\n{}", custom.trim());
-    }
-    r#"
+    let builtin = r#"
 ## Guidelines
 
 - Be concise and direct. Prefer showing results over lengthy explanations.
@@ -126,6 +126,21 @@ fn guidelines(role: &RoleConfig) -> String {
   the Environment section for the detected build system. Target searches at the source
   tree (e.g. `path="src"`) rather than the project root. Start shallow (`glob("*")`)
   then drill down — don't `glob("**")` on the whole project.
+- **Prefer grep before read**: Before calling `read`, first use `grep` to locate the
+  exact lines you need. Only call `read` when you know the specific file and line range.
+  This avoids reading large files unnecessarily.
+- **Read minimum range**: Always specify `offset` + `limit` (or `offset` + `context`)
+  to read the smallest possible range. Never read an entire file when you only need
+  a few lines. Exception: files ≤500 lines where you need the full context.
+- **Glob only with keywords**: Only use `glob` when you have a specific pattern or
+  keyword to match (e.g. `glob("*.rs")`, `glob("src/**/*.py")`). Avoid bare `glob("**")`
+  or `glob("*")` on the project root — these waste tokens by returning hundreds of results.
+- **Read before edit**: Before calling `edit`, you MUST first `read` the file to confirm
+  the exact content, line positions, and indentation. Copy-paste the exact text from
+  `read` output as `old_string` — include 2-3 surrounding lines for uniqueness.
+- **Edit indentation**: When constructing `edit` calls, match the file's actual
+  indentation style (spaces vs tabs, depth). Copy the indentation directly from
+  `read` output rather than guessing or re-typing it.
 - **Missing context**: If required context is missing, do NOT guess or hallucinate an answer.
   Use the appropriate lookup tool when missing information is retrievable
   (read, grep, glob, web_search, web_fetch, etc.).
@@ -134,7 +149,14 @@ fn guidelines(role: &RoleConfig) -> String {
   label assumptions explicitly.
 "#
     .trim()
-    .to_string()
+    .to_string();
+
+    match role.guidelines {
+        Some(ref custom) if !custom.trim().is_empty() => {
+            format!("{}\n\n### Custom Rules\n\n{}", builtin, custom.trim())
+        }
+        _ => builtin,
+    }
 }
 
 /// Format the tool list as a readable block for the system prompt.
@@ -448,15 +470,21 @@ mod tests {
     }
 
     #[test]
-    fn test_custom_guidelines() {
+    fn test_custom_guidelines_appended() {
         let role = RoleConfig {
             identity: None,
             guidelines: Some("- Always think step by step.\n- Never guess.".into()),
         };
         let p = guidelines(&role);
         assert!(p.contains("## Guidelines"));
+        // Built-in rules are always present
+        assert!(p.contains("Be concise"));
+        assert!(p.contains("Batch independent tool calls"));
+        assert!(p.contains("Prefer grep before read"));
+        // Custom rules are appended under "### Custom Rules"
+        assert!(p.contains("### Custom Rules"));
         assert!(p.contains("Always think step by step"));
-        assert!(!p.contains("Be concise"));
+        assert!(p.contains("Never guess"));
     }
 
     #[test]

@@ -241,6 +241,72 @@ fn is_destructive_command(cmd: &str, extra_commands: &[String]) -> bool {
     false
 }
 
+/// Recursively extract sub-commands from shell command substitution constructs.
+///
+/// Handles:
+/// - `$(...)` — POSIX command substitution (nested parens handled correctly)
+/// - `` `...` `` — backtick command substitution
+///
+/// Pure variable references (`$VAR`, `${VAR}`) are NOT extracted.
+/// Recursively extracts from nested substitutions.
+fn extract_subshell_commands(cmd: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut i = 0;
+    let chars: Vec<char> = cmd.chars().collect();
+    let len = chars.len();
+
+    while i < len {
+        // `$(...)` — dollar-paren command substitution (handles nested parens)
+        if i + 1 < len && chars[i] == '$' && chars[i + 1] == '(' {
+            let mut depth = 1;
+            let start = i + 2;
+            let mut j = start;
+            while j < len && depth > 0 {
+                if chars[j] == '(' {
+                    depth += 1;
+                } else if chars[j] == ')' {
+                    depth -= 1;
+                }
+                j += 1;
+            }
+            if depth == 0 {
+                let inner = chars[start..j - 1].iter().collect::<String>();
+                result.push(inner.clone());
+                // Recursively extract nested subshells from the inner command
+                result.extend(extract_subshell_commands(&inner));
+            }
+            i = j;
+            continue;
+        }
+
+        // `...` — backtick command substitution
+        if chars[i] == '`' {
+            let start = i + 1;
+            let mut j = start;
+            while j < len && chars[j] != '`' {
+                if chars[j] == '\\' && j + 1 < len {
+                    j += 2;
+                } else {
+                    j += 1;
+                }
+            }
+            if j < len {
+                let inner = chars[start..j].iter().collect::<String>();
+                result.push(inner.clone());
+                // Recursively extract nested subshells from the inner command
+                result.extend(extract_subshell_commands(&inner));
+                i = j + 1;
+            } else {
+                i = j + 1;
+            }
+            continue;
+        }
+
+        i += 1;
+    }
+
+    result
+}
 /// Split a shell command on common operators: &&, ||, ;, |
 /// Returns the sub-command strings (preserving original spacing).
 fn split_shell_operators(cmd: &str) -> Vec<String> {
@@ -424,7 +490,7 @@ pub fn evaluate_permission(
             // --- Bash commands: relaxed check ---
             if tool_name == "bash" {
                 if let Some(cmd) = command {
-                    // Check for shell injection / expansion that could bypass checks
+                    // Check for shell injection / expansion that could bypass checks nested sub-commands
                     let has_shell_expansion = cmd.contains('$') || cmd.contains('`');
                     let has_path_traversal = cmd.contains("../")
                         || cmd.contains("/..")
@@ -451,23 +517,129 @@ pub fn evaluate_permission(
                         };
                     }
 
-                    // Shell expansion or path traversal: requires confirmation
-                    if has_shell_expansion || has_path_traversal {
+                    // Path traversal: requires confirmation (can't safely resolve statically)
+                    if has_path_traversal {
                         tracing::info!(
                             tool_name = "bash",
                             permission_decision = "requires_confirmation",
                             mode = "ask",
-                            has_shell_expansion = has_shell_expansion,
                             has_path_traversal = has_path_traversal,
                             command = %cmd,
-                            "Command with expansion/traversal requires confirmation"
+                            "Command with path traversal requires confirmation"
                         );
                         return PermissionDecision {
                             allowed: false,
                             requires_confirmation: true,
-                            reason: "Command contains shell expansion or path traversal"
-                                .to_string(),
+                            reason: "Command contains path traversal".to_string(),
                         };
+                    }
+
+                    // Shell expansion: parse and check $(...) / `...` sub-commands
+                    if has_shell_expansion {
+                        let subcommands = extract_subshell_commands(cmd);
+                        // Check each subshell sub-command for destructive/sensitive operations
+                        for sub in &subcommands {
+                            let sub_trimmed = sub.trim();
+                            if sub_trimmed.is_empty() {
+                                continue;
+                            }
+                            // Run the same destructive check on the sub-command
+                            if is_destructive_command(sub_trimmed, extra_destructive_commands) {
+                                tracing::info!(
+                                    tool_name = "bash",
+                                    permission_decision = "requires_confirmation",
+                                    mode = "ask",
+                                    reason = "destructive_in_subshell",
+                                    command = %cmd,
+                                    subshell_cmd = %sub_trimmed,
+                                    "Subshell sub-command is destructive"
+                                );
+                                return PermissionDecision {
+                                    allowed: false,
+                                    requires_confirmation: true,
+                                    reason: format!(
+                                        "Subshell sub-command '{}' is destructive",
+                                        sub_trimmed.chars().take(60).collect::<String>()
+                                    ),
+                                };
+                            }
+                            // Check sensitive paths in the sub-command
+                            let sensitive_prefixes = [
+                                "/etc/",
+                                "/root/",
+                                "/var/",
+                                "/proc/",
+                                "/sys/",
+                                "/boot/",
+                                "/usr/local/etc/",
+                                "/opt/",
+                            ];
+                            let has_sensitive_path = sensitive_prefixes
+                                .iter()
+                                .any(|prefix| sub_trimmed.contains(prefix));
+                            let home_prefix = if cfg!(target_os = "macos") {
+                                "/Users"
+                            } else {
+                                "/home"
+                            };
+                            let contains_other_home = sub_trimmed.contains(home_prefix)
+                                && !sub_trimmed.contains(&cwd.to_string_lossy().to_string());
+
+                            if has_sensitive_path || contains_other_home {
+                                tracing::info!(
+                                    tool_name = "bash",
+                                    permission_decision = "requires_confirmation",
+                                    mode = "ask",
+                                    reason = "sensitive_path_in_subshell",
+                                    command = %cmd,
+                                    subshell_cmd = %sub_trimmed,
+                                    "Subshell sub-command accesses sensitive paths"
+                                );
+                                return PermissionDecision {
+                                    allowed: false,
+                                    requires_confirmation: true,
+                                    reason: format!(
+                                        "Subshell sub-command accesses sensitive paths: {}",
+                                        sub_trimmed.chars().take(60).collect::<String>()
+                                    ),
+                                };
+                            }
+
+                            // Check path traversal in the sub-command
+                            if sub_trimmed.contains("../")
+                                || sub_trimmed.contains("/..")
+                                || sub_trimmed.ends_with("..")
+                                || sub_trimmed.contains("..\\")
+                            {
+                                tracing::info!(
+                                    tool_name = "bash",
+                                    permission_decision = "requires_confirmation",
+                                    mode = "ask",
+                                    reason = "path_traversal_in_subshell",
+                                    command = %cmd,
+                                    subshell_cmd = %sub_trimmed,
+                                    "Subshell sub-command has path traversal"
+                                );
+                                return PermissionDecision {
+                                    allowed: false,
+                                    requires_confirmation: true,
+                                    reason: format!(
+                                        "Subshell sub-command contains path traversal: {}",
+                                        sub_trimmed.chars().take(60).collect::<String>()
+                                    ),
+                                };
+                            }
+                        }
+
+                        // All sub-commands are safe — log and continue to check the main command
+                        tracing::debug!(
+                            tool_name = "bash",
+                            permission_decision = "allowed_after_subshell_check",
+                            mode = "ask",
+                            command = %cmd,
+                            subcommands = ?subcommands,
+                            "All subshell sub-commands are safe, continuing to check main command"
+                        );
                     }
 
                     // Check if command accesses sensitive paths outside safe zone
@@ -783,10 +955,132 @@ mod tests {
     // -- Bash: shell expansion / path traversal --
 
     #[test]
-    fn ask_bash_shell_expansion_requires_confirmation() {
+    fn ask_bash_shell_expansion_safe_subcommand_allowed() {
+        // echo $(whoami) — whoami is safe, should now be auto-allowed
         let d = eval_bash(&ASK, "echo $(whoami)", "/home/user/proj");
+        assert!(
+            d.allowed,
+            "safe subshell sub-command should be auto-allowed"
+        );
+        assert!(!d.requires_confirmation);
+    }
+
+    #[test]
+    fn ask_bash_shell_expansion_destructive_subcommand_requires_confirmation() {
+        // echo $(rm -rf /tmp) — rm is destructive, should require confirmation
+        let d = eval_bash(&ASK, "echo $(rm -rf /tmp)", "/home/user/proj");
         assert!(!d.allowed);
         assert!(d.requires_confirmation);
+    }
+
+    #[test]
+    fn ask_bash_backtick_safe_subcommand_allowed() {
+        let d = eval_bash(&ASK, "echo `whoami`", "/home/user/proj");
+        assert!(
+            d.allowed,
+            "safe backtick sub-command should be auto-allowed"
+        );
+        assert!(!d.requires_confirmation);
+    }
+
+    #[test]
+    fn ask_bash_backtick_destructive_subcommand_requires_confirmation() {
+        let d = eval_bash(&ASK, "echo `rm -rf /tmp`", "/home/user/proj");
+        assert!(!d.allowed);
+        assert!(d.requires_confirmation);
+    }
+
+    #[test]
+    fn ask_bash_var_ref_no_subshell_allowed() {
+        // Pure variable reference $VAR — no command substitution, should be allowed
+        let d = eval_bash(&ASK, "echo $HOME", "/home/user/proj");
+        assert!(d.allowed, "pure variable reference should be auto-allowed");
+        assert!(!d.requires_confirmation);
+    }
+
+    #[test]
+    fn ask_bash_nested_subshell_destructive_requires_confirmation() {
+        // echo $(echo $(rm -rf /tmp)) — nested destructive should be caught
+        let d = eval_bash(&ASK, "echo $(echo $(rm -rf /tmp))", "/home/user/proj");
+        assert!(!d.allowed);
+        assert!(d.requires_confirmation);
+    }
+
+    #[test]
+    fn ask_bash_subshell_sensitive_path_requires_confirmation() {
+        // echo $(cat /etc/shadow) — sensitive path in subshell
+        let d = eval_bash(&ASK, "echo $(cat /etc/shadow)", "/home/user/proj");
+        assert!(!d.allowed);
+        assert!(d.requires_confirmation);
+    }
+
+    #[test]
+    fn ask_bash_subshell_path_traversal_requires_confirmation() {
+        // echo $(cat ../../../etc/passwd) — path traversal in subshell
+        let d = eval_bash(&ASK, "echo $(cat ../../../etc/passwd)", "/home/user/proj");
+        assert!(!d.allowed);
+        assert!(d.requires_confirmation);
+    }
+
+    #[test]
+    fn ask_bash_compound_with_subshell_safe_allowed() {
+        // git status && echo $(whoami) — both safe
+        let d = eval_bash(&ASK, "git status && echo $(whoami)", "/home/user/proj");
+        assert!(d.allowed);
+        assert!(!d.requires_confirmation);
+    }
+
+    #[test]
+    fn ask_bash_compound_with_subshell_destructive_requires_confirmation() {
+        // git status && echo $(rm -rf /tmp) — subshell is destructive
+        let d = eval_bash(&ASK, "git status && echo $(rm -rf /tmp)", "/home/user/proj");
+        assert!(!d.allowed);
+        assert!(d.requires_confirmation);
+    }
+
+    // -- extract_subshell_commands --
+    #[test]
+    fn extract_subshell_dollar_paren() {
+        let cmds = extract_subshell_commands("echo $(whoami)");
+        assert_eq!(cmds, vec!["whoami"]);
+    }
+
+    #[test]
+    fn extract_subshell_backtick() {
+        let cmds = extract_subshell_commands("echo `whoami`");
+        assert_eq!(cmds, vec!["whoami"]);
+    }
+
+    #[test]
+    fn extract_subshell_nested() {
+        let cmds = extract_subshell_commands("echo $(echo $(whoami))");
+        // Outer $(...) ) extracts $(echo $(whoami)) and recursively $(whoami)
+        assert_eq!(cmds, vec!["echo $(whoami)", "whoami"]);
+    }
+
+    #[test]
+    fn extract_subshell_multiple() {
+        let cmds = extract_subshell_commands("echo $(whoami) && echo $(date)");
+        assert_eq!(cmds, vec!["whoami", "date"]);
+    }
+
+    #[test]
+    fn extract_subshell_no_match() {
+        let cmds = extract_subshell_commands("echo hello");
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn extract_subshell_var_ref_only() {
+        // $VAR should NOT be extracted
+        let cmds = extract_subshell_commands("echo $HOME");
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn extract_subshell_empty() {
+        let cmds = extract_subshell_commands("");
+        assert!(cmds.is_empty());
     }
 
     #[test]
