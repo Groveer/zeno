@@ -112,7 +112,7 @@ fn load_lua(
     let overrides = lua.create_table()?;
     lua.set_named_registry_value("_rc_overrides", overrides)?;
 
-    // Initialize tools defaults so that `zn.tool("web_fetch", false)`
+    // Initialize tools defaults so that `zn.tools({ web_fetch = false })`
     // only overrides the specific key, not all tools.
     let tools_defaults = lua.create_table()?;
     tools_defaults.set("bash", true)?;
@@ -457,20 +457,7 @@ fn register_zeno_api(lua: &Lua, table: &mlua::Table) -> anyhow::Result<()> {
     )?;
 
     // --- Tools ---
-    // Singular: zn.tool("web_fetch", false)  → quick enable/disable a single tool
-    table.set(
-        "tool",
-        lua.create_function(move |lua, (name, enabled): (String, bool)| {
-            let tools: mlua::Table = get_overrides(lua)?
-                .get::<mlua::Table>("tools")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
-            tools.set(name, enabled)?;
-            get_overrides(lua)?.set("tools", tools)?;
-            Ok(())
-        })?,
-    )?;
-
-    // Plural: zn.tools({...})  → bulk tool config (booleans only)
+    // zn.tools({...})  → bulk tool config (booleans, skip_dirs, bash_env, etc.)
     //   zn.tools({ web_fetch = false, bash = false })
     //
     // Command permissions → zn.commands({ allow=..., ask=..., deny=... })
@@ -588,18 +575,7 @@ fn register_zeno_api(lua: &Lua, table: &mlua::Table) -> anyhow::Result<()> {
     )?;
 
     // --- MCP ---
-    table.set(
-        "mcp_server",
-        lua.create_function(move |lua, (name, opts): (String, mlua::Value)| {
-            let mcp_servers: mlua::Table = get_overrides(lua)?
-                .get::<mlua::Table>("mcp_servers")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
-            mcp_servers.set(name, opts)?;
-            get_overrides(lua)?.set("mcp_servers", mcp_servers)?;
-            Ok(())
-        })?,
-    )?;
-    // Bulk version: zn.mcp_servers({ name1 = {...}, name2 = {...} })
+    // zn.mcp_servers({ name1 = {...}, name2 = {...} })
     table.set(
         "mcp_servers",
         lua.create_function(move |lua, opts: mlua::Table| {
@@ -616,19 +592,8 @@ fn register_zeno_api(lua: &Lua, table: &mlua::Table) -> anyhow::Result<()> {
         })?,
     )?;
 
-    // --- Auxiliary ---
-    table.set(
-        "auxiliary",
-        lua.create_function(move |lua, (task, opts): (String, mlua::Value)| {
-            let auxiliary: mlua::Table = get_overrides(lua)?
-                .get::<mlua::Table>("auxiliary")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
-            auxiliary.set(task, opts)?;
-            get_overrides(lua)?.set("auxiliary", auxiliary)?;
-            Ok(())
-        })?,
-    )?;
-    // Bulk version: zn.auxiliaries({ compression = {...}, vision = {...}, ... })
+    // --- Auxiliary (bulk) ---
+    // zn.auxiliaries({ compression = {...}, vision = {...}, ... })
     table.set(
         "auxiliaries",
         lua.create_function(move |lua, opts: mlua::Table| {
@@ -945,7 +910,7 @@ fn strip_line_prefix(msg: &str, path: &Path) -> String {
 /// mlua serde cannot deserialize i64 → f64, so we walk the auxiliary table
 /// and convert any integer "timeout" keys to float.
 ///
-/// This is called in `build_settings` (not in `zn.auxiliary()`) so that it
+/// This is called in `build_settings` (not in `zn.auxiliaries()`) so that it
 /// handles all code paths, including users constructing tables directly.
 fn coerce_auxiliary_timeouts(lua: &Lua, aux: &mlua::Table) -> anyhow::Result<mlua::Table> {
     let result = lua.create_table()?;
@@ -1069,8 +1034,7 @@ mod tests {
                 default_model = "claude-sonnet-4-20250514",
             })
             zn.set_provider("anthropic")
-            zn.tool("web_fetch", false)
-            zn.tool("bash", false)
+            zn.tools({ web_fetch = false, bash = false })
             return zn.config()
         "#;
         let settings = load_from_tmpdir(init_lua).unwrap();
@@ -1169,10 +1133,8 @@ mod tests {
                 default_model = "claude-sonnet-4-20250514",
             })
             zn.set_provider("anthropic")
-            zn.auxiliary("vision", {
-                provider = "auto",
-                model = "gemini-2.5-flash",
-                timeout = 30,
+            zn.auxiliaries({
+                vision = { provider = "auto", model = "gemini-2.5-flash", timeout = 30 },
             })
             return zn.config()
         "#;
@@ -1528,7 +1490,7 @@ return zn.config()
     }
 
     #[test]
-    fn test_mcp_servers_mixed_bulk_and_individual() {
+    fn test_mcp_servers_bulk() {
         let init_lua = r#"
             local zn = require 'zeno'
             zn.provider("anthropic", {
@@ -1538,9 +1500,7 @@ return zn.config()
             zn.set_provider("anthropic")
             zn.mcp_servers({
                 ["filesystem"] = { command = { "npx", "-y", "server-filesystem", "/tmp" } },
-            })
-            zn.mcp_server("git", {
-                command = { "npx", "-y", "server-git" },
+                ["git"] = { command = { "npx", "-y", "server-git" } },
             })
             return zn.config()
         "#;

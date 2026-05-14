@@ -22,13 +22,15 @@ local zn = require("zeno")
 --
 -- When omitted, api_type defaults to "openai".
 
--- zn.provider("openai", {
---   api_key = "OPENAI_API_KEY",
---   base_url = "https://api.openai.com/v1",
---   default_model = "gpt-4o",
---   -- api_type defaults to "openai", no need to set
--- })
---
+zn.provider("openai", {
+  api_key = "OPENAI_API_KEY",
+  base_url = "https://api.openai.com/v1",
+  default_model = "gpt-4o",
+  -- api_type defaults to "openai", no need to set
+})
+zn.set_provider("openai")
+zn.set_model("gpt-5.5")
+
 -- ═══════════════════════════════════════════════
 -- Tools
 -- ═══════════════════════════════════════════════
@@ -41,38 +43,43 @@ local zn = require("zeno")
 --   glob        = true   (find files by name pattern)
 --   grep        = true   (search file contents)
 --   web_search  = true   (web search queries)
---   web_fetch   = false  (fetch URL content — disabled by default)
+--   web_fetch   = true   (fetch URL content)
+
+-- Disable tools (booleans), skip dirs, bash env — all in one table:
+--   zn.tools({
+--     web_fetch = false,
+--     bash = false,
+--     skip_dirs = { ".turbo", ".nx", "bazel-out" },  -- extra dirs to skip in glob/grep
+--     bash_env = { NODE_ENV = "development" },         -- env vars for every bash call
+--   })
+
+-- ═══════════════════════════════════════════════
+-- Commands
+-- ═══════════════════════════════════════════════
 --
--- Disable unwanted tools:
--- zn.tool("web_fetch", false)
-
--- Set environment variables injected into every bash command execution:
--- zn.bash_env({
---   NODE_ENV = "development",
---   DOCKER_HOST = "unix:///var/run/docker.sock",
--- })
-
--- Bash safety rules (merged with built-in defaults):
---   readonly_commands     — auto-allowed without permission prompt
---   destructive_commands  — always require confirmation in "ask" mode.
---                          Uses **substring matching** (like wildcards), so:
---                            "terraform"    → matches any command with "terraform" anywhere
---                            "git rebase"   → matches "git rebase -i", "git rebase --continue", etc.
---                            "kubectl"      → matches "kubectl delete pod", "kubectl drain node", etc.
--- zn.tools({
---   readonly_commands = { "pnpm list", "just --list", "make -n", "docker ps" },
---   destructive_commands = {
+-- Command permission rules (merged with built-in defaults).
+-- Uses `zn.commands()` — separate from `zn.tools()` for cleaner semantics.
+--
+--   allow  — auto-allowed without permission prompt (read-only commands)
+--   ask    — always require user confirmation in "ask" mode (destructive)
+--   deny   — always blocked, even in "allow" mode
+--
+-- All use **substring matching** (like wildcards), so:
+--   "terraform"     → matches any command with "terraform" anywhere
+--   "git rebase"    → matches "git rebase -i", "git rebase --continue", etc.
+--   "kubectl"       → matches "kubectl delete pod", "kubectl drain node", etc.
+--
+-- zn.commands({
+--   allow = { "pnpm list", "just --list", "make -n", "docker ps" },
+--   ask = {
 --     "terraform",                          -- all terraform commands
 --     "kubectl delete", "kubectl drain",    -- specific kubectl subcommands
 --     "helm uninstall",
 --     "git rebase", "git cherry-pick",      -- destructive git operations
 --     "gh repo delete",                     -- GitHub CLI destructive actions
 --   },
+--   -- deny = { "some-dangerous-cmd" },
 -- })
-
--- Extra directories to skip during glob/grep traversal.
--- Merged with built-in defaults (.git, node_modules, target, vendor, etc.).
--- zn.tools({ skip_dirs = { ".turbo", ".nx", "bazel-out", ".gradle", ".idea" } })
 
 -- ═══════════════════════════════════════════════
 -- Web Search
@@ -99,13 +106,7 @@ local zn = require("zeno")
 -- when the LLM first calls mcp_list_tools or mcp_call_tool on it.
 -- This keeps zeno startup instant regardless of how many servers are configured.
 --
--- Usage flow (LLM sees these 4 meta-tools automatically):
---   1. mcp_list_servers   — see configured servers & status
---   2. mcp_list_tools     — discover tools on a server (triggers connection)
---   3. mcp_describe_tool  — get a tool's parameter schema
---   4. mcp_call_tool      — execute a tool with arguments
---
--- ── Style 1: Bulk table (recommended for multiple servers) ──────
+-- ── Local commands (stdio transport) ──────────────
 --
 -- zn.mcp_servers({
 --   ["filesystem"] = { command = { "npx", "-y", "@modelcontextprotocol/server-filesystem", "/home/user/documents" } },
@@ -116,33 +117,25 @@ local zn = require("zeno")
 --   ["fetch"]      = { command = { "npx", "-y", "@modelcontextprotocol/server-fetch" } },
 -- })
 --
--- ── Style 2: Individual calls (also works, can mix with bulk) ──
+-- ── HTTP transport (remote servers) ───────────────
 --
--- zn.mcp_server("filesystem", {
---   command = { "npx", "-y", "@modelcontextprotocol/server-filesystem", "/home/user/documents" },
--- })
---
--- ── HTTP Transport ─────────────────────────────
---
--- Remote MCP server via HTTP:
--- zn.mcp_server("remote-api", {
---   url = "http://localhost:3000",
--- })
---
--- HTTP with custom headers (API key, Bearer token, etc.):
--- zn.mcp_server("remote-api", {
---   url = "https://api.example.com/mcp",
---   headers = {
---     ["Authorization"] = "Bearer sk-your-token-here",
---     ["X-API-Key"] = "your-api-key",
+-- zn.mcp_servers({
+--   -- Simple HTTP (no auth):
+--   ["local-api"] = { url = "http://localhost:3000" },
+--   -- With custom headers:
+--   ["remote-api"] = {
+--     url = "https://api.example.com/mcp",
+--     headers = {
+--       ["Authorization"] = "Bearer sk-your-token-here",
+--       ["X-API-Key"] = "your-api-key",
+--     },
 --   },
--- })
---
--- GitLab MCP:
--- zn.mcp_server("gitlab", {
---   url = "https://gitlab.com/api/v4/mcp",
---   headers = {
---     ["PRIVATE-TOKEN"] = "glpat-xxxxxxxxxxxx",
+--   -- GitLab MCP:
+--   ["gitlab"] = {
+--     url = "https://gitlab.com/api/v4/mcp",
+--     headers = {
+--       ["PRIVATE-TOKEN"] = "glpat-xxxxxxxxxxxx",
+--     },
 --   },
 -- })
 
@@ -156,96 +149,15 @@ local zn = require("zeno")
 -- url = nil → use the resolved provider's base_url.
 -- api_key = nil → use the resolved provider's api_key.
 
-zn.auxiliary("compression", {
-  provider = "auto",
-  model = "", -- "" = inherit from main model
-  timeout = 30,
+zn.auxiliaries({
+  -- Full fields reference (compression shows all available fields):
+  compression = { provider = "auto", model = "", url = nil, api_key = nil, timeout = 30, max_tokens = 0, temperature = nil },
+  vision = { provider = "auto", model = "", timeout = 30 },
+  web_fetch = { provider = "auto", model = "", timeout = 60 },
+  title_generation = { provider = "auto", model = "", timeout = 30, max_tokens = 256 },
+  session_search = { provider = "auto", model = "", timeout = 30, max_tokens = 1024 },
+  delegation = { provider = "auto", model = "", timeout = 60 },
 })
-
-zn.auxiliary("vision", {
-  provider = "auto",
-  model = "",
-  timeout = 30,
-})
-
-zn.auxiliary("web_fetch", {
-  provider = "auto",
-  model = "",
-  timeout = 60,
-})
-
-zn.auxiliary("title_generation", {
-  provider = "auto",
-  model = "",
-  timeout = 30,
-  max_tokens = 256, -- title is short, save tokens
-})
-
-zn.auxiliary("session_search", {
-  provider = "auto",
-  model = "",
-  timeout = 30,
-  max_tokens = 1024,
-})
-
--- Sub-agent delegation (delegate_task tool):
--- Controls which provider/model sub-agents use when spawned via delegate_task.
--- When all fields are at defaults (provider="auto", model=""), sub-agents
--- inherit the parent's provider configuration entirely.
---
--- zn.auxiliary("delegation", {
---   provider = "auto",    -- "auto" → use parent's provider; "openai" → use OpenAI
---   model = "",           -- "" → inherit; "gpt-4o-mini" → use a cheaper model
---   url = nil,            -- nil → use resolved provider's base_url
---   api_key = nil,        -- nil → use resolved provider's api_key
---   timeout = 60,
--- })
-
--- Or configure all auxiliary tasks at once with a single table:
--- zn.auxiliaries({
---   compression = { provider = "auto", model = "", timeout = 30 },
---   vision = { provider = "auto", model = "", timeout = 30 },
---   web_fetch = { provider = "auto", model = "", timeout = 60 },
---   title_generation = { provider = "auto", model = "", timeout = 30, max_tokens = 256 },
---   session_search = { provider = "auto", model = "", timeout = 30, max_tokens = 1024 },
---   delegation = { provider = "auto", model = "", timeout = 60 },
--- })
-
--- ── Examples: custom endpoint/credentials for a specific task ──
---
--- Use a different OpenAI-compatible endpoint:
--- zn.auxiliary("compression", {
---   model = "gpt-4o-mini",
---   url = "https://api.openai.com/v1",
---   api_key = "OPENAI_API_KEY",
--- })
---
--- Use a local Ollama instance:
--- zn.auxiliary("compression", {
---   model = "qwen2.5:7b",
---   url = "http://localhost:11434/v1",
--- })
---
--- Use a proxy/reverse-proxy (api_key inherited from active provider):
--- zn.auxiliary("compression", {
---   url = "https://my-proxy.example.com/v1",
--- })
---
--- ── Examples: sub-agent delegation (delegate_task tool) ──────────────
---
--- Route sub-agents to a cheaper model (parent stays on main model):
--- zn.auxiliary("delegation", {
---   model = "gpt-4o-mini",
---   provider = "auto",         -- "auto" = inherit parent's provider
--- })
---
--- Route sub-agents to a completely different provider:
--- zn.auxiliary("delegation", {
---   provider = "openai",
---   model = "gpt-4o-mini",
---   url = "https://api.openai.com/v1",
--- })
-
 -- ═══════════════════════════════════════════════
 -- Model Context Windows
 -- ═══════════════════════════════════════════════
@@ -295,11 +207,7 @@ zn.model_context({
   ["grok"] = 131072,
   -- MiniMax
   ["minimax"] = 204800,
-  -- Kimi / Moonshot
-  ["kimi"] = 131072,
-  ["moonshot"] = 131072,
-  -- StepFun
-  ["stepfun"] = 262144,
+  ["mimo"] = 1024 * 1024,
 })
 
 -- ═══════════════════════════════════════════════
@@ -307,7 +215,7 @@ zn.model_context({
 -- ═══════════════════════════════════════════════
 
 zn.permissions("ask") -- "allow" | "deny" | "ask"
-                     -- Determines behavior for files *outside* trusted paths.
+-- Determines behavior for files *outside* trusted paths.
 
 -- Trusted paths: files under these directories are always allowed,
 -- bypassing both the CWD boundary check and permission prompts.
@@ -397,8 +305,8 @@ zn.plugins_dir("~/.config/zeno/plugins")
 -- MEMORY.md is stored globally at ~/.config/zeno/memory/MEMORY.md
 -- USER.md is stored globally at ~/.config/zeno/USER.md
 
-zn.memory_char_limit(4000)  -- MEMORY.md character limit (default: 4000)
-zn.user_char_limit(2500)    -- USER.md character limit (default: 2500)
+zn.memory_char_limit(4000) -- MEMORY.md character limit (default: 4000)
+zn.user_char_limit(2500) -- USER.md character limit (default: 2500)
 
 -- ── External Memory Providers (Lua script-based) ──────────
 --
