@@ -197,6 +197,7 @@ impl QueryEngine {
     pub async fn query_tui(
         &mut self,
         user_input: &str,
+        image_blocks: Vec<(String, String)>, // (media_type, base64_data)
         sender: &tokio::sync::mpsc::UnboundedSender<UiEvent>,
         cancel: CancellationToken,
     ) -> Result<(), ApiError> {
@@ -227,7 +228,22 @@ impl QueryEngine {
             user_input.to_string()
         };
 
-        self.history.push_user(&effective_input);
+        if image_blocks.is_empty() {
+            self.history.push_user(&effective_input);
+        } else {
+            let mut blocks: Vec<crate::api::types::ContentBlock> =
+                vec![crate::api::types::ContentBlock::Text {
+                    text: effective_input.clone(),
+                }];
+            for (media_type, data) in &image_blocks {
+                blocks.push(crate::api::types::ContentBlock::Image {
+                    media_type: media_type.clone(),
+                    data: data.clone(),
+                    source_path: String::new(),
+                });
+            }
+            self.history.push_user_blocks(blocks);
+        }
 
         // Record user goal in carryover for context preservation
         self.carryover.remember_user_goal(user_input);
@@ -319,10 +335,7 @@ impl QueryEngine {
             let mut last_stop_reason: Option<StopReason> = None;
             let mut last_error: Option<ApiError> = None;
             let max_retries = self.settings.llm.max_retries;
-            let retry_config = RetryConfig {
-                max_retries,
-                ..Default::default()
-            };
+            let retry_config = RetryConfig::default();
 
             'retry: for retry_attempt in 0..=max_retries {
                 // Reset per-attempt state

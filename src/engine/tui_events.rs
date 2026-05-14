@@ -67,6 +67,14 @@ pub enum UiEvent {
     },
     /// An error occurred during streaming.
     Error(String),
+    /// An image was successfully pasted from clipboard (Alt+V).
+    ImagePasted {
+        media_type: String,
+        base64_data: String,
+        size_kb: usize,
+    },
+    /// Image paste failed (no image in clipboard or tool unavailable).
+    ImagePasteFailed,
 }
 
 /// Convenience type alias for the event sender half.

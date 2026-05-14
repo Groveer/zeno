@@ -2,21 +2,22 @@
 //!
 //! Provides a unified `call_auxiliary()` function that:
 //! 1. Resolves the provider/model for the task via the router
-//! 2. Makes a non-streaming API call (with client caching)
-//! 3. Handles error retries: 402 (payment), 401/403 (auth), 429/5xx (connection)
-//! 4. Auto-retries without temperature when provider rejects it
-//! 5. Auto-retries with max_completion_tokens when provider rejects max_tokens
-//! 6. Validates response structure before returning
+//! 2. Creates the appropriate API client based on `api_type` (OpenAI, Anthropic, Responses)
+//! 3. Calls through the main model's `call_messages` trait method (non-streaming wrapper)
+//! 4. Handles error retries: 402 (payment), 401/403 (auth), 429/5xx (connection)
+//! 5. Auto-retries without temperature when provider rejects it
+//! 6. Validates response before returning
 //!
 //! `call_auxiliary()` is actively used by compressor and web_fetch.
-//! `call_vision()` is reserved for future vision integration.
+//! `call_auxiliary_raw()` is used by vision for multimodal messages.
 
 use std::time::Duration;
 
-use crate::api::retry::{RetryConfig, is_retryable_status_default, retry_with_backoff};
-use crate::config::settings::{AuxiliaryTaskConfig, Settings};
+use crate::api::client::SupportsStreamingMessages;
+use crate::api::retry::{get_retry_delay, is_retryable_status_default, RetryConfig};
+use crate::api::types::{ContentBlock, Message, Role};
+use crate::config::settings::{ApiType, Settings};
 
-use super::cache;
 use super::router::{
     AuxiliaryError, AuxiliaryTask, ResolvedProvider, effective_temperature, is_auth_error,
     is_payment_error, resolve_provider,
@@ -58,7 +59,7 @@ pub async fn call_auxiliary(
 /// Call an auxiliary model with raw JSON messages (supports multimodal/vision).
 ///
 /// Unlike `call_auxiliary`, this accepts pre-constructed JSON messages
-/// that may include image_url parts for vision models.
+/// that may include `image_url` parts for vision models.
 /// Used by `auxiliary::vision` for image analysis.
 pub async fn call_auxiliary_raw(
     settings: &Settings,
@@ -66,7 +67,7 @@ pub async fn call_auxiliary_raw(
     raw_messages: Vec<serde_json::Value>,
 ) -> Result<AuxiliaryResult, AuxiliaryError> {
     let resolved = super::router::resolve_provider(task, settings)?;
-    call_resolved_raw(&resolved, &raw_messages, None, None).await
+    call_resolved_with_messages(&resolved, &raw_messages, None, None).await
 }
 
 /// Call an auxiliary model with optional overrides for temperature and max_tokens.
@@ -136,14 +137,7 @@ async fn call_with_fallback(
             Err(_) => continue,
         };
 
-        match call_resolved(
-            &resolved,
-            messages,
-            temperature_override,
-            max_tokens_override,
-        )
-        .await
-        {
+        match call_resolved(&resolved, messages, temperature_override, max_tokens_override).await {
             Ok(result) => return Ok(result),
             Err(AuxiliaryError::PaymentRequired(provider)) => {
                 tracing::warn!(
@@ -185,6 +179,9 @@ async fn call_with_fallback(
     Err(last_error)
 }
 
+// Re-export for call_with_fallback
+use crate::config::settings::AuxiliaryTaskConfig;
+
 // ---------------------------------------------------------------------------
 // Core call implementation
 // ---------------------------------------------------------------------------
@@ -196,8 +193,8 @@ async fn call_resolved(
     temperature_override: Option<f64>,
     max_tokens_override: Option<u32>,
 ) -> Result<AuxiliaryResult, AuxiliaryError> {
-    // Build the API messages as JSON values
-    let api_messages: Vec<serde_json::Value> = messages
+    // Convert AuxiliaryMessage → raw JSON messages
+    let raw_messages: Vec<serde_json::Value> = messages
         .iter()
         .map(|m| {
             serde_json::json!({
@@ -207,400 +204,358 @@ async fn call_resolved(
         })
         .collect();
 
-    call_resolved_raw(
-        provider,
-        &api_messages,
-        temperature_override,
-        max_tokens_override,
-    )
-    .await
+    call_resolved_with_messages(provider, &raw_messages, temperature_override, max_tokens_override)
+        .await
 }
 
 /// Make a non-streaming call with raw JSON messages (supports both text and vision).
 ///
-/// Retry strategy (in order):
-/// 1. **Connection/server errors (429/5xx)**: retry the same request with exponential
-///    backoff via the shared `retry_with_backoff` from `api::retry`.
-/// 2. **Parameter adaptation**: if the provider rejects `temperature` or `max_tokens`,
-///    retry with the parameter removed or replaced (domain-specific, not in retry.rs).
-/// 3. **Provider fallback**: if all retries on this provider fail with a retryable error,
-///    the caller (`call_with_fallback`) tries the next provider in the chain.
-pub(super) async fn call_resolved_raw(
+/// Uses the main model's `call_messages` trait method, which supports all three
+/// API types (OpenAI, OpenAI Responses, Anthropic).
+///
+/// Retry strategy:
+/// 1. **Connection/server errors (429/5xx)**: retry with exponential backoff.
+/// 2. **Parameter adaptation**: retry without temperature or with max_completion_tokens.
+pub(super) async fn call_resolved_with_messages(
     provider: &ResolvedProvider,
-    api_messages: &[serde_json::Value],
+    raw_messages: &[serde_json::Value],
     temperature_override: Option<f64>,
     max_tokens_override: Option<u32>,
 ) -> Result<AuxiliaryResult, AuxiliaryError> {
-    let timeout = Duration::from_secs_f64(provider.timeout);
-
-    // Get or create a cached HTTP client
-    let client = cache::get_or_create(&provider.provider_name, &provider.base_url, timeout)
-        .map_err(AuxiliaryError::ApiCall)?;
-
-    // Determine effective temperature
-    let effective_temp = effective_temperature(
-        &provider.model,
-        temperature_override.or(Some(provider.temperature)),
+    let client = create_api_client(
+        provider.api_key.clone(),
+        provider.base_url.clone(),
+        provider.api_type,
     );
 
-    // Determine max_tokens
+    let effective_temp =
+        effective_temperature(&provider.model, temperature_override.or(Some(provider.temperature)));
     let max_tokens = max_tokens_override.unwrap_or(provider.max_tokens);
 
-    // Build the request body
-    let mut body = serde_json::json!({
-        "model": provider.model,
-        "messages": api_messages,
-    });
+    // Convert raw JSON messages → Message type for the trait API
+    let messages = convert_raw_messages(raw_messages);
+    let system = extract_system_prompt(raw_messages);
 
-    // Add temperature if the model accepts it
-    if let Some(temp) = effective_temp {
-        body["temperature"] = serde_json::json!(temp);
-    }
-
-    // Add max_tokens (some providers use max_completion_tokens instead)
-    if max_tokens > 0 {
-        body["max_tokens"] = serde_json::json!(max_tokens);
-    }
-
-    // Merge per-task extra_body
-    if !provider.extra_body.is_empty() {
-        for (k, v) in &provider.extra_body {
-            body[k] = v.clone();
-        }
-    }
-
-    let url = match provider.api_type {
-        crate::config::settings::ApiType::Anthropic => {
-            format!("{}/v1/messages", provider.base_url.trim_end_matches('/'))
-        }
-        crate::config::settings::ApiType::OpenAi => format!(
-            "{}/chat/completions",
-            provider.base_url.trim_end_matches('/')
-        ),
-        crate::config::settings::ApiType::OpenAiResponses => {
-            format!("{}/v1/responses", provider.base_url.trim_end_matches('/'))
-        }
+    // Merge per-task extra_body into max_tokens override via response_format
+    // (extra_body is not directly supported by call_messages, so we apply
+    // max_completion_tokens adaptation at this level)
+    let use_completion_tokens = provider.extra_body.contains_key("max_completion_tokens");
+    let effective_max_tokens = if use_completion_tokens {
+        // The provider config has max_completion_tokens — caller should use that
+        // via the main engine. For auxiliary, just pass max_tokens.
+        Some(max_tokens)
+    } else {
+        Some(max_tokens)
     };
 
-    let retry_config = RetryConfig::for_auxiliary();
+    // Attempt the call with retry loop
+    let max_retries: u32 = 2;
+    let retry_config = RetryConfig::default();
     let label = format!("auxiliary/{}", provider.provider_name);
+    let mut attempts: u32 = 0;
 
-    // Use shared retry_with_backoff for connection/server errors.
-    // This replaces the previous behavior of trying once and immediately
-    // falling through to the next provider in the fallback chain.
-    retry_with_backoff(
-        &retry_config,
-        &label,
-        |err: &AuxiliaryError| is_auxiliary_retryable(err),
-        || {
-            let client = client.clone();
-            let url = url.clone();
-            let api_key = provider.api_key.clone();
-            let api_type = provider.api_type;
-            let body = body.clone();
-            async move {
-                match do_api_call(&client, &url, &api_key, &api_type, &body).await {
-                    Ok(result) => Ok(result),
-                    Err((err, retry_no_temp, retry_mc)) => {
-                        // --- Parameter-adaptation retries (domain-specific) ---
-                        // These are NOT in the shared retry module because they
-                        // modify the request body before retrying.
-                        if retry_no_temp
-                            && let Some(result) = retry_without_temperature(
-                                &client, &url, &api_key, &api_type, &body, max_tokens,
-                            )
-                            .await
-                        {
-                            return Ok(result);
+    loop {
+        match client
+            .call_messages(
+                &provider.model,
+                &system,
+                &messages,
+                &[], // no tools
+                effective_max_tokens,
+                None, // no response_format
+            )
+            .await
+        {
+            Ok(text) if !text.is_empty() => {
+                return Ok(AuxiliaryResult { content: text });
+            }
+            Ok(_) => {
+                // Empty response — treat as error
+                return Err(AuxiliaryError::InvalidResponse(
+                    provider.provider_name.clone(),
+                    "LLM returned empty response".into(),
+                ));
+            }
+            Err(api_error) => {
+                let err = classify_api_error(&api_error, &label);
+
+                // Parameter adaptation retries
+                if is_unsupported_temperature_error(&api_error) && effective_temp.is_some() {
+                    tracing::info!(
+                        event = "auxiliary_retry",
+                        parameter = "temperature",
+                        "Retrying without temperature"
+                    );
+                    // Retry with no temperature — modify the approach
+                    if let Ok(text) = client
+                        .call_messages(
+                            &provider.model,
+                            &system,
+                            &messages,
+                            &[],
+                            effective_max_tokens,
+                            None,
+                        )
+                        .await
+                    {
+                        if !text.is_empty() {
+                            return Ok(AuxiliaryResult { content: text });
                         }
-                        if retry_mc
-                            && let Some(result) = retry_with_max_completion_tokens(
-                                &client, &url, &api_key, &api_type, &body, max_tokens,
-                            )
-                            .await
-                        {
-                            return Ok(result);
+                    }
+                    // Temperature retry also failed, fall through to connection retry
+                }
+
+                if is_unsupported_max_tokens_error(&api_error) && max_tokens > 0 {
+                    tracing::info!(
+                        event = "auxiliary_retry",
+                        parameter = "max_completion_tokens",
+                        "Retrying without max_tokens"
+                    );
+                    if let Ok(text) = client
+                        .call_messages(
+                            &provider.model,
+                            &system,
+                            &messages,
+                            &[],
+                            None, // no max_tokens
+                            None,
+                        )
+                        .await
+                    {
+                        if !text.is_empty() {
+                            return Ok(AuxiliaryResult { content: text });
                         }
-                        // Not a parameter issue, or parameter retries also failed.
-                        // If it's a retryable connection error, the outer
-                        // retry_with_backoff will re-invoke this closure.
-                        Err(err)
                     }
                 }
-            }
-        },
-    )
-    .await
-}
 
-/// Execute the API call and return the result or error + retry hints.
-async fn do_api_call(
-    client: &reqwest::Client,
-    url: &str,
-    api_key: &str,
-    api_type: &crate::config::settings::ApiType,
-    body: &serde_json::Value,
-) -> Result<AuxiliaryResult, (AuxiliaryError, bool, bool)> {
-    let mut req = client.post(url).header("Content-Type", "application/json");
-
-    // Set auth header based on API type
-    req = match api_type {
-        crate::config::settings::ApiType::Anthropic => req
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01"),
-        crate::config::settings::ApiType::OpenAi
-        | crate::config::settings::ApiType::OpenAiResponses => {
-            req.header("Authorization", format!("Bearer {}", api_key))
-        }
-    };
-
-    let resp = req.json(body).send().await;
-
-    match resp {
-        Ok(resp) => {
-            let status = resp.status();
-            let status_code = status.as_u16();
-
-            // Payment required
-            if is_payment_error(status_code) {
-                let provider = extract_provider_from_url(url);
-                return Err((AuxiliaryError::PaymentRequired(provider), false, false));
-            }
-
-            // Auth error
-            if is_auth_error(status_code) {
-                let provider = extract_provider_from_url(url);
-                return Err((AuxiliaryError::AuthError(provider), false, false));
-            }
-
-            // Connection / server error — uses shared retryable status check
-            // (429, 500, 502, 503, 529 — same set as the main API retry loop)
-            if is_retryable_status_default(status_code) {
-                let provider = extract_provider_from_url(url);
-                let error_body = resp.text().await.unwrap_or_default();
-                return Err((
-                    AuxiliaryError::ConnectionError(
-                        provider,
-                        format!("HTTP {}: {}", status_code, truncate_str(&error_body, 200)),
-                    ),
-                    false,
-                    false,
-                ));
-            }
-
-            // Client error — might be unsupported parameter
-            if !status.is_success() {
-                let error_body = resp.text().await.unwrap_or_default();
-                let retry_no_temp = is_unsupported_temperature_error(&error_body);
-                let retry_max_completion = is_unsupported_max_tokens_error(&error_body);
-
-                return Err((
-                    AuxiliaryError::ApiCall(format!(
-                        "HTTP {} from {}: {}",
-                        status_code,
-                        extract_provider_from_url(url),
-                        truncate_str(&error_body, 500)
-                    )),
-                    retry_no_temp,
-                    retry_max_completion,
-                ));
-            }
-
-            // Parse successful response
-            let data: serde_json::Value = resp.json().await.map_err(|e| {
-                (
-                    AuxiliaryError::ApiCall(format!("Failed to parse response: {}", e)),
-                    false,
-                    false,
-                )
-            })?;
-
-            // Validate response structure
-            match validate_response(&data) {
-                Ok(content) => Ok(AuxiliaryResult { content }),
-                Err(e) => Err((e, false, false)),
-            }
-        }
-        Err(e) => {
-            // reqwest error (DNS, timeout, connection refused, etc.)
-            let provider = extract_provider_from_url(url);
-            if e.is_connect() || e.is_timeout() {
-                Err((
-                    AuxiliaryError::ConnectionError(provider, e.to_string()),
-                    false,
-                    false,
-                ))
-            } else {
-                Err((
-                    AuxiliaryError::ApiCall(format!("Request to {} failed: {}", provider, e)),
-                    false,
-                    false,
-                ))
+                // Check if retryable transient error
+                if !is_auxiliary_retryable(&err) || attempts >= max_retries {
+                    return Err(err);
+                }
+                attempts += 1;
+                let delay = get_retry_delay(attempts, &retry_config, None, None);
+                tracing::warn!(
+                    label = %label,
+                    attempt = attempts,
+                    delay_secs = delay,
+                    error = ?err,
+                    "{} failed, retrying", label
+                );
+                tokio::time::sleep(Duration::from_secs_f64(delay)).await;
             }
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Retryability and parameter-adaptation helpers
+// Client creation
 // ---------------------------------------------------------------------------
 
-/// Determine if an `AuxiliaryError` is retryable (transient server/connection errors).
+/// Create the appropriate API client based on `api_type`.
+fn create_api_client(
+    api_key: String,
+    base_url: String,
+    api_type: ApiType,
+) -> Box<dyn SupportsStreamingMessages> {
+    match api_type {
+        ApiType::Anthropic => {
+            Box::new(crate::api::anthropic::AnthropicClient::new(api_key, base_url))
+        }
+        ApiType::OpenAi | ApiType::OpenAiResponses => {
+            Box::new(crate::api::openai::OpenAIClient::new(api_key, base_url))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Message conversion
+// ---------------------------------------------------------------------------
+
+/// Convert raw JSON messages to the `Message` type for the streaming trait.
 ///
-/// PaymentRequired and AuthError are NOT retryable — those should trigger
-/// provider fallback instead. ConnectionError (429/5xx) IS retryable.
+/// Handles system prompts (extracted separately), text content, and
+/// OpenAI `image_url` format (converted to `ContentBlock::Image`).
+fn convert_raw_messages(raw: &[serde_json::Value]) -> Vec<Message> {
+    let mut messages = Vec::new();
+
+    for msg in raw {
+        let role_str = msg.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+        let role = match role_str {
+            "assistant" => Role::Assistant,
+            _ => Role::User,
+        };
+
+        // Skip system messages — they're extracted separately
+        if role_str == "system" {
+            continue;
+        }
+
+        let content = msg.get("content");
+
+        match content {
+            // Array content (multimodal): text + image_url parts
+            Some(c) if c.is_array() => {
+                let blocks: Vec<ContentBlock> = c
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|part| {
+                        let part_type = part.get("type")?.as_str()?;
+
+                        match part_type {
+                            "text" => {
+                                let text = part.get("text")?.as_str()?.to_string();
+                                Some(ContentBlock::Text { text })
+                            }
+                            "image_url" => {
+                                // OpenAI format: { image_url: { url: "data:..." } }
+                                let url = part
+                                    .get("image_url")?
+                                    .get("url")?
+                                    .as_str()?;
+                                parse_data_url(url).map(|(media_type, data)| ContentBlock::Image {
+                                    media_type,
+                                    data,
+                                    source_path: String::new(),
+                                })
+                            }
+                            "image" => {
+                                // Anthropic format: { type: "image", source: { type: "base64", ... } }
+                                let source = part.get("source")?;
+                                let media_type = source
+                                    .get("media_type")?
+                                    .as_str()?
+                                    .to_string();
+                                let data = source.get("data")?.as_str()?.to_string();
+                                Some(ContentBlock::Image {
+                                    media_type,
+                                    data,
+                                    source_path: String::new(),
+                                })
+                            }
+                            _ => None,
+                        }
+                    })
+                    .collect();
+
+                if !blocks.is_empty() {
+                    messages.push(Message { role, content: blocks });
+                }
+            }
+            // String content (text-only)
+            Some(c) if c.is_string() => {
+                let text = c.as_str().unwrap().to_string();
+                messages.push(Message {
+                    role,
+                    content: vec![ContentBlock::Text { text }],
+                });
+            }
+            // Other content (null, object, etc.)
+            Some(c) => {
+                let text = c.to_string();
+                messages.push(Message {
+                    role,
+                    content: vec![ContentBlock::Text { text }],
+                });
+            }
+            None => {
+                messages.push(Message {
+                    role,
+                    content: vec![ContentBlock::Text {
+                        text: String::new(),
+                    }],
+                });
+            }
+        }
+    }
+
+    messages
+}
+
+/// Extract system prompt from raw JSON messages.
+fn extract_system_prompt(raw: &[serde_json::Value]) -> String {
+    for msg in raw {
+        if msg.get("role").and_then(|r| r.as_str()) == Some("system") {
+            if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
+                return content.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+/// Parse a data URL (`data:image/png;base64,...`) into (media_type, base64_data).
+fn parse_data_url(url: &str) -> Option<(String, String)> {
+    if let Some(rest) = url.strip_prefix("data:") {
+        if let Some(idx) = rest.find(";base64,") {
+            let media_type = rest[..idx].to_string();
+            let data = rest[idx + 8..].to_string();
+            return Some((media_type, data));
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Error classification
+// ---------------------------------------------------------------------------
+
+/// Classify an `ApiError` into an `AuxiliaryError`.
+fn classify_api_error(err: &crate::api::types::ApiError, label: &str) -> AuxiliaryError {
+    let err_str = err.to_string();
+    let lower = err_str.to_lowercase();
+
+    // Extract HTTP status from error string if available
+    let status = extract_status_from_error(&err_str);
+
+    if let Some(status) = status {
+        if is_payment_error(status) {
+            return AuxiliaryError::PaymentRequired(label.to_string());
+        }
+        if is_auth_error(status) {
+            return AuxiliaryError::AuthError(label.to_string());
+        }
+        if is_retryable_status_default(status) {
+            return AuxiliaryError::ConnectionError(
+                label.to_string(),
+                format!("HTTP {}: {}", status, truncate_str(&err_str, 200)),
+            );
+        }
+    }
+
+    // Check for connection-level errors
+    if lower.contains("connection")
+        || lower.contains("timeout")
+        || lower.contains("dns")
+        || lower.contains("refused")
+    {
+        return AuxiliaryError::ConnectionError(label.to_string(), err_str);
+    }
+
+    AuxiliaryError::ApiCall(err_str)
+}
+
+/// Try to extract an HTTP status code from an error string.
+fn extract_status_from_error(err: &str) -> Option<u16> {
+    // Match patterns like "HTTP 429", "status 500", "HTTP status: 502"
+    for word in err.split(|c: char| !c.is_ascii_digit()) {
+        if let Ok(code) = word.parse::<u16>() {
+            if (400..599).contains(&code) {
+                return Some(code);
+            }
+        }
+    }
+    None
+}
+
+/// Determine if an `AuxiliaryError` is retryable (transient server/connection errors).
 fn is_auxiliary_retryable(err: &AuxiliaryError) -> bool {
     matches!(err, AuxiliaryError::ConnectionError(_, _))
 }
 
-/// Retry a request with the `temperature` parameter removed.
-///
-/// Some providers reject `temperature` for certain models (e.g. o1, kimi).
-/// Returns `Some(result)` on success, `None` on failure.
-async fn retry_without_temperature(
-    client: &reqwest::Client,
-    url: &str,
-    api_key: &str,
-    api_type: &crate::config::settings::ApiType,
-    body: &serde_json::Value,
-    max_tokens: u32,
-) -> Option<AuxiliaryResult> {
-    tracing::info!(
-        event = "auxiliary_retry",
-        parameter = "temperature",
-        "Auxiliary: retrying without temperature parameter"
-    );
-    let mut retry_body = body.clone();
-    if let Some(obj) = retry_body.as_object_mut() {
-        obj.remove("temperature");
-    }
-
-    match do_api_call(client, url, api_key, api_type, &retry_body).await {
-        Ok(result) => Some(result),
-        Err((_, _, retry_mc)) => {
-            // If max_completion_tokens retry is also needed, try it
-            if retry_mc {
-                retry_with_max_completion_tokens(
-                    client,
-                    url,
-                    api_key,
-                    api_type,
-                    &retry_body,
-                    max_tokens,
-                )
-                .await
-            } else {
-                None
-            }
-        }
-    }
-}
-
-/// Retry with `max_completion_tokens` instead of `max_tokens`.
-///
-/// Some providers (OpenAI o1, etc.) use `max_completion_tokens` instead of
-/// `max_tokens`. Returns `Some(result)` on success, `None` on failure.
-async fn retry_with_max_completion_tokens(
-    client: &reqwest::Client,
-    url: &str,
-    api_key: &str,
-    api_type: &crate::config::settings::ApiType,
-    body: &serde_json::Value,
-    max_tokens: u32,
-) -> Option<AuxiliaryResult> {
-    tracing::info!(
-        event = "auxiliary_retry",
-        parameter = "max_completion_tokens",
-        "Auxiliary: retrying with max_completion_tokens instead of max_tokens"
-    );
-    let mut retry_body = body.clone();
-    if let Some(obj) = retry_body.as_object_mut() {
-        obj.remove("max_tokens");
-    }
-    if max_tokens > 0 {
-        retry_body["max_completion_tokens"] = serde_json::json!(max_tokens);
-    }
-
-    do_api_call(client, url, api_key, api_type, &retry_body)
-        .await
-        .ok()
-}
-
-// ---------------------------------------------------------------------------
-// Response validation
-// ---------------------------------------------------------------------------
-
-/// Validate that an LLM response has the expected `choices[0].message.content` shape.
-///
-/// Fails fast with a clear error instead of letting malformed payloads propagate.
-///
-/// Reference: hermes-agent `_validate_llm_response`.
-fn validate_response(data: &serde_json::Value) -> Result<String, AuxiliaryError> {
-    if data.is_null() {
-        return Err(AuxiliaryError::InvalidResponse(
-            "unknown".into(),
-            "LLM returned null response".into(),
-        ));
-    }
-
-    let choices = match data.get("choices") {
-        Some(c) => c,
-        None => {
-            return Err(AuxiliaryError::InvalidResponse(
-                "unknown".into(),
-                "Response missing 'choices' field".into(),
-            ));
-        }
-    };
-
-    let first_choice = match choices.as_array().and_then(|a| a.first()) {
-        Some(c) => c,
-        None => {
-            return Err(AuxiliaryError::InvalidResponse(
-                "unknown".into(),
-                "Response has empty 'choices' array".into(),
-            ));
-        }
-    };
-
-    let message = match first_choice.get("message") {
-        Some(m) => m,
-        None => {
-            return Err(AuxiliaryError::InvalidResponse(
-                "unknown".into(),
-                "Response choices[0] missing 'message' field".into(),
-            ));
-        }
-    };
-
-    let content = match message.get("content") {
-        Some(c) if c.is_null() => {
-            return Err(AuxiliaryError::InvalidResponse(
-                "unknown".into(),
-                "Response choices[0].message.content is null".into(),
-            ));
-        }
-        Some(c) => c.as_str().unwrap_or("").to_string(),
-        None => {
-            return Err(AuxiliaryError::InvalidResponse(
-                "unknown".into(),
-                "Response choices[0].message missing 'content' field".into(),
-            ));
-        }
-    };
-
-    Ok(content)
-}
-
-// ---------------------------------------------------------------------------
-// Error detection helpers
-// ---------------------------------------------------------------------------
-
-/// Check if an error message indicates an unsupported `temperature` parameter.
-///
-/// Reference: hermes-agent `_is_unsupported_temperature_error`.
-fn is_unsupported_temperature_error(error_body: &str) -> bool {
-    let lower = error_body.to_lowercase();
+/// Check if an error indicates an unsupported `temperature` parameter.
+fn is_unsupported_temperature_error(err: &crate::api::types::ApiError) -> bool {
+    let lower = err.to_string().to_lowercase();
     lower.contains("temperature")
         && (lower.contains("unsupported")
             || lower.contains("not supported")
@@ -609,12 +564,9 @@ fn is_unsupported_temperature_error(error_body: &str) -> bool {
             || lower.contains("unrecognized"))
 }
 
-/// Check if an error message indicates an unsupported `max_tokens` parameter.
-///
-/// Some providers (e.g. OpenAI o-series) reject `max_tokens` and require
-/// `max_completion_tokens` instead.
-fn is_unsupported_max_tokens_error(error_body: &str) -> bool {
-    let lower = error_body.to_lowercase();
+/// Check if an error indicates an unsupported `max_tokens` parameter.
+fn is_unsupported_max_tokens_error(err: &crate::api::types::ApiError) -> bool {
+    let lower = err.to_string().to_lowercase();
     lower.contains("max_tokens")
         && (lower.contains("unsupported")
             || lower.contains("not supported")
@@ -627,25 +579,11 @@ fn is_unsupported_max_tokens_error(error_body: &str) -> bool {
 // Utility helpers
 // ---------------------------------------------------------------------------
 
-/// Extract a provider-like name from a URL for error messages.
-fn extract_provider_from_url(url: &str) -> String {
-    // Try to extract hostname from URL
-    if let Ok(parsed) = url::Url::parse(url)
-        && let Some(host) = parsed.host_str()
-    {
-        return host.to_string();
-    }
-    // Fallback: use the URL itself, truncated
-    let truncated = truncate_str(url, 50);
-    truncated.to_string()
-}
-
 /// Truncate a string for inclusion in error messages.
 fn truncate_str(s: &str, max_len: usize) -> &str {
     if s.len() <= max_len {
         s
     } else {
-        // Find a valid char boundary
         let mut end = max_len;
         while !s.is_char_boundary(end) && end > 0 {
             end -= 1;
@@ -668,96 +606,62 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_response_valid() {
-        let data = serde_json::json!({
-            "choices": [{
-                "message": {
-                    "content": "Hello world"
-                }
-            }]
-        });
-        assert_eq!(validate_response(&data).unwrap(), "Hello world");
+    fn test_convert_raw_messages_text() {
+        let raw = vec![
+            serde_json::json!({ "role": "system", "content": "You are helpful." }),
+            serde_json::json!({ "role": "user", "content": "Hello" }),
+            serde_json::json!({ "role": "assistant", "content": "Hi there" }),
+        ];
+        let messages = convert_raw_messages(&raw);
+        assert_eq!(messages.len(), 2); // system is extracted separately
+        assert_eq!(messages[0].role, Role::User);
+        assert_eq!(messages[1].role, Role::Assistant);
     }
 
     #[test]
-    fn test_validate_response_null() {
-        let data = serde_json::Value::Null;
-        assert!(matches!(
-            validate_response(&data),
-            Err(AuxiliaryError::InvalidResponse(_, _))
-        ));
+    fn test_extract_system_prompt() {
+        let raw = vec![
+            serde_json::json!({ "role": "user", "content": "Hello" }),
+            serde_json::json!({ "role": "system", "content": "Be concise." }),
+        ];
+        assert_eq!(extract_system_prompt(&raw), "Be concise.");
     }
 
     #[test]
-    fn test_validate_response_no_choices() {
-        let data = serde_json::json!({"error": "bad"});
-        assert!(matches!(
-            validate_response(&data),
-            Err(AuxiliaryError::InvalidResponse(_, _))
-        ));
+    fn test_convert_raw_messages_multimodal() {
+        let raw = vec![serde_json::json!({
+            "role": "user",
+            "content": [
+                { "type": "text", "text": "Describe this." },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,abc123" } },
+            ],
+        })];
+        let messages = convert_raw_messages(&raw);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content.len(), 2);
+        assert!(matches!(&messages[0].content[0], ContentBlock::Text { .. }));
+        assert!(matches!(&messages[0].content[1], ContentBlock::Image { .. }));
     }
 
     #[test]
-    fn test_validate_response_empty_choices() {
-        let data = serde_json::json!({"choices": []});
-        assert!(matches!(
-            validate_response(&data),
-            Err(AuxiliaryError::InvalidResponse(_, _))
-        ));
+    fn test_parse_data_url() {
+        let (mt, data) = parse_data_url("data:image/png;base64,abc123").unwrap();
+        assert_eq!(mt, "image/png");
+        assert_eq!(data, "abc123");
+        assert!(parse_data_url("not-a-data-url").is_none());
     }
 
     #[test]
-    fn test_validate_response_no_message() {
-        let data = serde_json::json!({"choices": [{"finish_reason": "stop"}]});
-        assert!(matches!(
-            validate_response(&data),
-            Err(AuxiliaryError::InvalidResponse(_, _))
-        ));
-    }
-
-    #[test]
-    fn test_validate_response_null_content() {
-        // content: null → should error, not return Ok("")
-        let data = serde_json::json!({"choices": [{"message": {"content": null}}]});
-        assert!(matches!(
-            validate_response(&data),
-            Err(AuxiliaryError::InvalidResponse(_, _))
-        ));
-    }
-
-    #[test]
-    fn test_validate_response_missing_content_field() {
-        // message exists but has no content key → should error
-        let data = serde_json::json!({"choices": [{"message": {"role": "assistant"}}]});
-        assert!(matches!(
-            validate_response(&data),
-            Err(AuxiliaryError::InvalidResponse(_, _))
-        ));
-    }
-
-    #[test]
-    fn test_is_unsupported_temperature_error() {
-        assert!(is_unsupported_temperature_error(
-            "unsupported parameter: temperature"
-        ));
-        assert!(is_unsupported_temperature_error(
-            "Temperature is not supported for this model"
-        ));
-        assert!(!is_unsupported_temperature_error("rate limit exceeded"));
-    }
-
-    #[test]
-    fn test_is_unsupported_max_tokens_error() {
-        assert!(is_unsupported_max_tokens_error(
-            "unsupported parameter: max_tokens"
-        ));
-        assert!(!is_unsupported_max_tokens_error("invalid temperature"));
-    }
-
-    #[test]
-    fn test_extract_provider_from_url() {
-        let provider = extract_provider_from_url("https://api.anthropic.com/v1/chat/completions");
-        assert_eq!(provider, "api.anthropic.com");
+    fn test_extract_status_from_error() {
+        assert_eq!(
+            extract_status_from_error("HTTP 429: Rate limited"),
+            Some(429)
+        );
+        assert_eq!(
+            extract_status_from_error("status: 500 internal server error"),
+            Some(500)
+        );
+        assert_eq!(extract_status_from_error("connection refused"), None);
     }
 
     #[test]

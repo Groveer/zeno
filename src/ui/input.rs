@@ -969,6 +969,7 @@ pub fn render(
     area: Rect,
     state: &InputState,
     mode: &super::status_bar::AppMode,
+    pending_image_count: usize,
 ) {
     let (border_color, prompt, display_text, text_color): (Color, &str, Cow<str>, Color) =
         match mode {
@@ -1080,8 +1081,13 @@ pub fn render(
 
     frame.render_widget(p, content_area);
 
-    // Draw border
-    draw_border(frame, area, border_color);
+    // Draw border with pending image indicator
+    let image_suffix = if pending_image_count > 0 {
+        format!(" 📷{} ", pending_image_count)
+    } else {
+        String::new()
+    };
+    draw_border(frame, area, border_color, &image_suffix);
 
     // Draw completion popup if active
     if let Some(ref popup) = state.popup {
@@ -1140,19 +1146,29 @@ fn render_popup(frame: &mut Frame, input_area: Rect, popup: &CompletionPopup) {
     frame.render_widget(p, popup_area);
 }
 
-fn draw_border(frame: &mut Frame, area: Rect, color: Color) {
+fn draw_border(frame: &mut Frame, area: Rect, color: Color, suffix: &str) {
     let style = Style::new().fg(color);
+    let suffix_style = Style::new().fg(theme::WARNING);
 
-    // Top border
+    // Top border with optional right-aligned suffix
+    let border_width = area.width as usize;
+    let suffix_display_width = crate::utils::display_width(suffix);
+    let border_chars = "─".repeat(border_width.saturating_sub(suffix_display_width));
+    let line = if suffix.is_empty() {
+        Line::from(vec![Span::styled(border_chars, style)])
+    } else {
+        Line::from(vec![
+            Span::styled(border_chars, style),
+            Span::styled(suffix.to_string(), suffix_style),
+        ])
+    };
+
     let top = Rect {
         y: area.y,
         height: 1,
         ..area
     };
-    frame.render_widget(
-        Paragraph::new(Line::from("─".repeat(area.width as usize))).style(style),
-        top,
-    );
+    frame.render_widget(Paragraph::new(line), top);
 }
 
 // ── Session history persistence ──

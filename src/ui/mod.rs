@@ -1,4 +1,5 @@
 pub mod app;
+pub mod clipboard;
 pub mod input;
 pub mod markdown;
 pub mod output;

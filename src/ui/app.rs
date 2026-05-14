@@ -117,6 +117,9 @@ pub struct App {
     sub_agent_tx: tokio::sync::mpsc::UnboundedSender<SubAgentEvent>,
     /// Shared todo state for the side panel.
     todo_state: Option<std::sync::Arc<tokio::sync::Mutex<TodoState>>>,
+    /// Pending images pasted via Alt+V, waiting to be attached to the next message.
+    /// Each entry is (media_type, base64_data).
+    pending_images: Vec<(String, String)>,
 }
 
 /// A queued permission request waiting for user response.
@@ -170,6 +173,7 @@ impl App {
             sub_agent_tx,
             todo_state: None,
             _watcher_guard: None,
+            pending_images: Vec::new(),
         }
     }
 
@@ -216,6 +220,56 @@ impl App {
 
     pub fn set_status(&mut self, info: StatusInfo) {
         self.status = info;
+        self.render_dirty = true;
+    }
+
+    /// Take pending images, draining the queue.
+    pub fn take_pending_images(&mut self) -> Vec<(String, String)> {
+        let images = std::mem::take(&mut self.pending_images);
+        if !images.is_empty() {
+            self.render_dirty = true;
+        }
+        images
+    }
+
+    /// Number of pending images waiting to be attached.
+    pub fn pending_image_count(&self) -> usize {
+        self.pending_images.len()
+    }
+
+    /// Trigger an image paste from clipboard (Alt+V).
+    ///
+    /// Spawns an async task to read the clipboard, then stores the result
+    /// in `pending_images`. The image will be attached to the next message
+    /// the user sends.
+    pub fn trigger_image_paste(&mut self) {
+        let tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            match crate::ui::clipboard::read_clipboard_image().await {
+                Some(img) => {
+                    let size_kb = img.size_bytes / 1024;
+                    let (media_type, base64_data) = img.into_tuple();
+                    let _ = tx.send(crate::engine::tui_events::UiEvent::ImagePasted {
+                        media_type,
+                        base64_data,
+                        size_kb,
+                    });
+                }
+                None => {
+                    let _ = tx.send(crate::engine::tui_events::UiEvent::ImagePasteFailed);
+                }
+            }
+        });
+    }
+
+    /// Store a pasted image into the pending queue.
+    fn on_image_pasted(&mut self, media_type: String, base64_data: String, size_kb: usize) {
+        self.pending_images.push((media_type, base64_data));
+        self.output.push(OutputSegment::Status(format!(
+            "📷 Image pasted ({} KB). {} image(s) pending — send a message to attach.",
+            size_kb,
+            self.pending_images.len()
+        )));
         self.render_dirty = true;
     }
 
@@ -311,6 +365,17 @@ impl App {
                 ..
             } => {
                 self.output.scroll_down(10);
+                return;
+            }
+            // Alt+V: paste image from clipboard
+            KeyEvent {
+                code: KeyCode::Char('v'),
+                modifiers: KeyModifiers::ALT,
+                ..
+            } => {
+                if self.mode == AppMode::Idle {
+                    self.trigger_image_paste();
+                }
                 return;
             }
             _ => {}
@@ -596,6 +661,21 @@ impl App {
                     self.output.push(OutputSegment::Error(err));
                     self.mode = AppMode::Idle;
                 }
+                UiEvent::ImagePasted {
+                    media_type,
+                    base64_data,
+                    size_kb,
+                } => {
+                    self.on_image_pasted(media_type, base64_data, size_kb);
+                }
+                UiEvent::ImagePasteFailed => {
+                    self.output.push(OutputSegment::Error(
+                        "No image in clipboard, or clipboard tool not available.\n\
+                         Usage: Alt+V — paste image from clipboard (requires wl-paste/xclip/osascript)\n\
+                                /image <path> — attach image from file"
+                            .into(),
+                    ));
+                }
                 UiEvent::Interrupted => {
                     self.output.push(OutputSegment::Status(
                         "⏸  Interrupted — press Ctrl+C again to quit.".into(),
@@ -786,7 +866,7 @@ impl App {
         }
 
         // ── Input area ──
-        input::render(frame, input_area, &self.input, &self.mode);
+        input::render(frame, input_area, &self.input, &self.mode, self.pending_image_count());
 
         // ── Status bar ──
         status_bar::render(frame, status_area, &self.status);

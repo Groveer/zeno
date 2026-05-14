@@ -4,6 +4,7 @@ use std::pin::Pin;
 
 use async_trait::async_trait;
 use futures::Stream;
+use futures::StreamExt;
 
 use crate::api::types::{ApiError, Message, StreamEvent};
 /// A provider that can stream chat messages.
@@ -24,4 +25,32 @@ pub trait SupportsStreamingMessages: Send + Sync {
         max_tokens: Option<u32>,
         response_format: Option<&serde_json::Value>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ApiError>> + Send>>, ApiError>;
+
+    /// Non-streaming call: collect the full stream and return the assistant text.
+    ///
+    /// This is a convenience wrapper around `stream_messages` for use by
+    /// auxiliary tasks (vision analysis, compression, sub-agents) that need
+    /// a complete response rather than incremental deltas.
+    async fn call_messages(
+        &self,
+        model: &str,
+        system: &str,
+        messages: &[Message],
+        tools: &[serde_json::Value],
+        max_tokens: Option<u32>,
+        response_format: Option<&serde_json::Value>,
+    ) -> Result<String, ApiError> {
+        let mut stream = self
+            .stream_messages(model, system, messages, tools, max_tokens, response_format)
+            .await?;
+        let mut full_text = String::new();
+        while let Some(event) = stream.next().await {
+            match event? {
+                StreamEvent::TextDelta(text) => full_text.push_str(&text),
+                StreamEvent::MessageComplete { .. } => break,
+                _ => {} // ignore tool/metadata events
+            }
+        }
+        Ok(full_text)
+    }
 }

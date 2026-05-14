@@ -1244,9 +1244,13 @@ async fn main() -> anyhow::Result<()> {
                 }
                 CommandAction::Query => {
                     let cancel = app.reset_cancel_token();
+                    let image_blocks = app.take_pending_images();
                     tokio::spawn(async move {
                         let mut eng = engine.lock().await;
-                        if let Err(e) = eng.query_tui(&query_text, &sender, cancel).await {
+                        if let Err(e) = eng
+                            .query_tui(&query_text, image_blocks, &sender, cancel)
+                            .await
+                        {
                             let _ = sender.send(engine::tui_events::UiEvent::Error(e.to_string()));
                         }
                     });
