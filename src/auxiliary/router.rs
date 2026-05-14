@@ -365,14 +365,12 @@ fn build_resolved(
     task_config: &AuxiliaryTaskConfig,
     settings: &Settings,
 ) -> ResolvedProvider {
-    let model = if task_config.model.is_empty() {
-        if provider.default_model.is_empty() {
-            settings.model.clone()
-        } else {
-            provider.default_model.clone()
-        }
-    } else {
+    let model = if !task_config.model.is_empty() {
         task_config.model.clone()
+    } else if !settings.model.is_empty() {
+        settings.model.clone()
+    } else {
+        provider.default_model.clone()
     };
 
     let base_url = task_config
@@ -503,6 +501,35 @@ mod tests {
         let settings = make_settings();
         let resolved = resolve_provider(AuxiliaryTask::Compression, &settings).unwrap();
         assert_eq!(resolved.provider_name, "custom");
+        // Should use settings.model (global main model), NOT provider.default_model
+        assert_eq!(resolved.model, "default-model");
+    }
+
+    #[test]
+    fn test_resolve_uses_settings_model_over_provider_default() {
+        let settings = make_settings();
+        // provider "custom" has default_model="test-model", settings.model="default-model"
+        // Without task-level model, should prefer settings.model
+        let resolved = resolve_provider(AuxiliaryTask::TitleGeneration, &settings).unwrap();
+        assert_eq!(resolved.model, "default-model");
+    }
+
+    #[test]
+    fn test_resolve_task_model_takes_highest_priority() {
+        let mut settings = make_settings();
+        settings.auxiliary.compression.model = "task-specific-model".into();
+        // Task-level model should override everything
+        let resolved = resolve_provider(AuxiliaryTask::Compression, &settings).unwrap();
+        assert_eq!(resolved.model, "task-specific-model");
+    }
+
+    #[test]
+    fn test_resolve_falls_back_to_provider_default_model() {
+        let mut settings = make_settings();
+        settings.model = String::new(); // No global model configured
+        // Should fall back to provider.default_model
+        let resolved = resolve_provider(AuxiliaryTask::Compression, &settings).unwrap();
+        assert_eq!(resolved.model, "test-model");
     }
 
     #[test]

@@ -1019,10 +1019,10 @@ async fn create_subagent_client(
 
     let model = if !delegation_cfg.model.is_empty() {
         delegation_cfg.model.clone()
-    } else if !provider_config.default_model.is_empty() {
-        provider_config.default_model.clone()
-    } else {
+    } else if !deps.settings.model.is_empty() {
         deps.settings.model.clone()
+    } else {
+        provider_config.default_model.clone()
     };
 
     // Step 3: build client
