@@ -5,8 +5,9 @@
 //! 2. Key principles (always present)
 //! 3. Tool name list (descriptions are in API schemas, not duplicated here)
 //! 4. Skills Tier 0: category index + skill loading workflow
-//! 5. Runtime context (cwd, OS, git branch)
+//! 5. Runtime context (cwd, OS, git branch, build system)
 //! 6. Project instructions (CLAUDE.md / AGENTS.md)
+//! 7. Memory (persistent user/memory store)
 //!
 //! The skills section follows a 3-tier progressive disclosure design:
 //! - Tier 0 (system prompt): category index + loading workflow instructions
@@ -44,16 +45,16 @@ pub fn build(
         tools_block(&tool_registry.names()),
     ];
 
-    // 5. Skills Tier 0: category index + loading workflow
+    // 4. Skills Tier 0: category index + loading workflow
     if !skill_registry.is_empty() {
         parts.push(skills_block(skill_registry));
     }
 
-    // 6. Runtime context
+    // 5. Runtime context
     let ctx = RuntimeContext::collect(cwd);
     parts.push(format!("## Environment\n\n{}", ctx.to_prompt_block()));
 
-    // 7. Project instructions (CLAUDE.md / AGENTS.md)
+    // 6. Project instructions (CLAUDE.md / AGENTS.md)
     if let Some((path, content)) = claudemd::load_instruction_file(cwd) {
         parts.push(format!(
             "## Project Instructions\n\nLoaded from: {}\n\n{}",
@@ -62,7 +63,7 @@ pub fn build(
         ));
     }
 
-    // 8. Memory (frozen snapshot from disk + external provider)
+    // 7. Memory (frozen snapshot from disk + external provider)
     if let Some(block) = memory_block
         && !block.is_empty()
     {
@@ -121,6 +122,10 @@ fn guidelines(role: &RoleConfig) -> String {
   - "What OS am I running?" → check the live system (don't use user profile)
   - "What time is it?" → run `date` (don't guess)
   Only ask for clarification when the ambiguity genuinely changes what tool you would call.
+- **Scope searches to the project structure**: Before using `grep` or `glob`, check
+  the Environment section for the detected build system. Target searches at the source
+  tree (e.g. `path="src"`) rather than the project root. Start shallow (`glob("*")`)
+  then drill down — don't `glob("**")` on the whole project.
 - **Missing context**: If required context is missing, do NOT guess or hallucinate an answer.
   Use the appropriate lookup tool when missing information is retrievable
   (read, grep, glob, web_search, web_fetch, etc.).
@@ -563,6 +568,49 @@ mod tests {
         assert!(
             block.contains("\n\n### Loading Workflow"),
             "Loading workflow should be a separate ### section after the category index"
+        );
+    }
+
+    #[test]
+    fn test_scope_searches_guideline_in_system_prompt() {
+        // The lightweight guideline rule should be present
+        let role = RoleConfig::default();
+        let tool_registry = ToolRegistry::new();
+        let skill_registry = SkillRegistry::new();
+        let prompt = build(
+            std::path::Path::new("/tmp"),
+            &tool_registry,
+            &skill_registry,
+            None,
+            &role,
+        );
+        assert!(
+            prompt.contains("Scope searches to the project structure"),
+            "Guideline rule for scoping searches should be present"
+        );
+        assert!(
+            prompt.contains("path=\"src\""),
+            "Should hint about path parameter"
+        );
+    }
+
+    #[test]
+    fn test_build_system_in_environment() {
+        // Build system detection should appear in Environment section
+        let role = RoleConfig::default();
+        let tool_registry = ToolRegistry::new();
+        let skill_registry = SkillRegistry::new();
+        let prompt = build(
+            std::path::Path::new("/tmp"),
+            &tool_registry,
+            &skill_registry,
+            None,
+            &role,
+        );
+        // /tmp has no build files, so build_system should be absent
+        assert!(
+            !prompt.contains("Project build system"),
+            "No build system should be reported for /tmp"
         );
     }
 }

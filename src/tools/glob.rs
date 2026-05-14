@@ -24,7 +24,7 @@ impl Tool for GlobTool {
             "type": "function",
             "function": {
                 "name": "glob",
-                "description": "Find files matching a glob pattern. Supports * and ** wildcards.",
+                "description": "Find files matching a glob pattern. Supports * and ** wildcards.\n\nHINT: Use `path` to restrict to source tree (e.g. path=\"src\"). Start shallow (glob(\"*\")), then drill down. Avoid glob(\"**\") on the project root.",
                 "parameters": {
                     "type": "object",
                     "properties": {

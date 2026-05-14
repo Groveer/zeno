@@ -30,7 +30,7 @@ impl Tool for GrepTool {
             "type": "function",
             "function": {
                 "name": "grep",
-                "description": "Search file contents with regex. Returns matching lines with file paths and line numbers.",
+                "description": "Search file contents with regex. Returns matching lines with file paths and line numbers.\n\nHINT: Scope to source tree via `path` + `include` (e.g. path=\"src\", include=\"*.rs\"). Avoid searching the whole project root.",
                 "parameters": {
                     "type": "object",
                     "properties": {
