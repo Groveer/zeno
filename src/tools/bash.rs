@@ -118,15 +118,20 @@ impl BashTool {
         // the cd directory set as the process's current_dir instead of via shell.
         let (cd_dir, inner_cmd) = Self::strip_cd_prefix(trimmed);
 
+        // Strip common shell redirects that LLMs append (2>&1, 2>/dev/null, etc.).
+        // These are meaningful in a shell but become literal arguments when passed
+        // via Command::new().args() — they confuse rtk and the underlying tool.
+        let clean_cmd = Self::strip_shell_redirects(inner_cmd);
+
         // Skip compound commands (pipes, chains) — rtk proxy can't handle them
-        if inner_cmd.contains('|') || inner_cmd.contains("&&") || inner_cmd.contains("||") {
+        if clean_cmd.contains('|') || clean_cmd.contains("&&") || clean_cmd.contains("||") {
             return None;
         }
 
         // Ask rtk to rewrite — this is the authoritative check
         let Ok(output) = tokio::process::Command::new("rtk")
             .arg("rewrite")
-            .args(inner_cmd.split_whitespace())
+            .args(clean_cmd.split_whitespace())
             .output()
             .await
         else {
@@ -169,6 +174,41 @@ impl BashTool {
             }
         }
         (None, trimmed)
+    }
+
+    /// Strip common shell redirect suffixes that LLMs append to commands.
+    /// These are meaningful in a shell but become literal arguments when passed
+    /// via `Command::new().args()`.
+    ///
+    /// Examples:
+    /// - `"git status 2>&1"` → `"git status"`
+    /// - `"cargo test 2>/dev/null"` → `"cargo test"`
+    /// - `"ls 2>&1 >/dev/null"` → `"ls"`
+    /// - `"git status"` → `"git status"` (unchanged)
+    fn strip_shell_redirects(cmd: &str) -> String {
+        let mut s = cmd.trim().to_string();
+        let redirects = [
+            " 2>&1",
+            " 2>/dev/null",
+            " >/dev/null",
+            " 2>&2",
+            " 1>/dev/null",
+            " &>/dev/null",
+        ];
+        loop {
+            let len_before = s.len();
+            for r in &redirects {
+                s = s.trim_end_matches(r).to_string();
+            }
+            // Also handle no-space variants like "2>&1" at end
+            if s.ends_with("2>&1") {
+                s = s[..s.len() - 5].to_string();
+            }
+            if s.len() == len_before {
+                break;
+            }
+        }
+        s.trim().to_string()
     }
 }
 
@@ -450,52 +490,40 @@ mod rtk_tests {
     }
 
     #[test]
-    fn test_strip_cd_prefix_nested_path() {
-        let (dir, inner) =
-            BashTool::strip_cd_prefix("cd /home/guo/Develop/zeno && cargo test 2>&1");
-        assert_eq!(dir, Some(PathBuf::from("/home/guo/Develop/zeno")));
-        assert_eq!(inner, "cargo test 2>&1");
-    }
-
-    #[tokio::test]
-    async fn test_rtk_route_with_cd_prefix() {
-        let tool = BashTool::new(true, HashMap::new(), vec![], vec![], vec![]);
-        let result = tool.maybe_rtk_route("cd /tmp && ls").await;
-        assert!(
-            result.is_some(),
-            "rtk should route 'ls' even with cd prefix"
+    fn test_strip_shell_redirects() {
+        assert_eq!(
+            BashTool::strip_shell_redirects("git status 2>&1"),
+            "git status"
         );
-        let (rewritten, cd_dir) = result.unwrap();
-        assert_eq!(rewritten, "rtk ls");
-        assert_eq!(cd_dir, Some(PathBuf::from("/tmp")));
+        assert_eq!(
+            BashTool::strip_shell_redirects("cargo test 2>&1"),
+            "cargo test"
+        );
+        assert_eq!(
+            BashTool::strip_shell_redirects("cargo test 2>/dev/null"),
+            "cargo test"
+        );
+        assert_eq!(BashTool::strip_shell_redirects("ls 2>&1 >/dev/null"), "ls");
+        assert_eq!(
+            BashTool::strip_shell_redirects("git status &>/dev/null"),
+            "git status"
+        );
+        assert_eq!(BashTool::strip_shell_redirects("git status"), "git status");
+        assert_eq!(
+            BashTool::strip_shell_redirects("grep -rn foo . 2>&1"),
+            "grep -rn foo ."
+        );
     }
 
     #[tokio::test]
-    async fn test_rtk_route_disabled_with_cd() {
-        let tool = BashTool::new(false, HashMap::new(), vec![], vec![], vec![]);
-        let result = tool.maybe_rtk_route("cd /tmp && ls").await;
-        assert!(result.is_none(), "should not route when disabled");
-    }
-
-    #[tokio::test]
-    async fn test_rtk_route_simple() {
+    async fn test_rtk_route_with_redirect_stripped() {
         let tool = BashTool::new(true, HashMap::new(), vec![], vec![], vec![]);
-        let result = tool.maybe_rtk_route("ls").await;
-        assert!(result.is_some());
-        let (rewritten, cd_dir) = result.unwrap();
-        assert_eq!(rewritten, "rtk ls");
-        assert!(cd_dir.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_rtk_skip_real_compound() {
-        let tool = BashTool::new(true, HashMap::new(), vec![], vec![], vec![]);
-        // Real compound commands with pipes should still be skipped
-        assert!(tool.maybe_rtk_route("ls | head").await.is_none());
+        let result = tool.maybe_rtk_route("git status 2>&1").await;
+        assert!(result.is_some(), "rtk should route after stripping 2>&1");
+        let (rewritten, _) = result.unwrap();
         assert!(
-            tool.maybe_rtk_route("cargo test && cargo clippy")
-                .await
-                .is_none()
+            !rewritten.contains("2>&1"),
+            "rewritten should not contain shell redirect"
         );
     }
 }

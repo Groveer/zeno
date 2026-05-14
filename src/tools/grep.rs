@@ -137,7 +137,7 @@ impl Tool for GrepTool {
 fn grep_sync(
     base_path: &Path,
     re: &Regex,
-    _pattern: &str,
+    pattern: &str,
     include: Option<&str>,
     context: usize,
     limit: usize,
@@ -145,9 +145,18 @@ fn grep_sync(
 ) -> (usize, Vec<String>) {
     // Max number of file entries to scan (prevent OOM on huge repos)
     const MAX_FILE_ENTRIES: usize = 10_000;
+    /// Max matches per individual file — prevents a single hot file from
+    /// consuming the entire result limit (inspired by RTK's per-file cap).
+    const MAX_PER_FILE: usize = 10;
+    /// Max displayed line length — very long lines (minified JSON, etc.)
+    /// waste tokens. Truncate with a hint toward the matched region.
+    const MAX_LINE_LEN: usize = 500;
 
     let mut results = Vec::new();
     let mut match_count = 0;
+    // Track per-file match counts for the per-file cap
+    let mut file_match_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
 
     if base_path.is_dir() {
         // Load gitignore patterns for the base directory
@@ -192,9 +201,16 @@ fn grep_sync(
 
             let lines: Vec<&str> = content.lines().collect();
             let relative = path.strip_prefix(base_path).unwrap_or(&path);
+            let file_key = relative.to_string_lossy().to_string();
+            let file_count = file_match_counts.entry(file_key.clone()).or_insert(0);
 
             for (line_idx, line) in lines.iter().enumerate() {
                 if re.is_match(line) {
+                    // Per-file cap
+                    if *file_count >= MAX_PER_FILE {
+                        break;
+                    }
+
                     let line_num = line_idx + 1;
 
                     let mut context_lines = Vec::new();
@@ -203,22 +219,21 @@ fn grep_sync(
 
                     for ctx_line_num in start..=end {
                         let marker = if ctx_line_num == line_num { ">>>" } else { " " };
-                        context_lines.push(format!(
-                            "{} {:>4} | {}",
-                            marker,
-                            ctx_line_num,
-                            lines[ctx_line_num - 1]
-                        ));
+                        let display_line =
+                            truncate_line(lines[ctx_line_num - 1], MAX_LINE_LEN, pattern);
+                        context_lines
+                            .push(format!("{} {:>4} | {}", marker, ctx_line_num, display_line));
                     }
 
                     results.push(format!(
                         "{}:{}\n{}",
-                        relative.display(),
+                        compact_path(&file_key),
                         line_num,
                         context_lines.join("\n")
                     ));
 
                     match_count += 1;
+                    *file_count += 1;
                     if match_count >= limit {
                         break;
                     }
@@ -253,12 +268,10 @@ fn grep_sync(
 
                 for ctx_line_num in start..=end {
                     let marker = if ctx_line_num == line_num { ">>>" } else { " " };
-                    context_lines.push(format!(
-                        "{} {:>4} | {}",
-                        marker,
-                        ctx_line_num,
-                        lines[ctx_line_num - 1]
-                    ));
+                    let display_line =
+                        truncate_line(lines[ctx_line_num - 1], MAX_LINE_LEN, pattern);
+                    context_lines
+                        .push(format!("{} {:>4} | {}", marker, ctx_line_num, display_line));
                 }
 
                 results.push(format!(
@@ -383,6 +396,61 @@ mod tests {
         assert!(results.is_empty());
         std::fs::remove_file(&path).unwrap();
     }
+
+    // --- truncate_line ---
+
+    #[test]
+    fn test_truncate_line_short() {
+        assert_eq!(truncate_line("hello world", 50, "hello"), "hello world");
+    }
+
+    #[test]
+    fn test_truncate_line_exact() {
+        let s = "a".repeat(500);
+        assert_eq!(truncate_line(&s, 500, "a"), s);
+    }
+
+    #[test]
+    fn test_truncate_line_long_with_match() {
+        let line = "prefix ".to_string() + &"x".repeat(400) + " TARGET " + &"y".repeat(400);
+        let result = truncate_line(&line, 500, "TARGET");
+        assert!(result.len() <= 510); // allow some margin for "..." markers
+        assert!(
+            result.contains("TARGET"),
+            "truncated line should contain the match"
+        );
+    }
+
+    #[test]
+    fn test_truncate_line_long_no_match() {
+        let line = "z".repeat(1000);
+        let result = truncate_line(&line, 500, "nomatch");
+        assert!(result.len() <= 510);
+        assert!(result.ends_with("..."));
+    }
+
+    // --- compact_path ---
+
+    #[test]
+    fn test_compact_path_short() {
+        assert_eq!(compact_path("src/main.rs"), "src/main.rs");
+        assert_eq!(compact_path("a/b/c.rs"), "a/b/c.rs");
+    }
+
+    #[test]
+    fn test_compact_path_long() {
+        let p = "very/long/deep/nested/path/to/components/buttons/primary/Button.tsx";
+        let result = compact_path(p);
+        assert_eq!(result, "very/.../primary/Button.tsx");
+        assert!(result.len() < p.len());
+    }
+
+    #[test]
+    fn test_compact_path_boundary() {
+        // Exactly 60 chars should not be compacted
+        let p = "a".repeat(60);
+        assert_eq!(compact_path(&p), p);
+    }
 }
 
 fn simple_glob_match(pattern: &str, path: &Path) -> bool {
@@ -440,4 +508,61 @@ fn is_likely_binary_sync(path: &Path) -> bool {
         Err(_) => return false,
     };
     buf[..n].contains(&0)
+}
+
+/// Truncate a line to `max_len` characters. If the line is too long, try to
+/// center the truncation around the first occurrence of `pattern` so the
+/// match context is preserved.
+fn truncate_line(line: &str, max_len: usize, pattern: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    if chars.len() <= max_len {
+        return line.to_string();
+    }
+
+    let lower_line: String = chars.iter().collect();
+    let lower_line = lower_line.to_lowercase();
+    let pattern_lower = pattern.to_lowercase();
+
+    // Try to center around the match
+    if let Some(pos) = lower_line.find(&pattern_lower) {
+        let start = pos.saturating_sub(max_len / 3);
+        let end = (start + max_len).min(chars.len());
+        let start = if end == chars.len() {
+            end.saturating_sub(max_len)
+        } else {
+            start
+        };
+
+        let slice: String = chars[start..end].iter().collect();
+        if start > 0 && end < chars.len() {
+            format!("...{}...", slice)
+        } else if start > 0 {
+            format!("...{}", slice)
+        } else {
+            format!("{}...", slice)
+        }
+    } else {
+        // No match found in line — just truncate from the end
+        let truncated: String = chars.iter().take(max_len - 3).collect();
+        format!("{}...", truncated)
+    }
+}
+
+/// Compact a file path for display. Long paths like
+/// `src/components/buttons/primary/Button.tsx` become
+/// `src/.../buttons/Button.tsx` to save tokens.
+fn compact_path(path: &str) -> String {
+    if path.len() <= 60 {
+        return path.to_string();
+    }
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.len() <= 3 {
+        return path.to_string();
+    }
+    format!(
+        "{}/.../{}/{}",
+        parts[0],
+        parts[parts.len() - 2],
+        parts[parts.len() - 1]
+    )
 }
