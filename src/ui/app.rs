@@ -866,7 +866,13 @@ impl App {
         }
 
         // ── Input area ──
-        input::render(frame, input_area, &self.input, &self.mode, self.pending_image_count());
+        input::render(
+            frame,
+            input_area,
+            &self.input,
+            &self.mode,
+            self.pending_image_count(),
+        );
 
         // ── Status bar ──
         status_bar::render(frame, status_area, &self.status);

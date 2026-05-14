@@ -14,7 +14,7 @@
 use std::time::Duration;
 
 use crate::api::client::SupportsStreamingMessages;
-use crate::api::retry::{get_retry_delay, is_retryable_status_default, RetryConfig};
+use crate::api::retry::{RetryConfig, get_retry_delay, is_retryable_status_default};
 use crate::api::types::{ContentBlock, Message, Role};
 use crate::config::settings::{ApiType, Settings};
 
@@ -137,7 +137,14 @@ async fn call_with_fallback(
             Err(_) => continue,
         };
 
-        match call_resolved(&resolved, messages, temperature_override, max_tokens_override).await {
+        match call_resolved(
+            &resolved,
+            messages,
+            temperature_override,
+            max_tokens_override,
+        )
+        .await
+        {
             Ok(result) => return Ok(result),
             Err(AuxiliaryError::PaymentRequired(provider)) => {
                 tracing::warn!(
@@ -204,8 +211,13 @@ async fn call_resolved(
         })
         .collect();
 
-    call_resolved_with_messages(provider, &raw_messages, temperature_override, max_tokens_override)
-        .await
+    call_resolved_with_messages(
+        provider,
+        &raw_messages,
+        temperature_override,
+        max_tokens_override,
+    )
+    .await
 }
 
 /// Make a non-streaming call with raw JSON messages (supports both text and vision).
@@ -228,8 +240,10 @@ pub(super) async fn call_resolved_with_messages(
         provider.api_type,
     );
 
-    let effective_temp =
-        effective_temperature(&provider.model, temperature_override.or(Some(provider.temperature)));
+    let effective_temp = effective_temperature(
+        &provider.model,
+        temperature_override.or(Some(provider.temperature)),
+    );
     let max_tokens = max_tokens_override.unwrap_or(provider.max_tokens);
 
     // Convert raw JSON messages → Message type for the trait API
@@ -358,9 +372,9 @@ fn create_api_client(
     api_type: ApiType,
 ) -> Box<dyn SupportsStreamingMessages> {
     match api_type {
-        ApiType::Anthropic => {
-            Box::new(crate::api::anthropic::AnthropicClient::new(api_key, base_url))
-        }
+        ApiType::Anthropic => Box::new(crate::api::anthropic::AnthropicClient::new(
+            api_key, base_url,
+        )),
         ApiType::OpenAi | ApiType::OpenAiResponses => {
             Box::new(crate::api::openai::OpenAIClient::new(api_key, base_url))
         }
@@ -409,10 +423,7 @@ fn convert_raw_messages(raw: &[serde_json::Value]) -> Vec<Message> {
                             }
                             "image_url" => {
                                 // OpenAI format: { image_url: { url: "data:..." } }
-                                let url = part
-                                    .get("image_url")?
-                                    .get("url")?
-                                    .as_str()?;
+                                let url = part.get("image_url")?.get("url")?.as_str()?;
                                 parse_data_url(url).map(|(media_type, data)| ContentBlock::Image {
                                     media_type,
                                     data,
@@ -422,10 +433,7 @@ fn convert_raw_messages(raw: &[serde_json::Value]) -> Vec<Message> {
                             "image" => {
                                 // Anthropic format: { type: "image", source: { type: "base64", ... } }
                                 let source = part.get("source")?;
-                                let media_type = source
-                                    .get("media_type")?
-                                    .as_str()?
-                                    .to_string();
+                                let media_type = source.get("media_type")?.as_str()?.to_string();
                                 let data = source.get("data")?.as_str()?.to_string();
                                 Some(ContentBlock::Image {
                                     media_type,
@@ -439,7 +447,10 @@ fn convert_raw_messages(raw: &[serde_json::Value]) -> Vec<Message> {
                     .collect();
 
                 if !blocks.is_empty() {
-                    messages.push(Message { role, content: blocks });
+                    messages.push(Message {
+                        role,
+                        content: blocks,
+                    });
                 }
             }
             // String content (text-only)
@@ -640,7 +651,10 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content.len(), 2);
         assert!(matches!(&messages[0].content[0], ContentBlock::Text { .. }));
-        assert!(matches!(&messages[0].content[1], ContentBlock::Image { .. }));
+        assert!(matches!(
+            &messages[0].content[1],
+            ContentBlock::Image { .. }
+        ));
     }
 
     #[test]
