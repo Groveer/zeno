@@ -727,7 +727,7 @@ impl MdRenderer {
 
             Event::TaskListMarker(checked) => {
                 let marker = if checked {
-                    String::from("✓ ")
+                    String::from(" ")
                 } else {
                     String::from("○ ")
                 };

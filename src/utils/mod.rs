@@ -7,7 +7,7 @@ pub mod time;
 ///
 /// Handles three cases that `unicode-width` gets wrong:
 /// - **Emoji presentation** (base char + VS16): `unicode-width` reports width 1
-///   for BMP emoji like ✏️ (U+270F), but terminals render them as width 2.
+///   for BMP emoji like  (U+F040), but terminals render them as width 2.
 /// - **Private Use Area** (U+E000–U+F8FF, U+F0000–U+FFFFD, U+100000–U+10FFFD):
 ///   `unicode-width` reports width 1, but Nerd Font icons at these codepoints
 ///   are rendered as width 2 by modern terminals.

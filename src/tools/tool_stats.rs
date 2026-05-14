@@ -83,7 +83,7 @@ impl ToolStats {
         let failures = self.total_failures();
         let mut lines: Vec<String> = Vec::new();
         lines.push(format!(
-            "📊 Tool usage: {} calls, {} failures",
+            " Tool usage: {} calls, {} failures",
             total, failures
         ));
         let mut tools: Vec<(&String, &ToolStatEntry)> = self.tools.iter().collect();

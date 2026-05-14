@@ -1724,10 +1724,10 @@ async fn execute_single_tool_tui(
 /// Build a one-line summary for the TUI output, combining tool identity + result.
 ///
 /// Instead of showing raw output, produce a compact summary like:
-/// ⚡ git status → ok (5 lines)
-/// ⚡ rm -rf / → exit 1: Permission denied
-/// 📖 src/main.rs → L1-L50 (of 300)
-/// ✏️ Editing src/main.rs → -old_line / +new_line
+///  git status → ok (5 lines)
+///  rm -rf / → exit 1: Permission denied
+///  src/main.rs → L1-L50 (of 300)
+///  Editing src/main.rs → -old_line / +new_line
 ///
 /// Note: No icon prefix here — the icon is already in ToolStart's input_summary.
 fn summarize_tool_output(tool_name: &str, output: &str, _input_json: &str) -> String {
@@ -1742,7 +1742,7 @@ fn summarize_tool_output(tool_name: &str, output: &str, _input_json: &str) -> St
         }) {
             return format!("exit {}: {}", code, preview);
         }
-        return format!("⚠ {}", preview);
+        return format!(" {}", preview);
     }
 
     match tool_name {
@@ -1887,7 +1887,7 @@ fn summarize_tool_output(tool_name: &str, output: &str, _input_json: &str) -> St
 
             result_lines.join("\n")
         }
-        // todo: only show the action result line (e.g. "✅ Updated T1 → in_progress").
+        // todo: only show the action result line (e.g. " Updated T1 → in_progress").
         // The right-side UI panel already renders the full task list with progress,
         // so showing plan/task details here would be redundant and noisy.
         "todo" => {
@@ -1915,15 +1915,15 @@ fn summarize_tool_output(tool_name: &str, output: &str, _input_json: &str) -> St
 
                 if !success {
                     if let Some(err) = error {
-                        return format!("⚠ memory {} error: {}", target, err);
+                        return format!(" memory {} error: {}", target, err);
                     }
-                    return format!("⚠ memory {} failed", target);
+                    return format!(" memory {} failed", target);
                 }
 
                 let mut result = if let Some(msg) = message {
-                    format!("✓ memory {}: {}", target, msg)
+                    format!(" memory {}: {}", target, msg)
                 } else {
-                    format!("✓ memory {} ok", target)
+                    format!(" memory {} ok", target)
                 };
 
                 if !usage.is_empty() {
@@ -2025,7 +2025,7 @@ fn summarize_tool_output(tool_name: &str, output: &str, _input_json: &str) -> St
         "delegate_task" => {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(output) {
                 if let Some(error) = val.get("error").and_then(|v| v.as_str()) {
-                    return format!("⚠ delegate_task: {}", error);
+                    return format!(" delegate_task: {}", error);
                 }
                 // Batch mode: array of results
                 if let Some(results) = val.as_array() {
@@ -2159,6 +2159,8 @@ fn format_permission_detail(tool_name: &str, input_json: &str) -> String {
 }
 
 /// Build a one-line summary of a tool's input for the TUI status display.
+/// Uses Nerd Font icons (PUA codepoints) instead of emoji for reliable
+/// terminal rendering via ratatui.
 fn format_tool_input_summary(tool_name: &str, input_json: &str) -> String {
     let input = parse_tool_input(input_json);
 
@@ -2168,9 +2170,9 @@ fn format_tool_input_summary(tool_name: &str, input_json: &str) -> String {
             .and_then(|v| v.as_str())
             .map(|s| {
                 let s = s.trim();
-                format!("\u{f120} $ {}", s)
+                format!("\u{f489} $ {}", s)
             })
-            .unwrap_or_else(|| "\u{f120} bash".into()),
+            .unwrap_or_else(|| "\u{f489} bash".into()),
         "read" | "read_file" => input
             .get("path")
             .or_else(|| input.get("file_path"))
@@ -2188,12 +2190,12 @@ fn format_tool_input_summary(tool_name: &str, input_json: &str) -> String {
                     .map(|c| c.lines().count())
                     .unwrap_or(0);
                 if lines > 0 {
-                    format!("\u{f0c7} write {} ({} lines)", s, lines)
+                    format!("\u{f040} write {} ({} lines)", s, lines)
                 } else {
-                    format!("\u{f0c7} write {}", s)
+                    format!("\u{f040} write {}", s)
                 }
             })
-            .unwrap_or_else(|| "\u{f0c7} write".into()),
+            .unwrap_or_else(|| "\u{f040} write".into()),
         "edit" => {
             let path = input
                 .get("path")
@@ -2205,9 +2207,9 @@ fn format_tool_input_summary(tool_name: &str, input_json: &str) -> String {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             if replace_all {
-                format!("\u{f044} edit {} (replace all)", path)
+                format!("\u{f040} edit {} (replace all)", path)
             } else {
-                format!("\u{f044} edit {}", path)
+                format!("\u{f040} edit {}", path)
             }
         }
         "grep" => {
@@ -2223,9 +2225,9 @@ fn format_tool_input_summary(tool_name: &str, input_json: &str) -> String {
             let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("?");
             let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
             if path.is_empty() {
-                format!("\u{f024b} glob {}", pattern)
+                format!("\u{f07b} glob {}", pattern)
             } else {
-                format!("\u{f024b} glob {} in {}", pattern, path)
+                format!("\u{f07b} glob {} in {}", pattern, path)
             }
         }
         "web_search" => input
@@ -2242,11 +2244,11 @@ fn format_tool_input_summary(tool_name: &str, input_json: &str) -> String {
             let cat = input.get("category").and_then(|v| v.as_str()).unwrap_or("");
             let tag = input.get("tag").and_then(|v| v.as_str()).unwrap_or("");
             if !cat.is_empty() {
-                format!("\u{f03a} skill_list category: {}", cat)
+                format!("\u{f0ca} skill_list category: {}", cat)
             } else if !tag.is_empty() {
-                format!("\u{f03a} skill_list tag: {}", tag)
+                format!("\u{f0ca} skill_list tag: {}", tag)
             } else {
-                "\u{f03a} skill_list".into()
+                "\u{f0ca} skill_list".into()
             }
         }
         "skill_view" => input
@@ -2266,9 +2268,9 @@ fn format_tool_input_summary(tool_name: &str, input_json: &str) -> String {
                     let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
                     let preview: String = content.chars().take(60).collect();
                     if content.len() > preview.len() {
-                        format!("\u{f0e0} memory {} add: {}…", target, preview)
+                        format!("\u{f1c0} memory {} add: {}…", target, preview)
                     } else {
-                        format!("\u{f0e0} memory {} add: {}", target, preview)
+                        format!("\u{f1c0} memory {} add: {}", target, preview)
                     }
                 }
                 "replace" => {
@@ -2277,18 +2279,59 @@ fn format_tool_input_summary(tool_name: &str, input_json: &str) -> String {
                     let old_preview: String = old.chars().take(30).collect();
                     let new_preview: String = content.chars().take(30).collect();
                     format!(
-                        "\u{f044} memory {} replace: {} → {}",
+                        "\u{f040} memory {} replace: {} → {}",
                         target, old_preview, new_preview
                     )
                 }
                 "remove" => {
                     let old = input.get("old_text").and_then(|v| v.as_str()).unwrap_or("");
                     let preview: String = old.chars().take(40).collect();
-                    format!("\u{f014} memory {} remove: {}", target, preview)
+                    format!("\u{f1f8} memory {} remove: {}", target, preview)
                 }
-                _ => format!("\u{f0e0} memory {}", action),
+                _ => format!("\u{f1c0} memory {}", action),
             }
         }
-        _ => format!("\u{f05a} {}", tool_name),
+        "todo" => {
+            let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("?");
+            let icon = match action {
+                "create" => "\u{f0ca}", // list
+                "add" => "\u{f067}",    // plus
+                "update" => "\u{f021}", // refresh
+                "delete" => "\u{f1f8}", // trash
+                "list" => "\u{f15c}",   // file text
+                _ => "\u{f0ca}",        // list default
+            };
+            format!("{} todo {}", icon, action)
+        }
+        "delegate_task" => {
+            let goal = input.get("goal").and_then(|v| v.as_str()).unwrap_or("");
+            if goal.is_empty() {
+                "\u{f0c0} delegate_task".into()
+            } else {
+                let preview: String = goal.chars().take(40).collect();
+                format!("\u{f0c0} delegate_task: {}", preview)
+            }
+        }
+        "skill_manage" => {
+            let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("?");
+            let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if name.is_empty() {
+                format!("\u{f013} skill_manage {}", action)
+            } else {
+                format!("\u{f013} skill_manage {} {}", action, name)
+            }
+        }
+        n if n.starts_with("mcp_") => {
+            let server = input
+                .get("server_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if server.is_empty() {
+                format!("\u{f1e6} {}", n)
+            } else {
+                format!("\u{f1e6} {} on {}", n, server)
+            }
+        }
+        _ => format!("\u{f0ad} {}", tool_name),
     }
 }

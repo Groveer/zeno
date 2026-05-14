@@ -500,7 +500,7 @@ fn segment_to_lines(seg: &OutputSegment) -> Vec<Line<'static>> {
 
             // Header line: icon + [tool_name] reason
             lines.push(Line::from(vec![
-                Span::styled("  ⚠ ".to_string(), Style::new().fg(theme::WARNING)),
+                Span::styled("   ".to_string(), Style::new().fg(theme::WARNING)),
                 Span::styled(
                     format!("[{}] ", tool_name),
                     Style::new().fg(theme::WARNING).add_modifier(Modifier::BOLD),

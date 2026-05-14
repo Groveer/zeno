@@ -980,14 +980,14 @@ pub fn render(
                 if state.text.is_empty() {
                     (
                         theme::WARNING,
-                        "\u{21e2} ",
+                        "\u{f054} ",
                         Cow::Borrowed("type to steer agent\u{2026}"),
                         theme::TEXT_DIM,
                     )
                 } else {
                     (
                         theme::WARNING,
-                        "\u{21e2} ",
+                        "\u{f054} ",
                         Cow::Borrowed(&state.text),
                         theme::TEXT,
                     )
@@ -1083,7 +1083,7 @@ pub fn render(
 
     // Draw border with pending image indicator
     let image_suffix = if pending_image_count > 0 {
-        format!(" 📷{} ", pending_image_count)
+        format!(" {} ", pending_image_count)
     } else {
         String::new()
     };

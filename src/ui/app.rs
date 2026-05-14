@@ -266,7 +266,7 @@ impl App {
     fn on_image_pasted(&mut self, media_type: String, base64_data: String, size_kb: usize) {
         self.pending_images.push((media_type, base64_data));
         self.output.push(OutputSegment::Status(format!(
-            "📷 Image pasted ({} KB). {} image(s) pending — send a message to attach.",
+            "\u{f083} Image pasted ({} KB). {} image(s) pending — send a message to attach.",
             size_kb,
             self.pending_images.len()
         )));
@@ -421,7 +421,7 @@ impl App {
                     self.steer_queue.push(text.clone());
                     self.status.steer_count = self.steer_queue.len();
                     self.output.push(OutputSegment::Status(format!(
-                        "⇢ Steered: {} (will be injected on next turn)",
+                        "\u{f054} Steered: {} (will be injected on next turn)",
                         truncate_preview(&text, 60)
                     )));
                 }
@@ -722,7 +722,7 @@ impl App {
                     };
                     let short_goal = truncate_preview(&goal, 60);
                     self.output.push(OutputSegment::Status(format!(
-                        "🔄 sub-agent started: {}{}",
+                        " sub-agent started: {}{}",
                         short_goal, tools_str
                     )));
                 }
@@ -730,7 +730,7 @@ impl App {
                     let short = truncate_preview(&text, 80);
                     if !short.trim().is_empty() {
                         self.output
-                            .push(OutputSegment::Status(format!("💭 sub-agent: {}", short)));
+                            .push(OutputSegment::Status(format!(" sub-agent: {}", short)));
                     }
                 }
                 SubAgentEvent::ToolStarted {
@@ -754,7 +754,7 @@ impl App {
                     is_error,
                     ..
                 } => {
-                    let status = if is_error { "✗" } else { "✓" };
+                    let status = if is_error { "" } else { "" };
                     self.output.push(OutputSegment::ToolComplete(format!(
                         "{} {} ({} bytes)",
                         status, tool, result_bytes
@@ -774,7 +774,7 @@ impl App {
                     };
                     let summary_len = result.summary.len();
                     self.output.push(OutputSegment::Status(format!(
-                        "✓ sub-agent {} ({} calls, {:.1}s, {} chars)",
+                        " sub-agent {} ({} calls, {:.1}s, {} chars)",
                         status, result.api_calls, result.duration_seconds, summary_len
                     )));
                 }
@@ -942,7 +942,7 @@ impl App {
             Ok(s) => s,
             Err(_) => {
                 let block = Block::default()
-                    .title(" 󰃷 Tasks ")
+                    .title(" Tasks ")
                     .borders(Borders::LEFT)
                     .border_style(Style::new().fg(theme::BORDER));
                 frame.render_widget(
@@ -968,7 +968,7 @@ impl App {
 
         // ── Title line ──
         lines.push(Line::from(vec![
-            Span::styled(" 󰃷 ", Style::new().fg(theme::ACCENT)),
+            Span::styled(" ", Style::new().fg(theme::ACCENT)),
             Span::styled(
                 "Tasks",
                 Style::new()
@@ -1014,9 +1014,9 @@ impl App {
         let content_width = area.width.saturating_sub(4) as usize;
         for task in &state.tasks {
             let (checkbox, color) = match task.status.as_str() {
-                "completed" => ("☑", theme::TEXT_DIM),
-                "in_progress" => ("◷", theme::ACCENT),
-                _ => ("☐", theme::TEXT),
+                "completed" => ("", theme::TEXT_DIM),
+                "in_progress" => ("", theme::ACCENT),
+                _ => ("", theme::TEXT),
             };
             let desc = truncate_str(&task.description, content_width.saturating_sub(4));
             lines.push(Line::from(vec![

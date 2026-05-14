@@ -922,7 +922,7 @@ mod tests {
         assert_eq!(truncate_preview(short, 80), short);
 
         // Emoji test: multi-byte chars should not panic
-        let emoji = "🎉🎊🎁🎈🎉🎊🎁🎈🎉🎊🎁🎈🎉🎊🎁🎈🎉🎊🎁🎈🎉🎊🎁🎈";
+        let emoji = "";
         let preview = truncate_preview(emoji, 5);
         assert!(preview.ends_with("..."));
     }

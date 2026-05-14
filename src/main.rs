@@ -1101,7 +1101,7 @@ async fn main() -> anyhow::Result<()> {
                             drop(eng);
 
                             let _ = sender.send(engine::tui_events::UiEvent::Status(format!(
-                                "📷 Image attached ({} KB). Analyze it in your next message.",
+                                " Image attached ({} KB). Analyze it in your next message.",
                                 size_kb
                             )));
                             let _ = sender.send(engine::tui_events::UiEvent::QueryDone {
@@ -1186,7 +1186,7 @@ async fn main() -> anyhow::Result<()> {
                                 drop(eng);
 
                                 let _ = sender2.send(engine::tui_events::UiEvent::Status(
-                                    format!("📷 Image from clipboard attached ({} KB). Analyze it in your next message.", size_kb),
+                                    format!(" Image from clipboard attached ({} KB). Analyze it in your next message.", size_kb),
                                 ));
                                 let _ = sender2.send(engine::tui_events::UiEvent::QueryDone {
                                     text: String::new(),

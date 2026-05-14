@@ -45,7 +45,7 @@ impl TodoState {
     /// Format a human-readable summary of the plan and all tasks.
     pub fn format_task_list(&self) -> String {
         if self.tasks.is_empty() {
-            return "📋 No tasks in the plan.".to_string();
+            return "No tasks in the plan.".to_string();
         }
 
         let total = self.tasks.len();
@@ -57,10 +57,10 @@ impl TodoState {
 
         let mut out = String::new();
         if !self.plan.is_empty() {
-            out.push_str(&format!("📋 Plan: {}\n", self.plan));
+            out.push_str(&format!("Plan: {}\n", self.plan));
         } else {
             out.push_str(&format!(
-                "📋 {} tasks, {}/{} completed\n",
+                "{} tasks, {}/{} completed\n",
                 total, completed, total
             ));
         }
@@ -207,7 +207,7 @@ impl Tool for TodoTool {
 
                 let count = state.tasks.len();
                 Ok(format!(
-                    "✅ Created plan with {} tasks.\n{}",
+                    "Created plan with {} tasks.\n{}",
                     count,
                     state.format_task_list()
                 ))
@@ -234,7 +234,7 @@ impl Tool for TodoTool {
                 }
 
                 Ok(format!(
-                    "✅ Added {} task(s).\n{}",
+                    "Added {} task(s).\n{}",
                     tasks_raw.len(),
                     state.format_task_list()
                 ))
@@ -275,7 +275,7 @@ impl Tool for TodoTool {
                 } // mutable borrow on state ends here
 
                 Ok(format!(
-                    "✅ Updated {} → {}.\n{}",
+                    "Updated {} → {}.\n{}",
                     task_id_str,
                     status_str,
                     state.format_task_list()
@@ -298,7 +298,7 @@ impl Tool for TodoTool {
                 }
 
                 Ok(format!(
-                    "✅ Deleted {}.\n{}",
+                    "Deleted {}.\n{}",
                     task_id,
                     state.format_task_list()
                 ))
