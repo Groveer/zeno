@@ -115,7 +115,7 @@ Navigation:
 PgUp/PgDn — Scroll output
 Mouse wheel — Scroll output
 Shift+drag — Select & copy text
- Ctrl+C — Interrupt (when running) / Quit (when idle)
+ Ctrl+C — Clear input (when not empty) / Interrupt (when running) / No-op (when idle)
  Ctrl+D — Hard quit (immediate, any mode)
 ";
 /// Send a simple text response + QueryDone through the channel.

@@ -325,15 +325,16 @@ impl App {
                 modifiers: KeyModifiers::CONTROL,
                 ..
             } => {
+                // If there's text in the input, clear it first regardless of mode.
+                // Ctrl+C with text should never quit — it clears the input.
+                // Press Ctrl+C again (with empty input) to interrupt or do nothing.
+                if !self.input.text.is_empty() {
+                    self.input.reset();
+                    return;
+                }
+
                 match self.mode {
                     AppMode::Running | AppMode::WaitingInput => {
-                        // In Running mode: if there's text in the input, clear it
-                        // first (don't accidentally interrupt the agent just because
-                        // the user was typing). Second Ctrl+C actually interrupts.
-                        if self.mode == AppMode::Running && !self.input.text.is_empty() {
-                            self.input.reset();
-                            return;
-                        }
                         // Interrupt the LLM task instead of quitting.
                         // Works in both Running and WaitingInput modes so
                         // Ctrl+C can escape permission prompts, ask_user, etc.
@@ -347,8 +348,8 @@ impl App {
                         }
                     }
                     _ => {
-                        self.should_quit = true;
-                        self.cancel_token.cancel();
+                        // Idle mode with empty input: do nothing.
+                        // Use Ctrl+D to quit instead.
                     }
                 }
                 return;
