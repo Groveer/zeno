@@ -1498,27 +1498,39 @@ async fn execute_single_tool_tui(
                 Err(_) => false,
             }
         } else {
+            // Auto-denied (denied_commands, deny mode, or other policy rejection)
+            let denied_reason = decision.reason.clone();
             tracing::warn!(
                 tool_name = %tu.name,
                 permission_decision = "denied",
                 mode = %format!("{:?}", permission_mode),
+                reason = %denied_reason,
                 tool_id = %tu.id,
-                "Tool execution denied"
+                "Tool execution denied by policy"
             );
-            false
+            let _ = sender.send(UiEvent::ToolError {
+                name: tu.name.clone(),
+                error: denied_reason.clone(),
+            });
+            return Some(ContentBlock::ToolResult {
+                tool_use_id: tu.id.clone(),
+                content: denied_reason,
+                is_error: Some(true),
+            });
         }
     };
 
+    // User-denied (interactively said "n" to a permission prompt)
     if !permitted {
         tracing::warn!(
             tool_name = %tu.name,
-            permission_decision = "denied",
+            permission_decision = "denied_by_user",
             tool_id = %tu.id,
-            "Tool execution blocked by permission check"
+            "Tool execution denied by user"
         );
         let _ = sender.send(UiEvent::ToolError {
             name: tu.name.clone(),
-            error: "Permission denied".into(),
+            error: "Permission denied by user.".into(),
         });
         return Some(ContentBlock::ToolResult {
             tool_use_id: tu.id.clone(),
