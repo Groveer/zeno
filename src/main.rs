@@ -231,8 +231,9 @@ async fn main() -> anyhow::Result<()> {
         registry.register(Box::new(tools::bash::BashTool::new(
             tc.use_rtk,
             tc.bash_env.clone(),
-            tc.readonly_commands.clone(),
-            tc.destructive_commands.clone(),
+            tc.allowed_commands.clone(),
+            tc.ask_commands.clone(),
+            tc.denied_commands.clone(),
         )))?;
     }
     if tc.read {

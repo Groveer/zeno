@@ -223,6 +223,21 @@ fn build_settings(lua: &Lua) -> anyhow::Result<Settings> {
         }
     }
 
+    // --- commands ---
+    // zn.commands({ allow = {...}, ask = {...}, deny = {...} })
+    // Merged into settings.tools.{allowed_commands, ask_commands, denied_commands}
+    if let Ok(cmd_table) = overrides.get::<mlua::Table>("commands") {
+        if let Ok(cmds) = cmd_table.get::<Vec<String>>("allow") {
+            settings.tools.allowed_commands = cmds;
+        }
+        if let Ok(cmds) = cmd_table.get::<Vec<String>>("ask") {
+            settings.tools.ask_commands = cmds;
+        }
+        if let Ok(cmds) = cmd_table.get::<Vec<String>>("deny") {
+            settings.tools.denied_commands = cmds;
+        }
+    }
+
     // --- role ---
     if let Ok(role_table) = overrides.get::<mlua::Table>("role") {
         if let Ok(v) = role_table.get::<String>("identity")
@@ -442,6 +457,7 @@ fn register_zeno_api(lua: &Lua, table: &mlua::Table) -> anyhow::Result<()> {
     )?;
 
     // --- Tools ---
+    // Singular: zn.tool("web_fetch", false)  → quick enable/disable a single tool
     table.set(
         "tool",
         lua.create_function(move |lua, (name, enabled): (String, bool)| {
@@ -450,6 +466,49 @@ fn register_zeno_api(lua: &Lua, table: &mlua::Table) -> anyhow::Result<()> {
                 .unwrap_or_else(|_| lua.create_table().unwrap());
             tools.set(name, enabled)?;
             get_overrides(lua)?.set("tools", tools)?;
+            Ok(())
+        })?,
+    )?;
+
+    // Plural: zn.tools({...})  → bulk tool config (booleans only)
+    //   zn.tools({ web_fetch = false, bash = false })
+    //
+    // Command permissions → zn.commands({ allow=..., ask=..., deny=... })
+    table.set(
+        "tools",
+        lua.create_function(move |lua, opts: mlua::Table| {
+            let tools: mlua::Table = get_overrides(lua)?
+                .get::<mlua::Table>("tools")
+                .unwrap_or_else(|_| lua.create_table().unwrap());
+            for result in opts.pairs::<String, mlua::Value>() {
+                let (k, v) = result?;
+                tools.set(k, v)?;
+            }
+            get_overrides(lua)?.set("tools", tools)?;
+            Ok(())
+        })?,
+    )?;
+
+    // --- Commands ---
+    // zn.commands({ allow = {...}, ask = {...}, deny = {...} })
+    // Separated from zn.tools for cleaner semantics.
+    //
+    //   zn.commands({
+    //     allow = { "pnpm list", "just --list" },   -- always auto-allow
+    //     ask   = { "git checkout", "git restore" }, -- require confirmation
+    //     deny  = { "some-dangerous-cmd" },          -- always blocked
+    //   })
+    table.set(
+        "commands",
+        lua.create_function(move |lua, opts: mlua::Table| {
+            let commands: mlua::Table = get_overrides(lua)?
+                .get::<mlua::Table>("commands")
+                .unwrap_or_else(|_| lua.create_table().unwrap());
+            for result in opts.pairs::<String, mlua::Value>() {
+                let (k, v) = result?;
+                commands.set(k, v)?;
+            }
+            get_overrides(lua)?.set("commands", commands)?;
             Ok(())
         })?,
     )?;

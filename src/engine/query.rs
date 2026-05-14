@@ -910,7 +910,8 @@ impl QueryEngine {
                             self.hook_executor.as_ref(),
                             &cancel,
                             Some(&*self.tool_cache),
-                            &self.settings.tools.destructive_commands,
+                            &self.settings.tools.ask_commands,
+                            &self.settings.tools.denied_commands,
                             self.settings.engine.tool_timeout_secs,
                             &self.settings.safe_paths,
                         )
@@ -972,7 +973,8 @@ impl QueryEngine {
                         self.hook_executor.as_ref(),
                         &cancel,
                         Some(&*self.tool_cache),
-                        &self.settings.tools.destructive_commands,
+                        &self.settings.tools.ask_commands,
+                        &self.settings.tools.denied_commands,
                         self.settings.engine.tool_timeout_secs,
                         &self.settings.safe_paths,
                     )
@@ -1300,7 +1302,8 @@ async fn execute_single_tool_tui_catch(
     hook_executor: Option<&HookExecutor>,
     cancel: &CancellationToken,
     tool_cache: Option<&std::sync::Mutex<crate::tools::cache::ToolCache>>,
-    destructive_commands: &[String],
+    ask_commands: &[String],
+    denied_commands: &[String],
     tool_timeout_secs: u64,
     safe_paths: &[String],
 ) -> ContentBlock {
@@ -1315,7 +1318,8 @@ async fn execute_single_tool_tui_catch(
         hook_executor,
         cancel,
         tool_cache,
-        destructive_commands,
+        ask_commands,
+        denied_commands,
         tool_timeout_secs,
         safe_paths,
     )
@@ -1348,7 +1352,8 @@ async fn execute_single_tool_tui(
     hook_executor: Option<&HookExecutor>,
     cancel: &CancellationToken,
     tool_cache: Option<&std::sync::Mutex<crate::tools::cache::ToolCache>>,
-    destructive_commands: &[String],
+    ask_commands: &[String],
+    denied_commands: &[String],
     tool_timeout_secs: u64,
     safe_paths: &[String],
 ) -> Option<ContentBlock> {
@@ -1436,8 +1441,9 @@ async fn execute_single_tool_tui(
             resolved.file_path.as_deref(),
             resolved.command.as_deref(),
             &ctx.cwd,
-            destructive_commands,
+            ask_commands,
             safe_paths,
+            denied_commands,
         );
 
         if decision.allowed {

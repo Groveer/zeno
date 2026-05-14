@@ -71,25 +71,29 @@ pub struct BashTool {
     timeout_secs: u64,
     /// Extra environment variables injected into every bash command execution.
     env: HashMap<String, String>,
-    /// Extra read-only command prefixes (merged with built-in defaults).
-    readonly_commands: Vec<String>,
-    /// Extra destructive command prefixes (merged with built-in defaults).
-    destructive_commands: Vec<String>,
+    /// Commands always allowed (merged with built-in read-only prefixes).
+    allowed_commands: Vec<String>,
+    /// Commands requiring confirmation (merged with built-in destructive prefixes).
+    ask_commands: Vec<String>,
+    /// Commands always denied (blocked unconditionally).
+    denied_commands: Vec<String>,
 }
 
 impl BashTool {
     pub fn new(
         use_rtk: bool,
         env: HashMap<String, String>,
-        readonly_commands: Vec<String>,
-        destructive_commands: Vec<String>,
+        allowed_commands: Vec<String>,
+        ask_commands: Vec<String>,
+        denied_commands: Vec<String>,
     ) -> Self {
         Self {
             use_rtk,
             timeout_secs: 120,
             env,
-            readonly_commands,
-            destructive_commands,
+            allowed_commands,
+            ask_commands,
+            denied_commands,
         }
     }
 
@@ -264,10 +268,17 @@ impl Tool for BashTool {
             "systemctl ",
             "service ",
         ];
+        // Check denied commands first — blocked unconditionally
+        for denied in &self.denied_commands {
+            if trimmed.contains(denied) {
+                return false;
+            }
+        }
+        // Check built-in destructive + user ask_commands
         for destructive in BUILTIN_DESTRUCTIVE
             .iter()
             .copied()
-            .chain(self.destructive_commands.iter().map(|s| s.as_str()))
+            .chain(self.ask_commands.iter().map(|s| s.as_str()))
         {
             if trimmed.contains(destructive) {
                 return false;
@@ -282,7 +293,7 @@ impl Tool for BashTool {
             .iter()
             .any(|prefix| trimmed.starts_with(prefix))
             || self
-                .readonly_commands
+                .allowed_commands
                 .iter()
                 .any(|cmd| trimmed.starts_with(cmd))
     }
@@ -448,7 +459,7 @@ mod rtk_tests {
 
     #[tokio::test]
     async fn test_rtk_route_with_cd_prefix() {
-        let tool = BashTool::new(true, HashMap::new(), vec![], vec![]);
+        let tool = BashTool::new(true, HashMap::new(), vec![], vec![], vec![]);
         let result = tool.maybe_rtk_route("cd /tmp && ls").await;
         assert!(
             result.is_some(),
@@ -461,14 +472,14 @@ mod rtk_tests {
 
     #[tokio::test]
     async fn test_rtk_route_disabled_with_cd() {
-        let tool = BashTool::new(false, HashMap::new(), vec![], vec![]);
+        let tool = BashTool::new(false, HashMap::new(), vec![], vec![], vec![]);
         let result = tool.maybe_rtk_route("cd /tmp && ls").await;
         assert!(result.is_none(), "should not route when disabled");
     }
 
     #[tokio::test]
     async fn test_rtk_route_simple() {
-        let tool = BashTool::new(true, HashMap::new(), vec![], vec![]);
+        let tool = BashTool::new(true, HashMap::new(), vec![], vec![], vec![]);
         let result = tool.maybe_rtk_route("ls").await;
         assert!(result.is_some());
         let (rewritten, cd_dir) = result.unwrap();
@@ -478,7 +489,7 @@ mod rtk_tests {
 
     #[tokio::test]
     async fn test_rtk_skip_real_compound() {
-        let tool = BashTool::new(true, HashMap::new(), vec![], vec![]);
+        let tool = BashTool::new(true, HashMap::new(), vec![], vec![], vec![]);
         // Real compound commands with pipes should still be skipped
         assert!(tool.maybe_rtk_route("ls | head").await.is_none());
         assert!(

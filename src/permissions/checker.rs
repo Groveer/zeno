@@ -295,10 +295,11 @@ fn extract_command(tool_input: &Value) -> Option<String> {
 /// - Only ask for potentially destructive or boundary-crossing operations
 ///
 /// Logic:
-/// - Allow mode: all tools allowed
+/// - Denied commands are always blocked, regardless of mode.
+/// - Allow mode: all other tools allowed
 /// - Deny mode: only read-only tools allowed
 /// - Ask mode: read-only auto-allowed; writes in CWD/temp auto-allowed;
-///   destructive commands and out-of-zone access require confirmation
+///   ask commands and destructive commands require confirmation
 pub fn evaluate_permission(
     mode: &PermissionMode,
     trusted_paths: &[String],
@@ -309,6 +310,7 @@ pub fn evaluate_permission(
     cwd: &Path,
     extra_destructive_commands: &[String],
     safe_paths: &[String],
+    denied_commands: &[String],
 ) -> PermissionDecision {
     // 0. Trusted path check — bypasses all other checks
     if let Some(path) = file_path {
@@ -328,6 +330,33 @@ pub fn evaluate_permission(
                 requires_confirmation: false,
                 reason: "Path is under trusted path".to_string(),
             };
+        }
+    }
+
+    // Denied commands: blocked unconditionally, before mode check
+    if tool_name == "bash" {
+        if let Some(cmd) = command {
+            let trimmed = cmd.trim();
+            for denied in denied_commands {
+                if trimmed.contains(denied) {
+                    tracing::warn!(
+                        tool_name = "bash",
+                        permission_decision = "denied",
+                        reason = "denied_command",
+                        command = %cmd,
+                        denied_pattern = %denied,
+                        "Command blocked by denied_commands"
+                    );
+                    return PermissionDecision {
+                        allowed: false,
+                        requires_confirmation: false,
+                        reason: format!(
+                            "Command '{}' is blocked by policy",
+                            cmd.chars().take(80).collect::<String>()
+                        ),
+                    };
+                }
+            }
         }
     }
 
@@ -610,6 +639,7 @@ mod tests {
             Path::new("/tmp/work"),
             &[],
             &[],
+            &[],
         )
     }
 
@@ -625,6 +655,7 @@ mod tests {
             Path::new(cwd),
             &[],
             &[],
+            &[],
         )
     }
 
@@ -638,6 +669,7 @@ mod tests {
             Some(Path::new(path)),
             None,
             Path::new(cwd),
+            &[],
             &[],
             &[],
         )
@@ -858,6 +890,7 @@ mod tests {
             Some(Path::new("/data/projects/lib/main.rs")),
             None,
             Path::new("/home/user/proj"),
+            &[],
             &[],
             &[],
         );

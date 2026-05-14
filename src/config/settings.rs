@@ -200,17 +200,18 @@ pub struct ToolsConfig {
     /// User additions are appended; the defaults are always included.
     #[serde(default)]
     pub skip_dirs: Vec<String>,
-    /// Extra bash read-only commands (appended to built-in defaults).
-    /// These are recognized as safe by `is_read_only` to skip permission prompts.
+    /// Commands that are always allowed (auto-approve, skip permission prompt).
+    /// These are appended to the built-in read-only prefixes.
     #[serde(default)]
-    pub readonly_commands: Vec<String>,
-    /// Extra destructive bash commands (appended to built-in defaults).
-    /// These always require user confirmation in "ask" mode.
-    /// Matched via `contains()` — substring/wildcard matching, so:
-    ///   `"terraform"`    → matches any command containing "terraform"
-    ///   `"git rebase"`   → matches "git rebase -i", "git rebase --continue", etc.
+    pub allowed_commands: Vec<String>,
+    /// Commands that always require user confirmation in "ask" mode.
+    /// These are appended to the built-in destructive prefix list.
     #[serde(default)]
-    pub destructive_commands: Vec<String>,
+    pub ask_commands: Vec<String>,
+    /// Commands that are always blocked (denied), even in "allow" mode.
+    /// The LLM cannot execute these under any circumstances.
+    #[serde(default)]
+    pub denied_commands: Vec<String>,
 }
 
 impl Default for ToolsConfig {
@@ -227,8 +228,9 @@ impl Default for ToolsConfig {
             web_search: true,
             web_fetch: true,
             skip_dirs: Vec::new(),
-            readonly_commands: Vec::new(),
-            destructive_commands: Vec::new(),
+            allowed_commands: Vec::new(),
+            ask_commands: Vec::new(),
+            denied_commands: Vec::new(),
         }
     }
 }
