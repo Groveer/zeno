@@ -109,19 +109,33 @@ fn guidelines(role: &RoleConfig) -> String {
 - Use tools proactively to read files, run commands, search information, and verify changes when needed.
 - When the user is just chatting or asking a question — respond with text only, no tool calls.
 - Follow the user's project conventions (CLAUDE.md / AGENTS.md) if present.
-- **Batch independent tool calls**: Issue all independent calls in one response (e.g. `glob` + `grep` together). Only sequence calls with data dependencies.
+- **Batch independent tool calls**: Issue all independent calls in one response (e.g. `glob` + `grep` together). Only sequence calls with - **Act, don't ask**: When a question has an obvious default interpretation, act on it
+  immediately instead of asking for clarification. Examples:
+  - "Is port 443 open?" → check THIS machine (don't ask "open where?")
+  - "What OS am I running?" → check the live system (don't use user profile)
+  - "What time is it?" → run `date` (don't guess)
+  Only ask for clarification when the ambiguity genuinely changes what tool you would call.
+- **MCP First (IMPORTANT)** — Before calling `web_search` or `web_fetch`, you MUST check
+  if any configured MCP server can handle the task. MCP provides structured, authoritative
+  data (e.g. library documentation) that generic web search cannot match. \
+  \
+  **MCP servers are lazy-connected** — `[stopped]` is the **normal initial state**, it does
+  NOT mean unavailable. \
+  \
+  **Correct workflow — follow these steps precisely:** \
+  **Step 1**: `mcp_list_servers` — see what servers are configured. \
+  **Step 2**: `mcp_list_tools(name)` — **activates** the server AND returns its tools. \
+  **Step 3**: `mcp_call_tool(name, tool, args)` — execute the tool. \
+  \
+  **⚠️ DO NOT stop after Step 1.** Seeing `[stopped]` means "not yet activated" —
+  proceed immediately to Step 2 (`mcp_list_tools(name)`) to activate the server. \
+  `mcp_describe_tool` is usually unnecessary — Step 2 already returns full schemas.
 - **Use `delegate_task` only for truly parallel subtasks** (batch mode with `tasks` array). \
   Never delegate a single tool call — call `web_search`, `web_fetch`, `read`, etc. directly. \
   Delegating a single search or read wastes tokens, loses context, and can cause infinite loops.
 - **Plan complex tasks with `todo`**: When given a multi-step request, first create a task plan
   using `todo(action="create", plan="...", tasks=[...])`, then execute each step and mark progress
   with `todo(action="update", task_id="T1", status="completed")`.
-- **Act, don't ask**: When a question has an obvious default interpretation, act on it
-  immediately instead of asking for clarification. Examples:
-  - "Is port 443 open?" → check THIS machine (don't ask "open where?")
-  - "What OS am I running?" → check the live system (don't use user profile)
-  - "What time is it?" → run `date` (don't guess)
-  Only ask for clarification when the ambiguity genuinely changes what tool you would call.
 - **Scope searches to the project structure**: Before using `grep` or `glob`, check
   the Environment section for the detected build system. Target searches at the source
   tree (e.g. `path="src"`) rather than the project root. Start shallow (`glob("*")`)
@@ -142,9 +156,10 @@ fn guidelines(role: &RoleConfig) -> String {
   indentation style (spaces vs tabs, depth). Copy the indentation directly from
   `read` output rather than guessing or re-typing it.
 - **Missing context**: If required context is missing, do NOT guess or hallucinate an answer.
-  Use the appropriate lookup tool when missing information is retrievable
-  (read, grep, glob, web_search, web_fetch, etc.).
-  Use the `clarify` tool to ask the user a question only when the information
+  **MCP First** (same as above): call `mcp_list_servers`, then immediately call
+  `mcp_list_tools(name)` to **activate** the server. Only if no MCP server has relevant
+  tools, fall back to web_search, web_fetch, grep, glob, read, etc.
+  Use the `ask_user` tool to ask the user a question only when the information
   cannot be retrieved by tools. If you must proceed with incomplete information,
   label assumptions explicitly.
 "#
@@ -161,6 +176,10 @@ fn guidelines(role: &RoleConfig) -> String {
 
 /// Format the tool list as a readable block for the system prompt.
 ///
+/// Tools are grouped by category to give the LLM a visual hierarchy:
+/// MCP tools (preferred for structured data) → Web tools → all others.
+/// This helps the LLM choose the right tool for the task at a glance.
+///
 /// Only lists tool names — descriptions are already in the API tool schemas
 /// sent with every request, so repeating them here would be redundant and
 /// waste tokens. The system prompt just needs to tell the LLM what tools
@@ -170,11 +189,42 @@ fn tools_block(names: &[&str]) -> String {
         return "## Tools\n\n(No tools registered.)".to_string();
     }
 
-    format!(
-        "## Tools ({} available)\n\n{}",
-        names.len(),
-        names.join(", ")
-    )
+    // Group tools by category for visual priority
+    let mcp: Vec<&str> = names
+        .iter()
+        .filter(|n| n.starts_with("mcp_"))
+        .copied()
+        .collect();
+    let web: Vec<&str> = names
+        .iter()
+        .filter(|n| **n == "web_search" || **n == "web_fetch")
+        .copied()
+        .collect();
+    let other: Vec<&str> = names
+        .iter()
+        .filter(|n| !n.starts_with("mcp_") && **n != "web_search" && **n != "web_fetch")
+        .copied()
+        .collect();
+
+    let mut lines = vec![format!("## Tools ({} available)\n", names.len())];
+
+    if !mcp.is_empty() {
+        lines.push(format!(
+            "### MCP (Model Context Protocol) — Preferred for library docs & structured data\n{}",
+            mcp.join(", ")
+        ));
+    }
+    if !web.is_empty() {
+        lines.push(format!(
+            "### Web — Use when MCP cannot handle the task\n{}",
+            web.join(", ")
+        ));
+    }
+    if !other.is_empty() {
+        lines.push(format!("### Other\n{}", other.join(", ")));
+    }
+
+    lines.join("\n\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -348,11 +398,45 @@ mod tests {
         let names = vec!["bash", "read"];
         let block = tools_block(&names);
         assert!(block.contains("2 available"));
+        assert!(block.contains("### Other"));
         assert!(block.contains("bash"));
         assert!(block.contains("read"));
         // Descriptions should NOT be in the system prompt block (they're in API schemas)
         assert!(!block.contains("Execute"));
         assert!(!block.contains("Read the"));
+    }
+
+    #[test]
+    fn test_tools_block_grouping() {
+        let names = vec![
+            "mcp_list_servers",
+            "mcp_call_tool",
+            "web_search",
+            "web_fetch",
+            "bash",
+            "read",
+        ];
+        let block = tools_block(&names);
+        assert!(block.contains("6 available"));
+        // MCP group
+        assert!(block.contains("### MCP (Model Context Protocol)"));
+        assert!(block.contains("mcp_list_servers"));
+        assert!(block.contains("mcp_call_tool"));
+        // Web group
+        assert!(block.contains("### Web"));
+        assert!(block.contains("web_search"));
+        assert!(block.contains("web_fetch"));
+        // Other group
+        assert!(block.contains("### Other"));
+        assert!(block.contains("bash"));
+        assert!(block.contains("read"));
+        // Priority order: MCP comes before Web
+        let mcp_pos = block.find("MCP").unwrap();
+        let web_pos = block.find("### Web").unwrap();
+        assert!(
+            mcp_pos < web_pos,
+            "MCP group should appear before Web group"
+        );
     }
 
     #[test]

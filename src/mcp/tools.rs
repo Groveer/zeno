@@ -41,7 +41,7 @@ impl Tool for McpListServersTool {
             "type": "function",
             "function": {
                 "name": "mcp_list_servers",
-                "description": "List all configured MCP servers and their current status.",
+                "description": "List all configured MCP servers and their current status. Servers shown as [stopped] are normal — use mcp_list_tools(name) to activate them and discover their tools. IMPORTANT: seeing [stopped] means 'not yet activated', not 'unavailable'.",
                 "parameters": {
                     "type": "object",
                     "properties": {},
@@ -85,7 +85,7 @@ impl Tool for McpListToolsTool {
             "type": "function",
             "function": {
                 "name": "mcp_list_tools",
-                "description": "Discover available tools on an MCP server. Connects on-demand if not already connected. Returns tool names, descriptions, AND full parameter schemas — you can call tools directly without needing mcp_describe_tool.",
+                "description": "Activate an MCP server (if not already connected) and discover its tools. This is the SECOND STEP after mcp_list_servers — call this to actually connect to a [stopped] server. Returns tool names, descriptions, AND full parameter schemas — you can call tools directly without needing mcp_describe_tool.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -232,7 +232,7 @@ impl Tool for McpCallToolTool {
             "type": "function",
             "function": {
                 "name": "mcp_call_tool",
-                "description": "Execute a tool on an MCP server. Connects on-demand if not already connected. Use mcp_list_tools first to discover available tools and their parameter schemas.",
+                "description": "Execute a tool on an MCP server. Connects on-demand if not already connected (lazy activation). Use mcp_list_tools first to discover available tools and their parameter schemas — that call also activates the server.",
                 "parameters": {
                     "type": "object",
                     "properties": {

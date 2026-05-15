@@ -128,11 +128,24 @@ impl McpManager {
                 format!("- {} [{}] ({})", name, status, transport)
             })
             .collect();
-        format!(
+        let mut result = format!(
             "MCP servers ({}):\n{}",
             self.servers.len(),
             lines.join("\n")
-        )
+        );
+
+        // If any servers are stopped, remind the LLM to activate them
+        if self
+            .servers
+            .values()
+            .any(|s| s.status == ServerStatus::Stopped)
+        {
+            result.push_str(
+                "\n\n>>> Use `mcp_list_tools(<name>)` to activate a stopped server and see its available tools."
+            );
+        }
+
+        result
     }
 
     // -----------------------------------------------------------------------
