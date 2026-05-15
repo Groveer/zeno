@@ -2194,6 +2194,28 @@ fn summarize_tool_output(tool_name: &str, output: &str, _input_json: &str) -> St
                 format!("{}: ({} lines)", server, line_count)
             }
         }
+        // mcp_call_tool: result is for LLM — user only needs to know it completed
+        "mcp_call_tool" => {
+            let input = parse_tool_input_or_empty(_input_json);
+            let server = input
+                .get("server_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let tool = input
+                .get("tool_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let line_count = output.lines().count();
+            let char_count = output.len();
+            if char_count > 200 {
+                format!(
+                    "{}/{} ✓ ({} lines, {} chars)",
+                    server, tool, line_count, char_count
+                )
+            } else {
+                format!("{}/{} ✓ ({} lines)", server, tool, line_count)
+            }
+        }
         // mcp_describe_tool: single tool schema — for LLM
         "mcp_describe_tool" => {
             let input = parse_tool_input_or_empty(_input_json);
@@ -2546,5 +2568,62 @@ fn format_tool_input_summary(tool_name: &str, input_json: &str) -> String {
             }
         }
         _ => format!("\u{f0ad} {}", tool_name),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_summarize_mcp_call_tool_short() {
+        let result = summarize_tool_output(
+            "mcp_call_tool",
+            "hello world",
+            r#"{"server_name":"playwright","tool_name":"screenshot"}"#,
+        );
+        assert_eq!(result, "playwright/screenshot ✓ (1 lines)");
+    }
+
+    #[test]
+    fn test_summarize_mcp_call_tool_long() {
+        let long = "x".repeat(250);
+        let result = summarize_tool_output(
+            "mcp_call_tool",
+            &long,
+            r#"{"server_name":"filesystem","tool_name":"read"}"#,
+        );
+        assert_eq!(result, "filesystem/read ✓ (1 lines, 250 chars)");
+    }
+
+    #[test]
+    fn test_summarize_mcp_call_tool_empty() {
+        let result = summarize_tool_output(
+            "mcp_call_tool",
+            "",
+            r#"{"server_name":"playwright","tool_name":"screenshot"}"#,
+        );
+        assert_eq!(result, "playwright/screenshot ✓ (0 lines)");
+    }
+
+    #[test]
+    fn test_summarize_mcp_call_tool_missing_input() {
+        let result = summarize_tool_output("mcp_call_tool", "some output", "");
+        assert_eq!(result, "?/? ✓ (1 lines)");
+    }
+
+    #[test]
+    fn test_summarize_mcp_call_tool_multi_line() {
+        let output = "line1\nline2\nline3\nline4\nline5";
+        let result = summarize_tool_output(
+            "mcp_call_tool",
+            output,
+            r#"{"server_name":"git","tool_name":"status"}"#,
+        );
+        assert_eq!(result, "git/status ✓ (5 lines)");
     }
 }
