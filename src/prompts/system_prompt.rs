@@ -123,12 +123,16 @@ fn guidelines(role: &RoleConfig) -> String {
   NOT mean unavailable. \
   \
   **Correct workflow — follow these steps precisely:** \
-  **Step 1**: `mcp_list_servers` — see what servers are configured. \
+  **Step 1**: `mcp_list_servers` — see what servers are configured. Each server may show a
+  **description** — read it to decide which server matches your task. Prefer servers whose
+  description is relevant. \
   **Step 2**: `mcp_list_tools(name)` — **activates** the server AND returns its tools. \
   **Step 3**: `mcp_call_tool(name, tool, args)` — execute the tool. \
   \
-  **⚠️ DO NOT stop after Step 1.** Seeing `[stopped]` means "not yet activated" —
-  proceed immediately to Step 2 (`mcp_list_tools(name)`) to activate the server. \
+  **⚠️ Use descriptions to choose wisely.** If a server description matches your task,
+  activate it first. If no description matches but servers are configured, still consider
+  activating the most likely one to check its tools — descriptions are optional and absent
+  descriptions do not mean the server is irrelevant. \
   `mcp_describe_tool` is usually unnecessary — Step 2 already returns full schemas.
 - **Use `delegate_task` only for truly parallel subtasks** (batch mode with `tasks` array). \
   Never delegate a single tool call — call `web_search`, `web_fetch`, `read`, etc. directly. \
@@ -156,9 +160,10 @@ fn guidelines(role: &RoleConfig) -> String {
   indentation style (spaces vs tabs, depth). Copy the indentation directly from
   `read` output rather than guessing or re-typing it.
 - **Missing context**: If required context is missing, do NOT guess or hallucinate an answer.
-  **MCP First** (same as above): call `mcp_list_servers`, then immediately call
-  `mcp_list_tools(name)` to **activate** the server. Only if no MCP server has relevant
-  tools, fall back to web_search, web_fetch, grep, glob, read, etc.
+  **MCP First** (same as above): call `mcp_list_servers`, check server descriptions,
+  then activate the matching server via `mcp_list_tools(name)`. If no description matches
+  but servers are configured, still consider activating the most likely one. Only if no
+  MCP server is relevant, fall back to web_search, web_fetch, grep, glob, read, etc.
   Use the `ask_user` tool to ask the user a question only when the information
   cannot be retrieved by tools. If you must proceed with incomplete information,
   label assumptions explicitly.

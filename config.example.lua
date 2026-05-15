@@ -106,22 +106,44 @@ zn.set_model("gpt-5.5")
 -- when the LLM first calls mcp_list_tools or mcp_call_tool on it.
 -- This keeps zeno startup instant regardless of how many servers are configured.
 --
+-- Each server can have a `description` and optional `tags` to help the LLM
+-- decide which server to activate — no blind activation needed.
+-- `description` is shown in mcp_list_servers output before any connection.
+-- `tags` provide additional semantic hints for routing decisions.
+--
 -- ── Local commands (stdio transport) ──────────────
 --
 -- zn.mcp_servers({
---   ["filesystem"] = { command = { "npx", "-y", "@modelcontextprotocol/server-filesystem", "/home/user/documents" } },
---   ["github"]     = { command = { "npx", "-y", "@modelcontextprotocol/server-github" } },
---   ["git"]        = { command = { "npx", "-y", "@modelcontextprotocol/server-git", "--repository", "." } },
---   ["postgres"]   = { command = { "npx", "-y", "@modelcontextprotocol/server-postgres", "postgresql://localhost/mydb" } },
---   ["sqlite"]     = { command = { "npx", "-y", "mcp-server-sqlite", "--db-path", "/path/to/database.db" } },
---   ["fetch"]      = { command = { "npx", "-y", "@modelcontextprotocol/server-fetch" } },
+--   ["context7"] = {
+--     command = { "npx", "-y", "@upstash/context7-mcp@latest" },
+--     description = "Library/framework documentation lookup. Use for any programming library docs, API references, or framework guides.",
+--     tags = { "docs", "library", "api" },
+--   },
+--   ["filesystem"] = {
+--     command = { "npx", "-y", "@modelcontextprotocol/server-filesystem", "/home/user/documents" },
+--     description = "File system operations (read/write/list) on /home/user/documents.",
+--   },
+--   ["github"] = {
+--     command = { "npx", "-y", "@modelcontextprotocol/server-github" },
+--     description = "GitHub operations: repos, issues, pull requests, code search.",
+--     tags = { "git", "github", "code" },
+--   },
+--   ["git"] = {
+--     command = { "npx", "-y", "@modelcontextprotocol/server-git", "--repository", "." },
+--     description = "Local git operations: log, diff, blame, branch management on current repo.",
+--   },
+--   ["postgres"] = {
+--     command = { "npx", "-y", "@modelcontextprotocol/server-postgres", "postgresql://localhost/mydb" },
+--     description = "PostgreSQL database queries and schema inspection.",
+--     tags = { "database", "sql" },
+--   },
 -- })
 --
 -- ── HTTP transport (remote servers) ───────────────
 --
 -- zn.mcp_servers({
 --   -- Simple HTTP (no auth):
---   ["local-api"] = { url = "http://localhost:3000" },
+--   ["local-api"] = { url = "http://localhost:3000", description = "Local development API." },
 --   -- With custom headers:
 --   ["remote-api"] = {
 --     url = "https://api.example.com/mcp",
@@ -129,6 +151,7 @@ zn.set_model("gpt-5.5")
 --       ["Authorization"] = "Bearer sk-your-token-here",
 --       ["X-API-Key"] = "your-api-key",
 --     },
+--     description = "Example remote API with custom auth.",
 --   },
 --   -- GitLab MCP:
 --   ["gitlab"] = {
@@ -136,6 +159,8 @@ zn.set_model("gpt-5.5")
 --     headers = {
 --       ["PRIVATE-TOKEN"] = "glpat-xxxxxxxxxxxx",
 --     },
+--     description = "GitLab operations: repos, issues, merge requests, CI/CD pipelines.",
+--     tags = { "gitlab", "git", "ci" },
 --   },
 -- })
 

@@ -41,7 +41,7 @@ impl Tool for McpListServersTool {
             "type": "function",
             "function": {
                 "name": "mcp_list_servers",
-                "description": "List all configured MCP servers and their current status. Servers shown as [stopped] are normal — use mcp_list_tools(name) to activate them and discover their tools. IMPORTANT: seeing [stopped] means 'not yet activated', not 'unavailable'.",
+                "description": "List all configured MCP servers and their current status. Each server shows its description (if configured) to help you decide which to activate. Servers shown as [stopped] are normal — use mcp_list_tools(name) to activate them and discover their tools. IMPORTANT: seeing [stopped] means 'not yet activated', not 'unavailable'.",
                 "parameters": {
                     "type": "object",
                     "properties": {},

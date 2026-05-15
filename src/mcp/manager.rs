@@ -4,6 +4,7 @@
 //! triggers the actual connection (spawn subprocess for stdio, HTTP for url).
 
 use std::collections::HashMap;
+use std::fmt::Write;
 
 use rmcp::model::CallToolRequestParams;
 use rmcp::service::{RoleClient, RunningService};
@@ -92,6 +93,8 @@ impl McpManager {
                             command: config.command.clone(),
                             url: config.url.clone(),
                             headers: config.headers.clone(),
+                            description: config.description.clone(),
+                            tags: config.tags.clone(),
                         },
                         status: ServerStatus::Stopped,
                         connection: None,
@@ -125,7 +128,14 @@ impl McpManager {
                 } else {
                     "stdio"
                 };
-                format!("- {} [{}] ({})", name, status, transport)
+                let mut line = format!("- {} [{}] ({})", name, status, transport);
+                if let Some(desc) = &s.config.description {
+                    let _ = write!(line, " — {}", desc);
+                }
+                if !s.config.tags.is_empty() {
+                    let _ = write!(line, "\n  tags: {}", s.config.tags.join(", "));
+                }
+                line
             })
             .collect();
         let mut result = format!(
@@ -454,6 +464,8 @@ mod tests {
             command: Some(vec!["echo".into(), "hello".into()]),
             url: None,
             headers: std::collections::HashMap::new(),
+            description: None,
+            tags: Vec::new(),
         };
         (name.to_string(), cfg)
     }
@@ -463,6 +475,8 @@ mod tests {
             command: None,
             url: Some("http://localhost:9999/mcp".into()),
             headers: std::collections::HashMap::new(),
+            description: None,
+            tags: Vec::new(),
         };
         (name.to_string(), cfg)
     }
@@ -509,6 +523,40 @@ mod tests {
     }
 
     #[test]
+    fn test_summary_with_description_and_tags() {
+        let mut configs = HashMap::new();
+        configs.insert(
+            "context7".to_string(),
+            McpServerConfig {
+                command: Some(vec!["npx".into()]),
+                url: None,
+                headers: std::collections::HashMap::new(),
+                description: Some("Library docs lookup".into()),
+                tags: vec!["docs".into(), "api".into()],
+            },
+        );
+        configs.insert(
+            "no-desc".to_string(),
+            McpServerConfig {
+                command: Some(vec!["echo".into()]),
+                url: None,
+                headers: std::collections::HashMap::new(),
+                description: None,
+                tags: Vec::new(),
+            },
+        );
+        let mgr = McpManager::from_config(&configs);
+        let summary = mgr.summary();
+        // Description shown
+        assert!(summary.contains("context7 [stopped] (stdio) — Library docs lookup"));
+        // Tags shown on next line
+        assert!(summary.contains("tags: docs, api"));
+        // Server without description has no " — " after status
+        assert!(summary.contains("no-desc [stopped] (stdio)"));
+        assert!(!summary.contains("no-desc [stopped] (stdio) —"));
+    }
+
+    #[test]
     fn test_get_mut_nonexistent() {
         let mut mgr = McpManager::from_config(&HashMap::new());
         assert!(mgr.get_mut("nope").is_none());
@@ -550,6 +598,8 @@ mod tests {
                 command: Some(vec!["/nonexistent/binary".into()]),
                 url: None,
                 headers: std::collections::HashMap::new(),
+                description: None,
+                tags: Vec::new(),
             },
         );
         let mut mgr = McpManager::from_config(&configs);
@@ -571,6 +621,8 @@ mod tests {
                 command: Some(vec!["/nonexistent/binary".into()]),
                 url: None,
                 headers: std::collections::HashMap::new(),
+                description: None,
+                tags: Vec::new(),
             },
         );
         let mut mgr = McpManager::from_config(&configs);

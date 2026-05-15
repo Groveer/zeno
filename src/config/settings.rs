@@ -442,6 +442,12 @@ pub struct McpServerConfig {
     /// Custom HTTP headers for url-based MCP servers (e.g. Authorization, API keys).
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    /// User-written description shown to LLM before activation (zero-cost routing).
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Optional tags for semantic routing by the LLM.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
