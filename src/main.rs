@@ -439,7 +439,6 @@ async fn main() -> anyhow::Result<()> {
         skill_registry.clone(),
         skill_dirs.clone(),
     )))?;
-    let skill_tool_count = registry.names().len() - builtin_tool_count;
 
     // Load Lua plugins from configured directory and register as tools
     let plugin_dir =
@@ -469,7 +468,8 @@ async fn main() -> anyhow::Result<()> {
     registry.register(Box::new(mcp::tools::McpListToolsTool::new()))?;
     registry.register(Box::new(mcp::tools::McpDescribeToolTool::new()))?;
     registry.register(Box::new(mcp::tools::McpCallToolTool::new()))?;
-    let mcp_tool_count = registry.names().len() - builtin_tool_count - skill_tool_count;
+    let mcp_server_count = settings.mcp.servers.len();
+    let skill_count = skill_registry.lock().await.len();
 
     // Build system prompt — use memory manager for built-in + external provider content
     let memory_prompt = memory_manager.lock().await.build_system_prompt();
@@ -550,9 +550,8 @@ async fn main() -> anyhow::Result<()> {
         total_tokens: 0,
         context_window: 0,
         turn_count: 0,
-        builtin_tool_count,
-        mcp_tool_count,
-        skill_tool_count,
+        mcp_server_count,
+        skill_count,
         mode: ui::status_bar::AppMode::Idle,
         steer_count: 0,
     });

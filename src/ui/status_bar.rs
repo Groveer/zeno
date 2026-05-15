@@ -16,9 +16,8 @@ pub struct StatusInfo {
     pub total_tokens: u64,
     pub context_window: u32,
     pub turn_count: u64,
-    pub builtin_tool_count: usize,
-    pub mcp_tool_count: usize,
-    pub skill_tool_count: usize,
+    pub mcp_server_count: usize,
+    pub skill_count: usize,
     /// Current app mode for status display.
     pub mode: AppMode,
     /// Number of queued "steer" messages (user input while agent is running).
@@ -86,15 +85,19 @@ pub fn render(frame: &mut Frame, area: Rect, info: &StatusInfo) {
         ));
     }
 
-    // Push everything to the right: tool counts (builtin + mcp + skill)
-    let mut tool_parts = vec![format!("{} builtin", info.builtin_tool_count)];
-    if info.mcp_tool_count > 0 {
-        tool_parts.push(format!("{} mcp", info.mcp_tool_count));
+    // Push everything to the right: MCP servers + skills
+    let mut parts = Vec::new();
+    if info.mcp_server_count > 0 {
+        parts.push(format!("{} MCP", info.mcp_server_count));
     }
-    if info.skill_tool_count > 0 {
-        tool_parts.push(format!("{} skill", info.skill_tool_count));
+    if info.skill_count > 0 {
+        parts.push(format!("{} skill", info.skill_count));
     }
-    let right_text = format!("{} tools ", tool_parts.join(" · "));
+    let right_text = if parts.is_empty() {
+        String::new()
+    } else {
+        format!("{} ", parts.join(" · "))
+    };
     let right_width = right_text.len() as u16;
 
     // Status indicator (before right-aligned tools)
