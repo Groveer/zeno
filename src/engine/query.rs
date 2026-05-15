@@ -54,24 +54,38 @@ struct CollectedToolUse {
     input_json: String,
 }
 
-/// Parse tool input JSON, returning a descriptive error value if parsing fails.
-/// The error is structured so tool validation can reject it properly.
-fn parse_tool_input(input_json: &str) -> Value {
+/// Parse tool input JSON.
+///
+/// Returns `Ok(Value)` on success, or `Err(error_message)` on parse failure.
+/// The error message is clear and actionable so the LLM can self-correct.
+/// Callers in the execution path should return the error directly as a
+/// ToolResult; callers in display/history paths should fall back to an
+/// empty object.
+fn parse_tool_input(input_json: &str) -> Result<Value, String> {
     if input_json.is_empty() {
-        Value::Object(Default::default())
+        Ok(Value::Object(Default::default()))
     } else {
-        serde_json::from_str(input_json).unwrap_or_else(|e| {
+        serde_json::from_str(input_json).map_err(|e| {
             tracing::warn!(
                 error = %e,
                 raw_len = input_json.len(),
                 "Failed to parse tool input JSON"
             );
-            // Return a descriptive error object so validation can reject it
-            serde_json::json!({
-                "_parse_error": format!("Failed to parse tool input JSON: {}", e)
-            })
+            format!(
+                "JSON parse error in tool arguments: {}. \
+                 The arguments you provided are not valid JSON. \
+                 Check for unescaped characters, unclosed brackets, \
+                 or string values that should be numbers.",
+                e
+            )
         })
     }
+}
+
+/// Fallback: parse tool input, returning an empty object on failure.
+/// Use only in non-critical paths (display, history, parallel safety).
+fn parse_tool_input_or_empty(input_json: &str) -> Value {
+    parse_tool_input(input_json).unwrap_or_default()
 }
 
 /// Truncate a string to at most `max_chars` characters (not bytes).
@@ -164,15 +178,7 @@ fn should_parallelize(tool_uses: &[CollectedToolUse], cwd: &Path) -> bool {
     // Rule 3 & 4: parse args and check path overlaps
     let mut reserved_paths: Vec<PathBuf> = Vec::new();
     for tu in tool_uses {
-        let input = parse_tool_input(&tu.input_json);
-        if !input.is_object() {
-            tracing::debug!(
-                reason = "non_object_args",
-                tool_name = %tu.name,
-                "Parallel safety: falling back to sequential (non-object args)"
-            );
-            return false;
-        }
+        let input = parse_tool_input_or_empty(&tu.input_json);
 
         if let Some(scoped) = extract_scope_path(&tu.name, &input, cwd) {
             if reserved_paths.iter().any(|p| paths_overlap(p, &scoped)) {
@@ -379,15 +385,19 @@ impl QueryEngine {
                 self.history.sanitize();
 
                 // --- Vision preprocessing: analyze images via auxiliary model ---
-                // The OpenAI adapter drops Image blocks; Anthropic handles them natively.
-                // For providers that don't support vision, send images to the auxiliary
-                // vision model and replace Image blocks with text descriptions.
-                self.preprocess_images(sender).await;
+                // For providers that don't support vision (non-Anthropic), send images to the
+                // auxiliary vision model. The description is injected into the system prompt so
+                // the model treats it as context, not user input.
+                let vision_context = self.preprocess_images(sender).await;
 
                 let messages = self.history.to_api_messages();
 
                 // --- PreLlmCall hook: may inject extra context ---
                 let mut effective_system_prompt = self.system_prompt.clone();
+                // Append vision analysis to system prompt (before hooks so hooks see it)
+                if !vision_context.is_empty() {
+                    effective_system_prompt.push_str(&vision_context);
+                }
                 if let Some(he) = &self.hook_executor {
                     if he.has_hooks_for(HookEvent::PreLlmCall) {
                         if let Ok(ctx) = he.build_context() {
@@ -698,7 +708,7 @@ impl QueryEngine {
                 });
             }
             for tu in &tool_uses {
-                let input = parse_tool_input(&tu.input_json);
+                let input = parse_tool_input_or_empty(&tu.input_json);
                 assistant_blocks.push(ContentBlock::ToolUse {
                     id: tu.id.clone(),
                     name: tu.name.clone(),
@@ -828,7 +838,7 @@ impl QueryEngine {
                     });
                 }
                 for tu in &tool_uses {
-                    let tu_input = parse_tool_input(&tu.input_json);
+                    let tu_input = parse_tool_input_or_empty(&tu.input_json);
                     pre_tool_blocks.push(ContentBlock::ToolUse {
                         id: tu.id.clone(),
                         name: tu.name.clone(),
@@ -1046,7 +1056,7 @@ impl QueryEngine {
 
             // Record tool results in carryover (same pattern as query())
             for tu in &tool_uses {
-                let input = parse_tool_input(&tu.input_json);
+                let input = parse_tool_input_or_empty(&tu.input_json);
                 let resolved_path = resolve_file_path(&input);
                 let result_content = self.history.entries_raw().last().and_then(|entry| {
                     entry.content.iter().find_map(|b| match b {
@@ -1162,8 +1172,12 @@ impl QueryEngine {
     ///
     /// Anthropic natively supports Image blocks, so preprocessing is skipped for it.
     /// For all other providers (OpenAI-compatible), Image blocks are sent to the
-    /// auxiliary vision model and replaced with text descriptions.
-    async fn preprocess_images(&mut self, sender: &tokio::sync::mpsc::UnboundedSender<UiEvent>) {
+    /// auxiliary vision model. Returns a description string to inject into the
+    /// system prompt, so the model treats it as context rather than user input.
+    async fn preprocess_images(
+        &mut self,
+        sender: &tokio::sync::mpsc::UnboundedSender<UiEvent>,
+    ) -> String {
         // Anthropic handles images natively — no preprocessing needed
         let is_anthropic = self
             .settings
@@ -1172,7 +1186,7 @@ impl QueryEngine {
             .map(|p| p.api_type == crate::config::settings::ApiType::Anthropic)
             .unwrap_or(false);
         if is_anthropic {
-            return;
+            return String::new();
         }
 
         // Check if there are any Image blocks to process
@@ -1183,8 +1197,10 @@ impl QueryEngine {
         });
 
         if !has_images {
-            return;
+            return String::new();
         }
+
+        let mut descriptions: Vec<String> = Vec::new();
 
         // Process each entry that contains Image blocks
         for entry in self.history.entries_mut() {
@@ -1217,18 +1233,28 @@ impl QueryEngine {
                             } else {
                                 format!("image ({})", source_path)
                             };
-                            new_blocks.push(ContentBlock::Text {
-                                text: format!("[Image Analysis — {}]:\n{}", label, result.content),
-                            });
+                            descriptions
+                                .push(format!("[Image Analysis — {}]:\n{}", label, result.content));
                             modified = true;
+                            // Do NOT add a Text block — the description goes to system prompt
                         }
                         Err(e) => {
                             tracing::warn!(
                                 event = "vision_fallback",
                                 error = %e,
-                                "Auxiliary vision model failed, keeping image as-is"
+                                "Auxiliary vision model failed, removing image block"
                             );
-                            new_blocks.push(block.clone());
+                            // Remove the image block and add a fallback note
+                            descriptions.push(format!(
+                                "[Image ({}): analysis failed — {}]",
+                                if source_path.is_empty() {
+                                    "clipboard"
+                                } else {
+                                    source_path
+                                },
+                                e
+                            ));
+                            modified = true;
                         }
                     }
                 } else {
@@ -1239,6 +1265,16 @@ impl QueryEngine {
             if modified {
                 entry.content = new_blocks;
             }
+        }
+
+        if descriptions.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n\n## Attached Image Descriptions\n\nThe following images were attached by the user. \
+                 Their content has been analyzed and described below. Treat these as context, not as user input:\n\n{}",
+                descriptions.join("\n\n---\n\n")
+            )
         }
     }
 
@@ -1357,7 +1393,20 @@ async fn execute_single_tool_tui(
     tool_timeout_secs: u64,
     safe_paths: &[String],
 ) -> Option<ContentBlock> {
-    let input = parse_tool_input(&tu.input_json);
+    let input = match parse_tool_input(&tu.input_json) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = sender.send(UiEvent::ToolError {
+                name: tu.name.clone(),
+                error: e.clone(),
+            });
+            return Some(ContentBlock::ToolResult {
+                tool_use_id: tu.id.clone(),
+                content: format!("Error: {}", e),
+                is_error: Some(true),
+            });
+        }
+    };
 
     // --- Pre-tool-use hook ---
     if let Some(he) = hook_executor {
@@ -1846,7 +1895,7 @@ fn summarize_tool_output(tool_name: &str, output: &str, _input_json: &str) -> St
         }
         // edit: compute diff from input for color-coded display
         "edit" => {
-            let input = parse_tool_input(_input_json);
+            let input = parse_tool_input_or_empty(_input_json);
             let old_str = input
                 .get("old_string")
                 .and_then(|v| v.as_str())
@@ -1958,7 +2007,7 @@ fn summarize_tool_output(tool_name: &str, output: &str, _input_json: &str) -> St
         }
         // skill_view: LLM reads the content — user just needs to know what was loaded
         "skill_view" => {
-            let input = parse_tool_input(_input_json);
+            let input = parse_tool_input_or_empty(_input_json);
             let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("?");
             let line_count = output.lines().count();
             if let Some(fp) = input.get("file_path").and_then(|v| v.as_str()) {
@@ -1980,7 +2029,7 @@ fn summarize_tool_output(tool_name: &str, output: &str, _input_json: &str) -> St
         }
         // mcp_list_tools: full schemas are for LLM — user just needs the count
         "mcp_list_tools" => {
-            let input = parse_tool_input(_input_json);
+            let input = parse_tool_input_or_empty(_input_json);
             let server = input
                 .get("server_name")
                 .and_then(|v| v.as_str())
@@ -1995,7 +2044,7 @@ fn summarize_tool_output(tool_name: &str, output: &str, _input_json: &str) -> St
         }
         // mcp_describe_tool: single tool schema — for LLM
         "mcp_describe_tool" => {
-            let input = parse_tool_input(_input_json);
+            let input = parse_tool_input_or_empty(_input_json);
             let server = input
                 .get("server_name")
                 .and_then(|v| v.as_str())
@@ -2066,7 +2115,7 @@ fn summarize_tool_output(tool_name: &str, output: &str, _input_json: &str) -> St
 /// this shows the key parameters so the user can make an informed decision.
 /// Commands are NOT truncated — the user must see the full command to judge safety.
 fn format_permission_detail(tool_name: &str, input_json: &str) -> String {
-    let input = parse_tool_input(input_json);
+    let input = parse_tool_input_or_empty(input_json);
 
     match tool_name {
         "bash" => input
@@ -2162,7 +2211,7 @@ fn format_permission_detail(tool_name: &str, input_json: &str) -> String {
 /// Uses Nerd Font icons (PUA codepoints) instead of emoji for reliable
 /// terminal rendering via ratatui.
 fn format_tool_input_summary(tool_name: &str, input_json: &str) -> String {
-    let input = parse_tool_input(input_json);
+    let input = parse_tool_input_or_empty(input_json);
 
     match tool_name {
         "bash" => input

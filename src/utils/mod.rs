@@ -24,6 +24,10 @@ pub fn char_width(ch: char, next: Option<char>) -> usize {
     if matches!(ch as u32, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD) {
         return 2;
     }
+    // Image marker (U+FFFC) — rendered as "[img]" (5 display columns)
+    if ch == '\u{FFFC}' {
+        return 5;
+    }
     // Fall back to unicode-width for all other characters
     unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0)
 }

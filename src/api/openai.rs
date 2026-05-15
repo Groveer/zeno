@@ -153,19 +153,56 @@ impl OpenAIClient {
 
                 api_messages.push(msg);
             } else {
-                let text: String = m
+                // User message without tool results — may contain text + image blocks
+                let has_image = m
                     .content
                     .iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("");
-                api_messages.push(json!({
-                    "role": "user",
-                    "content": text,
-                }));
+                    .any(|b| matches!(b, ContentBlock::Image { .. }));
+
+                if has_image {
+                    // OpenAI multimodal format: content is an array of parts
+                    let mut parts: Vec<Value> = Vec::new();
+                    for block in &m.content {
+                        match block {
+                            ContentBlock::Text { text } => {
+                                parts.push(json!({
+                                    "type": "text",
+                                    "text": text,
+                                }));
+                            }
+                            ContentBlock::Image {
+                                media_type, data, ..
+                            } => {
+                                let data_url = format!("data:{};base64,{}", media_type, data);
+                                parts.push(json!({
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": data_url,
+                                    },
+                                }));
+                            }
+                            _ => {}
+                        }
+                    }
+                    api_messages.push(json!({
+                        "role": "user",
+                        "content": parts,
+                    }));
+                } else {
+                    let text: String = m
+                        .content
+                        .iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    api_messages.push(json!({
+                        "role": "user",
+                        "content": text,
+                    }));
+                }
             }
         }
 

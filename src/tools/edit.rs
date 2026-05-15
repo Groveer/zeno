@@ -89,10 +89,7 @@ impl Tool for EditTool {
         let resolved = ctx.resolve_path(path);
 
         if !resolved.exists() {
-            return Err(ToolError::NotFound(format!(
-                "File not found: {}",
-                resolved.display()
-            )));
+            return Err(ToolError::NotFound(format!("{}", resolved.display())));
         }
 
         let content = tokio::fs::read_to_string(&resolved).await?;

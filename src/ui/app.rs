@@ -104,6 +104,8 @@ pub struct App {
     render_dirty: bool,
     /// When true, auto-approve all permission requests without prompting.
     /// Set when the user answers "a" (yes to all) in a permission prompt.
+    /// When true, auto-approve all permission requests without prompting.
+    /// Set when the user answers "a" (yes to all) in a permission prompt.
     permission_allow_all: bool,
     /// Queue of user messages typed while the agent is running.
     /// These are sent as "steer" to the engine when the user presses Enter.
@@ -117,9 +119,8 @@ pub struct App {
     sub_agent_tx: tokio::sync::mpsc::UnboundedSender<SubAgentEvent>,
     /// Shared todo state for the side panel.
     todo_state: Option<std::sync::Arc<tokio::sync::Mutex<TodoState>>>,
-    /// Pending images pasted via Alt+V, waiting to be attached to the next message.
-    /// Each entry is (media_type, base64_data).
-    pending_images: Vec<(String, String)>,
+    /// Images extracted from input markers on submit, waiting for the main loop.
+    pending_image_blocks: Vec<(String, String)>,
 }
 
 /// A queued permission request waiting for user response.
@@ -173,7 +174,7 @@ impl App {
             sub_agent_tx,
             todo_state: None,
             _watcher_guard: None,
-            pending_images: Vec::new(),
+            pending_image_blocks: Vec::new(),
         }
     }
 
@@ -223,25 +224,11 @@ impl App {
         self.render_dirty = true;
     }
 
-    /// Take pending images, draining the queue.
-    pub fn take_pending_images(&mut self) -> Vec<(String, String)> {
-        let images = std::mem::take(&mut self.pending_images);
-        if !images.is_empty() {
-            self.render_dirty = true;
-        }
-        images
-    }
-
-    /// Number of pending images waiting to be attached.
-    pub fn pending_image_count(&self) -> usize {
-        self.pending_images.len()
-    }
-
     /// Trigger an image paste from clipboard (Alt+V).
     ///
-    /// Spawns an async task to read the clipboard, then stores the result
-    /// in `pending_images`. The image will be attached to the next message
-    /// the user sends.
+    /// Spawns an async task to read the clipboard, then inserts an inline
+    /// `[img]` marker in the input buffer. The marker is deletable like
+    /// normal text.
     pub fn trigger_image_paste(&mut self) {
         let tx = self.event_tx.clone();
         tokio::spawn(async move {
@@ -262,15 +249,15 @@ impl App {
         });
     }
 
-    /// Store a pasted image into the pending queue.
-    fn on_image_pasted(&mut self, media_type: String, base64_data: String, size_kb: usize) {
-        self.pending_images.push((media_type, base64_data));
-        self.output.push(OutputSegment::Status(format!(
-            "\u{f083} Image pasted ({} KB). {} image(s) pending — send a message to attach.",
-            size_kb,
-            self.pending_images.len()
-        )));
+    /// Insert an image marker into the input buffer.
+    fn on_image_pasted(&mut self, media_type: String, base64_data: String, _size_kb: usize) {
+        self.input.insert_image(media_type, base64_data);
         self.render_dirty = true;
+    }
+
+    /// Take image blocks extracted from input markers on the last submit.
+    pub fn take_pending_image_blocks(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.pending_image_blocks)
     }
 
     pub fn should_quit(&self) -> bool {
@@ -291,8 +278,26 @@ impl App {
 
     /// Handle a bracketed-paste event: insert the pasted text into the input
     /// widget without triggering submit. Newlines are kept as-is.
+    ///
+    /// Also checks the clipboard for image data — if the clipboard contains
+    /// an image alongside text, it's added as a pending image to attach to
+    /// the next message.
     pub fn handle_paste(&mut self, text: String) {
         self.input.insert_str(&text);
+        // Also check clipboard for image data (terminal paste may carry both
+        // text and image representations — e.g. wl-paste or xclip).
+        let tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            if let Some(img) = crate::ui::clipboard::read_clipboard_image().await {
+                let size_kb = img.size_bytes / 1024;
+                let (media_type, base64_data) = img.into_tuple();
+                let _ = tx.send(crate::engine::tui_events::UiEvent::ImagePasted {
+                    media_type,
+                    base64_data,
+                    size_kb,
+                });
+            }
+        });
         self.render_dirty = true;
     }
 
@@ -368,14 +373,20 @@ impl App {
                 self.output.scroll_down(10);
                 return;
             }
-            // Alt+V: paste image from clipboard
+            // Alt+V: paste image from clipboard (if already has markers, remove the last one)
             KeyEvent {
                 code: KeyCode::Char('v'),
                 modifiers: KeyModifiers::ALT,
                 ..
             } => {
                 if self.mode == AppMode::Idle {
-                    self.trigger_image_paste();
+                    if self.input.image_count() > 0 {
+                        // Remove the last image marker (undo)
+                        self.input.remove_last_image();
+                        self.render_dirty = true;
+                    } else {
+                        self.trigger_image_paste();
+                    }
                 }
                 return;
             }
@@ -455,15 +466,9 @@ impl App {
         }
 
         if self.input.submitted {
-            let text = self.input.text.trim().to_string();
-
-            if text.is_empty() {
-                self.input.reset();
-                return;
-            }
-
             // If we were waiting for an ask_user or permission response, send it back
             if self.mode == AppMode::WaitingInput {
+                let text = self.input.text.trim().to_string();
                 // Don't save ask_user / permission responses to input history
                 self.input.reset_without_history();
 
@@ -497,6 +502,18 @@ impl App {
             }
 
             // Regular user input — save to history
+            // Extract image markers before saving to history
+            let (image_blocks, text_without_markers) = self.input.extract_images();
+            let text = text_without_markers.trim().to_string();
+
+            // Empty with no images → ignore
+            if text.is_empty() && image_blocks.is_empty() {
+                self.input.reset();
+                return;
+            }
+
+            self.pending_image_blocks = image_blocks;
+            // Save text without markers to input history (reset does this)
             self.input.reset();
 
             if text == "/exit" || text == "/quit" {
@@ -866,13 +883,7 @@ impl App {
         }
 
         // ── Input area ──
-        input::render(
-            frame,
-            input_area,
-            &self.input,
-            &self.mode,
-            self.pending_image_count(),
-        );
+        input::render(frame, input_area, &self.input, &self.mode);
 
         // ── Status bar ──
         status_bar::render(frame, status_area, &self.status);

@@ -76,10 +76,7 @@ impl Tool for ReadTool {
         let resolved = ctx.resolve_path(path);
 
         if !resolved.exists() {
-            return Err(ToolError::NotFound(format!(
-                "File not found: {}",
-                resolved.display()
-            )));
+            return Err(ToolError::NotFound(format!("{}", resolved.display())));
         }
 
         // Check file size before reading to prevent OOM

@@ -1077,7 +1077,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 CommandAction::Query => {
                     let cancel = app.reset_cancel_token();
-                    let mut image_blocks = app.take_pending_images();
+                    let mut image_blocks = app.take_pending_image_blocks();
 
                     // Auto-detect image file paths in the query text
                     let cleaned_text = {

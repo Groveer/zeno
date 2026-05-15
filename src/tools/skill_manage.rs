@@ -338,10 +338,7 @@ impl SkillManageTool {
         };
 
         if !target.exists() {
-            return Err(ToolError::NotFound(format!(
-                "File not found: {}",
-                target.display()
-            )));
+            return Err(ToolError::NotFound(format!("{}", target.display())));
         }
 
         // Read current content

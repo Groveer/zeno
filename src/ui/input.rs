@@ -114,6 +114,10 @@ impl CompletionPopup {
     }
 }
 
+/// Marker character used in the text buffer to represent an inline image token.
+/// Renders as a styled "[img]" span in the input area. Deletable like normal chars.
+pub const IMAGE_MARKER: char = '\u{FFFC}'; // Object Replacement Character
+
 /// The input widget state.
 pub struct InputState {
     /// Full text buffer (may contain \n).
@@ -133,6 +137,10 @@ pub struct InputState {
     history_index: Option<usize>,
     /// Stashed draft when user first pressed Up away from the current line.
     draft: Option<String>,
+    /// Image data keyed by marker position — each IMAGE_MARKER in text has a
+    /// corresponding (media_type, base64_data) entry here, in the same order
+    /// as they appear in the text buffer.
+    pub(crate) images: Vec<(String, String)>,
 }
 
 impl InputState {
@@ -147,6 +155,7 @@ impl InputState {
             input_history: history,
             history_index: None,
             draft: None,
+            images: Vec::new(),
         }
     }
 
@@ -321,6 +330,16 @@ impl InputState {
             } => {
                 if self.cursor > 0 {
                     let prev = self.prev_char_boundary();
+                    // If deleting an image marker, remove the corresponding image data
+                    if self.text[prev..self.cursor] == *"\u{FFFC}" {
+                        let idx = self.text[..prev]
+                            .chars()
+                            .filter(|&c| c == '\u{FFFC}')
+                            .count();
+                        if idx < self.images.len() {
+                            self.images.remove(idx);
+                        }
+                    }
                     self.text.drain(prev..self.cursor);
                     self.cursor = prev;
                 }
@@ -342,6 +361,17 @@ impl InputState {
                 ..
             } => {
                 if self.cursor < self.text.len() {
+                    // If deleting an image marker, remove the corresponding image data
+                    let c = self.text[self.cursor..].chars().next().unwrap();
+                    if c == '\u{FFFC}' {
+                        let idx = self.text[..self.cursor]
+                            .chars()
+                            .filter(|&c| c == '\u{FFFC}')
+                            .count();
+                        if idx < self.images.len() {
+                            self.images.remove(idx);
+                        }
+                    }
                     let next = self.next_char_boundary();
                     self.text.drain(self.cursor..next);
                 }
@@ -365,7 +395,9 @@ impl InputState {
     /// Clear after submission. Saves the current text to input history.
     pub fn reset(&mut self) {
         // Save to history (skip empty, slash commands, and duplicates of the most recent entry)
-        let trimmed = self.text.trim().to_string();
+        // Strip image markers since the corresponding image data won't persist.
+        let trimmed: String = self.text.chars().filter(|&c| c != IMAGE_MARKER).collect();
+        let trimmed = trimmed.trim().to_string();
         if !trimmed.is_empty()
             && !trimmed.starts_with('/')
             && self.input_history.first().map(|s| s.as_str()) != Some(&trimmed)
@@ -379,6 +411,7 @@ impl InputState {
         self.popup = None;
         self.history_index = None;
         self.draft = None;
+        self.images.clear();
 
         // Persist history to disk after each submission
         save_history(&self.input_history);
@@ -891,9 +924,59 @@ impl InputState {
         self.text.chars().filter(|&c| c == '\n').count() + 1
     }
 
+    /// Remove the last image marker from text and images.
+    pub fn remove_last_image(&mut self) {
+        if let Some(pos) = self.text.rfind(IMAGE_MARKER) {
+            let idx = self.text[..pos]
+                .chars()
+                .filter(|&c| c == IMAGE_MARKER)
+                .count();
+            self.text.drain(pos..pos + IMAGE_MARKER.len_utf8());
+            if idx < self.images.len() {
+                self.images.remove(idx);
+            }
+        }
+    }
+
     fn insert_char(&mut self, c: char) {
         self.text.insert(self.cursor, c);
         self.cursor = self.next_char_boundary();
+    }
+
+    /// Insert an image marker at the cursor position.
+    /// The marker renders as a styled `[img]` span and is deletable like normal text.
+    /// Corresponding image data is stored in the `images` Vec.
+    pub fn insert_image(&mut self, media_type: String, base64_data: String) {
+        // Insert the marker character
+        self.text.insert(self.cursor, IMAGE_MARKER);
+        // Count existing markers before the new one to determine index
+        let before = &self.text[..self.cursor];
+        let idx = before.chars().filter(|&c| c == IMAGE_MARKER).count();
+        self.images.insert(idx, (media_type, base64_data));
+        self.cursor += IMAGE_MARKER.len_utf8();
+    }
+
+    /// Extract all image data from the text buffer, removing markers.
+    /// Returns (image_data, cleaned_text_without_markers).
+    pub fn extract_images(&mut self) -> (Vec<(String, String)>, String) {
+        let images = std::mem::take(&mut self.images);
+        let cleaned: String = self.text.chars().filter(|&c| c != IMAGE_MARKER).collect();
+        (images, cleaned)
+    }
+
+    /// Number of image markers currently in the text buffer.
+    pub fn image_count(&self) -> usize {
+        self.images.len()
+    }
+
+    /// After text mutation (backspace, delete_word, etc.), re-sync the images list
+    /// so it has exactly as many entries as there are IMAGE_MARKER chars in text.
+    /// Entries are matched in order: images[i] corresponds to the i-th marker.
+    fn sync_images(&mut self) {
+        let count = self.text.chars().filter(|&c| c == IMAGE_MARKER).count();
+        while self.images.len() > count {
+            self.images.pop();
+        }
     }
 
     /// Insert a string at the cursor position (used for bracketed paste).
@@ -927,6 +1010,7 @@ impl InputState {
         }
         self.text.drain(pos..self.cursor);
         self.cursor = pos;
+        self.sync_images();
     }
 
     fn prev_char_boundary(&self) -> usize {
@@ -969,7 +1053,6 @@ pub fn render(
     area: Rect,
     state: &InputState,
     mode: &super::status_bar::AppMode,
-    pending_image_count: usize,
 ) {
     let (border_color, prompt, display_text, text_color): (Color, &str, Cow<str>, Color) =
         match mode {
@@ -1038,7 +1121,7 @@ pub fn render(
         .enumerate()
         .filter(|(i, _)| *i >= v_scroll as usize)
         .map(|(i, line_str)| {
-            let scrolled_content = if h_scroll > 0 {
+            let scrolled = if h_scroll > 0 {
                 // Need to skip h_scroll display columns
                 let mut col: u16 = 0;
                 let mut byte_start = 0;
@@ -1047,7 +1130,6 @@ pub fn render(
                     let next = chars.get(ci + 1).copied();
                     let w = crate::utils::char_width(c, next) as u16;
                     if col + w > h_scroll {
-                        // This character straddles the scroll boundary
                         byte_start = byte_idx;
                         break;
                     }
@@ -1059,21 +1141,20 @@ pub fn render(
                 *line_str
             };
 
+            // Build spans for this line, splitting by image markers
+            let spans = build_line_spans(scrolled, text_color);
+
             // Only first line gets the prompt prefix; continuation lines are indented
-            if i == 0 {
-                Line::from(vec![
-                    Span::styled(prompt, Style::new().fg(theme::ACCENT_DIM)),
-                    Span::styled(scrolled_content.to_string(), Style::new().fg(text_color)),
-                ])
+            let mut prefix_spans: Vec<Span<'static>> = if i == 0 {
+                vec![Span::styled(prompt, Style::new().fg(theme::ACCENT_DIM))]
             } else {
-                Line::from(vec![
-                    Span::styled(
-                        " ".repeat(prompt_display_width as usize),
-                        Style::new().fg(theme::ACCENT_DIM),
-                    ),
-                    Span::styled(scrolled_content.to_string(), Style::new().fg(text_color)),
-                ])
-            }
+                vec![Span::styled(
+                    " ".repeat(prompt_display_width as usize),
+                    Style::new().fg(theme::ACCENT_DIM),
+                )]
+            };
+            prefix_spans.extend(spans);
+            Line::from(prefix_spans)
         })
         .collect();
 
@@ -1081,9 +1162,9 @@ pub fn render(
 
     frame.render_widget(p, content_area);
 
-    // Draw border with pending image indicator
-    let image_suffix = if pending_image_count > 0 {
-        format!(" {} ", pending_image_count)
+    // Draw border with inline image indicator
+    let image_suffix = if state.image_count() > 0 {
+        format!(" {} ", state.image_count())
     } else {
         String::new()
     };
@@ -1093,6 +1174,42 @@ pub fn render(
     if let Some(ref popup) = state.popup {
         render_popup(frame, area, popup);
     }
+}
+
+/// Split a line by IMAGE_MARKER chars, returning spans with `[img]` styled inline.
+fn build_line_spans(line: &str, text_color: Color) -> Vec<Span<'static>> {
+    if !line.contains(IMAGE_MARKER) {
+        return vec![Span::styled(line.to_string(), Style::new().fg(text_color))];
+    }
+
+    let mut spans = Vec::new();
+    let mut remaining = line;
+    while let Some(pos) = remaining.find(IMAGE_MARKER) {
+        // Text before the marker
+        if pos > 0 {
+            spans.push(Span::styled(
+                remaining[..pos].to_string(),
+                Style::new().fg(text_color),
+            ));
+        }
+        // The marker itself → render as styled "[img]"
+        spans.push(Span::styled(
+            "[img]",
+            Style::new()
+                .fg(theme::ACCENT)
+                .bg(theme::BG)
+                .add_modifier(Modifier::BOLD),
+        ));
+        remaining = &remaining[pos + IMAGE_MARKER.len_utf8()..];
+    }
+    // Trailing text after the last marker
+    if !remaining.is_empty() {
+        spans.push(Span::styled(
+            remaining.to_string(),
+            Style::new().fg(text_color),
+        ));
+    }
+    spans
 }
 
 /// Render the completion popup above the input area.
