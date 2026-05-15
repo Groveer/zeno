@@ -57,6 +57,11 @@ pub enum ContentBlock {
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,
+    /// Provider-facing reasoning content (e.g. DeepSeek/Kimi `reasoning_content`).
+    /// Must be echoed back verbatim on subsequent API calls for providers that
+    /// enforce thinking-mode echo-back. `None` means no reasoning was captured.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub reasoning_content: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -120,6 +125,8 @@ impl Usage {
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     TextDelta(String),
+    /// Reasoning/thinking content delta (e.g. DeepSeek `reasoning_content`).
+    ReasoningDelta(String),
     ToolUseStart {
         id: String,
         name: String,

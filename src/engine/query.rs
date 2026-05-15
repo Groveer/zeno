@@ -455,6 +455,7 @@ impl QueryEngine {
             // do we propagate the error or fall through to the existing
             // empty-response handling below.
             let mut assistant_text = String::new();
+            let mut reasoning_text = String::new();
             let mut tool_uses: Vec<CollectedToolUse> = Vec::new();
             let mut last_stop_reason: Option<StopReason> = None;
             let mut last_error: Option<ApiError> = None;
@@ -467,6 +468,7 @@ impl QueryEngine {
             'retry: for retry_attempt in 0..=max_retries {
                 // Reset per-attempt state
                 assistant_text.clear();
+                reasoning_text.clear();
                 tool_uses.clear();
                 let mut current_tool: Option<CollectedToolUse> = None;
                 let mut pending_usage: Option<Usage> = None;
@@ -651,7 +653,14 @@ impl QueryEngine {
                                     let blocks = vec![ContentBlock::Text {
                                         text: assistant_text.clone(),
                                     }];
-                                    self.history.push_assistant_blocks(blocks);
+                                    self.history.push_assistant_with_reasoning(
+                                        blocks,
+                                        if reasoning_text.is_empty() {
+                                            None
+                                        } else {
+                                            Some(reasoning_text.clone())
+                                        },
+                                    );
                                 }
                                 self.handle_interrupt(sender);
                                 return Ok(());
@@ -686,7 +695,14 @@ impl QueryEngine {
                                     let blocks = vec![ContentBlock::Text {
                                         text: assistant_text.clone(),
                                     }];
-                                    self.history.push_assistant_blocks(blocks);
+                                    self.history.push_assistant_with_reasoning(
+                                        blocks,
+                                        if reasoning_text.is_empty() {
+                                            None
+                                        } else {
+                                            Some(reasoning_text.clone())
+                                        },
+                                    );
                                 }
                                 self.handle_interrupt(sender);
                                 return Ok(());
@@ -698,6 +714,9 @@ impl QueryEngine {
                         Ok(StreamEvent::TextDelta(delta)) => {
                             let _ = sender.send(UiEvent::TextDelta(delta.clone()));
                             assistant_text.push_str(&delta);
+                        }
+                        Ok(StreamEvent::ReasoningDelta(delta)) => {
+                            reasoning_text.push_str(&delta);
                         }
                         Ok(StreamEvent::ToolUseStart {
                             id,
@@ -900,7 +919,14 @@ impl QueryEngine {
                 break;
             }
 
-            self.history.push_assistant_blocks(assistant_blocks);
+            self.history.push_assistant_with_reasoning(
+                assistant_blocks,
+                if reasoning_text.is_empty() {
+                    None
+                } else {
+                    Some(reasoning_text.clone())
+                },
+            );
 
             // No tool calls — the model gave a text-only response.
             //

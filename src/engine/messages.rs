@@ -11,6 +11,9 @@ use std::collections::HashSet;
 pub struct ConversationEntry {
     pub role: Role,
     pub content: Vec<ContentBlock>,
+    /// Provider-facing reasoning content (echoed back to API for thinking-mode providers).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub reasoning_content: Option<String>,
 }
 
 impl ConversationEntry {}
@@ -31,6 +34,7 @@ impl ConversationHistory {
         self.entries.push(ConversationEntry {
             role: Role::User,
             content: vec![ContentBlock::Text { text: text.into() }],
+            reasoning_content: None,
         });
     }
 
@@ -39,6 +43,7 @@ impl ConversationHistory {
         self.entries.push(ConversationEntry {
             role: Role::User,
             content: blocks,
+            reasoning_content: None,
         });
     }
 
@@ -47,6 +52,20 @@ impl ConversationHistory {
         self.entries.push(ConversationEntry {
             role: Role::Assistant,
             content: blocks,
+            reasoning_content: None,
+        });
+    }
+
+    /// Add an assistant message with content blocks and reasoning content.
+    pub fn push_assistant_with_reasoning(
+        &mut self,
+        blocks: Vec<ContentBlock>,
+        reasoning_content: Option<String>,
+    ) {
+        self.entries.push(ConversationEntry {
+            role: Role::Assistant,
+            content: blocks,
+            reasoning_content,
         });
     }
 
@@ -55,6 +74,7 @@ impl ConversationHistory {
         self.entries.push(ConversationEntry {
             role: Role::User,
             content: results,
+            reasoning_content: None,
         });
     }
 
@@ -135,6 +155,7 @@ impl ConversationHistory {
             .map(|e| Message {
                 role: e.role.clone(),
                 content: e.content.clone(),
+                reasoning_content: e.reasoning_content.clone(),
             })
             .collect()
     }
@@ -353,6 +374,7 @@ impl ConversationHistory {
                     split_point, summary
                 ),
             }],
+            reasoning_content: None,
         });
         self.entries.extend(recent);
     }

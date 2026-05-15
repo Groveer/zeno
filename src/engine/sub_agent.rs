@@ -488,6 +488,7 @@ async fn run_single_sub_agent(
         tokio::pin!(stream);
 
         let mut assistant_text = String::new();
+        let mut reasoning_text = String::new();
         let mut collected_tool_uses: Vec<CollectedToolUse> = Vec::new();
         let mut current_tool: Option<CollectedToolUse> = None;
         let mut stream_failed = false;
@@ -516,6 +517,9 @@ async fn run_single_sub_agent(
                     match event {
                         Some(Ok(StreamEvent::TextDelta(delta))) => {
                             assistant_text.push_str(&delta);
+                        }
+                        Some(Ok(StreamEvent::ReasoningDelta(delta))) => {
+                            reasoning_text.push_str(&delta);
                         }
                         Some(Ok(StreamEvent::ToolUseStart {
                             id,
@@ -621,7 +625,14 @@ async fn run_single_sub_agent(
             break;
         }
 
-        history.push_assistant_blocks(assistant_blocks);
+        history.push_assistant_with_reasoning(
+            assistant_blocks,
+            if reasoning_text.is_empty() {
+                None
+            } else {
+                Some(reasoning_text.clone())
+            },
+        );
 
         // No tool calls — text-only response
         if collected_tool_uses.is_empty() {

@@ -151,6 +151,19 @@ impl OpenAIClient {
                     msg["tool_calls"] = json!(calls);
                 }
 
+                // Echo reasoning_content back for providers that require it
+                // (DeepSeek/Kimi thinking mode). Only include when the message
+                // actually has reasoning_content — don't inject for providers
+                // that don't use it.
+                if let Some(ref rc) = m.reasoning_content {
+                    if rc.is_empty() {
+                        // DeepSeek V4 Pro rejects empty string — pad with space
+                        msg["reasoning_content"] = json!(" ");
+                    } else {
+                        msg["reasoning_content"] = json!(rc);
+                    }
+                }
+
                 api_messages.push(msg);
             } else {
                 // User message without tool results — may contain text + image blocks
@@ -553,6 +566,13 @@ fn parse_openai_chunk(
         return Some(Ok(StreamEvent::TextDelta(content.to_string())));
     }
 
+    // Reasoning content (DeepSeek/Kimi thinking mode)
+    if let Some(rc) = delta.get("reasoning_content").and_then(|c| c.as_str())
+        && !rc.is_empty()
+    {
+        return Some(Ok(StreamEvent::ReasoningDelta(rc.to_string())));
+    }
+
     // Finish reason without usage — cache it for later merging with usage
     // chunk. Providers like DeepSeek send finish_reason in one chunk and
     // usage in a separate subsequent chunk.
@@ -599,6 +619,7 @@ mod tests {
             content: vec![ContentBlock::Text {
                 text: "hello".into(),
             }],
+            reasoning_content: None,
         };
         let body = client.build_request_body("gpt-4", "", &[msg], &[], None);
         let msgs = body["messages"].as_array().unwrap();
@@ -622,6 +643,7 @@ mod tests {
                     input: serde_json::json!({"path": "main.rs"}),
                 },
             ],
+            reasoning_content: None,
         };
         let body = client.build_request_body("gpt-4", "", &[msg], &[], None);
         let msgs = body["messages"].as_array().unwrap();
@@ -643,6 +665,7 @@ mod tests {
                 content: "file content".into(),
                 is_error: None,
             }],
+            reasoning_content: None,
         };
         let body = client.build_request_body("gpt-4", "", &[msg], &[], None);
         let msgs = body["messages"].as_array().unwrap();
@@ -667,6 +690,7 @@ mod tests {
                     text: "steer text".into(),
                 },
             ],
+            reasoning_content: None,
         };
         let body = client.build_request_body("gpt-4", "", &[msg], &[], None);
         let msgs = body["messages"].as_array().unwrap();

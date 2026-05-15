@@ -350,6 +350,7 @@ pub fn truncate_head_for_ptl_retry(history: &mut ConversationHistory) -> bool {
             content: vec![ContentBlock::Text {
                 text: PTL_RETRY_MARKER.to_string(),
             }],
+            reasoning_content: None,
         };
         std::iter::once(marker).chain(retained).collect()
     } else {

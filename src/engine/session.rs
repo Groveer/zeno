@@ -613,6 +613,7 @@ mod tests {
         ConversationEntry {
             role,
             content: vec![ContentBlock::Text { text: text.into() }],
+            reasoning_content: None,
         }
     }
 
@@ -624,6 +625,7 @@ mod tests {
                 content: text.into(),
                 is_error: None,
             }],
+            reasoning_content: None,
         }
     }
 

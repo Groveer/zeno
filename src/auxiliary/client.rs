@@ -450,6 +450,10 @@ fn convert_raw_messages(raw: &[serde_json::Value]) -> Vec<Message> {
                     messages.push(Message {
                         role,
                         content: blocks,
+                        reasoning_content: msg
+                            .get("reasoning_content")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
                     });
                 }
             }
@@ -459,6 +463,10 @@ fn convert_raw_messages(raw: &[serde_json::Value]) -> Vec<Message> {
                 messages.push(Message {
                     role,
                     content: vec![ContentBlock::Text { text }],
+                    reasoning_content: msg
+                        .get("reasoning_content")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
                 });
             }
             // Other content (null, object, etc.)
@@ -467,6 +475,10 @@ fn convert_raw_messages(raw: &[serde_json::Value]) -> Vec<Message> {
                 messages.push(Message {
                     role,
                     content: vec![ContentBlock::Text { text }],
+                    reasoning_content: msg
+                        .get("reasoning_content")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
                 });
             }
             None => {
@@ -475,6 +487,10 @@ fn convert_raw_messages(raw: &[serde_json::Value]) -> Vec<Message> {
                     content: vec![ContentBlock::Text {
                         text: String::new(),
                     }],
+                    reasoning_content: msg
+                        .get("reasoning_content")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
                 });
             }
         }
