@@ -475,6 +475,12 @@ fn parse_openai_chunk(
             );
         }
 
+        // Some providers batch multiple entries for the same tool call index
+        // into a single SSE chunk (e.g. name in one entry, arguments in another).
+        // We must NOT return early — collect all entries and merge by index.
+        let mut start_by_index: HashMap<u64, (String, String)> = HashMap::new(); // index -> (name, merged_args)
+        let mut delta_by_index: HashMap<u64, String> = HashMap::new();
+
         for tc in tool_calls {
             let index = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
 
@@ -495,32 +501,48 @@ fn parse_openai_chunk(
                 .and_then(|a| a.as_str())
                 .unwrap_or("");
 
-            // ToolUseStart — with optional input_json when args come in same chunk
             if !name.is_empty() {
-                let id = id_map.get(&index).cloned().unwrap_or_default();
-                let input_json = if !arguments.is_empty() {
-                    Some(arguments.to_string())
-                } else {
-                    None
-                };
-                return Some(Ok(StreamEvent::ToolUseStart {
-                    id,
-                    name: name.to_string(),
-                    input_json,
-                }));
+                // Merge: if we already have partial args for this index, append
+                let merged = start_by_index
+                    .remove(&index)
+                    .map(|(_, prev)| prev + arguments)
+                    .unwrap_or_else(|| arguments.to_string());
+                start_by_index.insert(index, (name.to_string(), merged));
+            } else if !arguments.is_empty() {
+                // Merge: append to existing delta or start fresh
+                let merged = delta_by_index
+                    .remove(&index)
+                    .map(|prev| prev + arguments)
+                    .unwrap_or_else(|| arguments.to_string());
+                delta_by_index.insert(index, merged);
             }
+        }
 
-            // ToolUseDelta (when arguments come in a separate chunk from name)
-            if !arguments.is_empty() {
-                let id = id_map
-                    .get(&index)
-                    .cloned()
-                    .unwrap_or_else(|| format!("call_{}", index));
-                return Some(Ok(StreamEvent::ToolUseDelta {
-                    id,
-                    delta_json: arguments.to_string(),
-                }));
-            }
+        // Emit ToolUseStart events (name present) — these are time-sensitive
+        if let Some((&idx, (name, args))) = start_by_index.iter().next() {
+            let id = id_map.get(&idx).cloned().unwrap_or_default();
+            let input_json = if args.is_empty() {
+                None
+            } else {
+                Some(args.clone())
+            };
+            return Some(Ok(StreamEvent::ToolUseStart {
+                id,
+                name: name.clone(),
+                input_json,
+            }));
+        }
+
+        // Emit ToolUseDelta events (no name, just arguments)
+        if let Some((&idx, args)) = delta_by_index.iter().next() {
+            let id = id_map
+                .get(&idx)
+                .cloned()
+                .unwrap_or_else(|| format!("call_{}", idx));
+            return Some(Ok(StreamEvent::ToolUseDelta {
+                id,
+                delta_json: args.clone(),
+            }));
         }
     }
 

@@ -54,32 +54,150 @@ struct CollectedToolUse {
     input_json: String,
 }
 
-/// Parse tool input JSON.
+/// Try to repair common JSON issues from streaming tool argument concatenation.
+///
+/// Streaming tool calls can produce malformed JSON when chunk boundaries split
+/// inside JSON syntax. This function attempts lightweight repairs:
+/// 1. Missing closing `}` — append `}`
+/// 2. Trailing comma before `}` — remove the trailing `,`
+/// 3. Unclosed string value at end — close with `"`
+/// 4. Multiple closing braces — remove extras
+fn try_repair_json(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+
+    // Rule 1: extra closing braces — find the right balance point
+    let opens = trimmed.chars().filter(|&c| c == '{').count();
+    let closes = trimmed.chars().filter(|&c| c == '}').count();
+    if closes > opens {
+        // Remove extra closing braces from the end until balanced
+        let mut balance = 0i32;
+        let mut last_good = 0;
+        for (i, c) in trimmed.char_indices() {
+            match c {
+                '{' => balance += 1,
+                '}' => balance -= 1,
+                _ => {}
+            }
+            if balance == 0 {
+                last_good = i + c.len_utf8();
+            } else if balance < 0 {
+                break;
+            }
+        }
+        if last_good > 0 {
+            let candidate = &trimmed[..last_good];
+            if serde_json::from_str::<Value>(candidate).is_ok() {
+                return Some(candidate.to_string());
+            }
+        }
+    }
+
+    // Rule 2: missing closing brace — append `}`
+    if opens > closes {
+        let candidate = format!("{}}}", trimmed);
+        if serde_json::from_str::<Value>(&candidate).is_ok() {
+            return Some(candidate);
+        }
+    }
+
+    // Rule 3: trailing comma before end — remove it
+    if trimmed.ends_with(',') {
+        let candidate = trimmed.trim_end_matches(',');
+        if serde_json::from_str::<Value>(candidate).is_ok() {
+            return Some(candidate.to_string());
+        }
+        // Also try with closing brace
+        let candidate = format!("{}}}", candidate);
+        if serde_json::from_str::<Value>(&candidate).is_ok() {
+            return Some(candidate);
+        }
+    }
+
+    // Rule 4: unclosed string at end — find last unclosed string and close it
+    // Count unescaped quotes to detect unclosed strings
+    let mut in_string = false;
+    let mut escape = false;
+    for ch in trimmed.chars() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        match ch {
+            '\\' => escape = true,
+            '"' => in_string = !in_string,
+            _ => {}
+        }
+    }
+    if in_string {
+        // Try closing the string and the object
+        let candidate = format!("{}\"}}", trimmed);
+        if serde_json::from_str::<Value>(&candidate).is_ok() {
+            return Some(candidate);
+        }
+        // Also try just closing the string (object might already be closed)
+        let candidate = format!("{}\"", trimmed);
+        if serde_json::from_str::<Value>(&candidate).is_ok() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+/// Parse tool input JSON with automatic repair on failure.
 ///
 /// Returns `Ok(Value)` on success, or `Err(error_message)` on parse failure.
-/// The error message is clear and actionable so the LLM can self-correct.
+/// When initial parsing fails, attempts lightweight JSON repair (truncation,
+/// trailing comma, unclosed string). On repair success, logs the repair at
+/// WARN level with both raw and repaired versions so the root cause can be
+/// investigated offline. On repair failure, returns a detailed error including
+/// the raw input for debugging.
+///
 /// Callers in the execution path should return the error directly as a
 /// ToolResult; callers in display/history paths should fall back to an
 /// empty object.
 fn parse_tool_input(input_json: &str) -> Result<Value, String> {
     if input_json.is_empty() {
-        Ok(Value::Object(Default::default()))
-    } else {
-        serde_json::from_str(input_json).map_err(|e| {
-            tracing::warn!(
-                error = %e,
-                raw_len = input_json.len(),
-                "Failed to parse tool input JSON"
-            );
-            format!(
-                "JSON parse error in tool arguments: {}. \
-                 The arguments you provided are not valid JSON. \
-                 Check for unescaped characters, unclosed brackets, \
-                 or string values that should be numbers.",
-                e
-            )
-        })
+        return Ok(Value::Object(Default::default()));
     }
+
+    // Fast path: try direct parse first
+    if let Ok(v) = serde_json::from_str::<Value>(input_json) {
+        return Ok(v);
+    }
+
+    // Repair path: try to fix common streaming truncation issues
+    if let Some(repaired) = try_repair_json(input_json) {
+        tracing::warn!(
+            event = "tool_input_repaired",
+            raw_len = input_json.len(),
+            repaired_len = repaired.len(),
+            raw_preview = %input_json.chars().take(120).collect::<String>(),
+            repaired_preview = %repaired.chars().take(120).collect::<String>(),
+            "Repaired malformed tool input JSON"
+        );
+        if let Ok(v) = serde_json::from_str::<Value>(&repaired) {
+            return Ok(v);
+        }
+    }
+
+    // Both direct and repair failed — log full details for debugging
+    let first_err = serde_json::from_str::<Value>(input_json).unwrap_err();
+    tracing::error!(
+        event = "tool_input_parse_failed",
+        error = %first_err,
+        raw_len = input_json.len(),
+        raw_first_120 = %input_json.chars().take(120).collect::<String>(),
+        "Failed to parse tool input JSON (repair also failed)"
+    );
+    Err(format!(
+        "JSON parse error in tool arguments: {}. \
+         Raw input (first 200 chars): {} \
+         Check for unescaped characters, unclosed brackets, \
+         or string values that should be numbers.",
+        first_err,
+        input_json.chars().take(200).collect::<String>()
+    ))
 }
 
 /// Fallback: parse tool input, returning an empty object on failure.
@@ -340,6 +458,9 @@ impl QueryEngine {
             let mut tool_uses: Vec<CollectedToolUse> = Vec::new();
             let mut last_stop_reason: Option<StopReason> = None;
             let mut last_error: Option<ApiError> = None;
+            // Shared state to track the last tool input JSON that failed parsing,
+            // so the empty-response handler can log the raw data for debugging.
+            let last_failed_tool_input: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
             let max_retries = self.settings.llm.max_retries;
             let retry_config = RetryConfig::default();
 
@@ -722,14 +843,35 @@ impl QueryEngine {
             // If we got here, all retry attempts returned empty. Now check
             // if we have a pending goal and can auto-continue.
             if assistant_text.trim().is_empty() && tool_uses.is_empty() {
+                // Check if the previous turn had a tool call that failed JSON parsing.
+                // If so, the LLM may have given up after receiving the parse error.
+                // Log the raw input for offline debugging.
+                let failed_raw = last_failed_tool_input.lock().ok().and_then(|g| g.clone());
+                if let Some(ref raw) = failed_raw {
+                    tracing::error!(
+                        event = "llm_empty_after_tool_error",
+                        raw_len = raw.len(),
+                        raw_preview = %raw.chars().take(200).collect::<String>(),
+                        "LLM returned empty after tool input parse failure — raw JSON captured for debugging"
+                    );
+                }
                 tracing::warn!(
                     max_retries = max_retries,
+                    has_tool_parse_error = failed_raw.is_some(),
                     "dropping empty assistant message from provider response"
                 );
-                let _ = sender.send(UiEvent::Status(format!(
-                    "Model returned empty response after {} attempts.",
-                    max_retries + 1
-                )));
+                let msg = if failed_raw.is_some() {
+                    format!(
+                        "Model returned empty response after {} attempts (tool input parse error occurred).",
+                        max_retries + 1
+                    )
+                } else {
+                    format!(
+                        "Model returned empty response after {} attempts.",
+                        max_retries + 1
+                    )
+                };
+                let _ = sender.send(UiEvent::Status(msg));
 
                 if auto_continue_count < self.settings.engine.max_auto_continue
                     && self.carryover.has_pending_goal()
@@ -924,6 +1066,7 @@ impl QueryEngine {
                             &self.settings.tools.denied_commands,
                             self.settings.engine.tool_timeout_secs,
                             &self.settings.safe_paths,
+                            &last_failed_tool_input,
                         )
                     })
                     .collect();
@@ -987,6 +1130,7 @@ impl QueryEngine {
                         &self.settings.tools.denied_commands,
                         self.settings.engine.tool_timeout_secs,
                         &self.settings.safe_paths,
+                        &last_failed_tool_input,
                     )
                     .await;
                     tool_results.push(result);
@@ -1342,6 +1486,7 @@ async fn execute_single_tool_tui_catch(
     denied_commands: &[String],
     tool_timeout_secs: u64,
     safe_paths: &[String],
+    last_failed_tool_input: &Arc<Mutex<Option<String>>>,
 ) -> ContentBlock {
     match execute_single_tool_tui(
         permission_mode,
@@ -1358,6 +1503,7 @@ async fn execute_single_tool_tui_catch(
         denied_commands,
         tool_timeout_secs,
         safe_paths,
+        last_failed_tool_input,
     )
     .await
     {
@@ -1392,10 +1538,16 @@ async fn execute_single_tool_tui(
     denied_commands: &[String],
     tool_timeout_secs: u64,
     safe_paths: &[String],
+    last_failed_tool_input: &Arc<Mutex<Option<String>>>,
 ) -> Option<ContentBlock> {
     let input = match parse_tool_input(&tu.input_json) {
         Ok(v) => v,
         Err(e) => {
+            // Store the raw input_json so the empty-response handler
+            // can log it for debugging if the LLM gives up afterwards.
+            if let Ok(mut guard) = last_failed_tool_input.lock() {
+                *guard = Some(tu.input_json.clone());
+            }
             let _ = sender.send(UiEvent::ToolError {
                 name: tu.name.clone(),
                 error: e.clone(),
@@ -2184,12 +2336,18 @@ fn format_permission_detail(tool_name: &str, input_json: &str) -> String {
             detail
         }
         "grep" => {
-            let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("?");
+            let pattern = input
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unknown)");
             let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("cwd");
             format!("grep {} in {}", pattern, path)
         }
         "glob" => {
-            let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("?");
+            let pattern = input
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unknown)");
             let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("cwd");
             format!("glob {} in {}", pattern, path)
         }
@@ -2262,7 +2420,10 @@ fn format_tool_input_summary(tool_name: &str, input_json: &str) -> String {
             }
         }
         "grep" => {
-            let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("?");
+            let pattern = input
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unknown)");
             let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
             if path.is_empty() {
                 format!("\u{f002} grep {}", pattern)
@@ -2271,7 +2432,10 @@ fn format_tool_input_summary(tool_name: &str, input_json: &str) -> String {
             }
         }
         "glob" => {
-            let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("?");
+            let pattern = input
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unknown)");
             let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
             if path.is_empty() {
                 format!("\u{f07b} glob {}", pattern)

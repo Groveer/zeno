@@ -46,9 +46,21 @@ impl RuntimeContext {
     }
 
     /// Format as a concise block for system prompt injection.
+    ///
+    /// Shows only the project directory name (not the full absolute path)
+    /// to discourage the LLM from fabricating absolute paths.
     pub fn to_prompt_block(&self) -> String {
         let mut lines = Vec::new();
-        lines.push(format!("- Working directory: {}", self.cwd));
+        // Show only the directory name, not the full absolute path.
+        // This prevents the LLM from prefixing cwd to paths it shouldn't.
+        let dir_name = self
+            .cwd
+            .rsplit(std::path::MAIN_SEPARATOR)
+            .next()
+            .unwrap_or(&self.cwd);
+        lines.push(format!(
+            "- Working directory: ./{dir_name} (use relative paths, e.g. src/file.rs)"
+        ));
         lines.push(format!("- OS: {}", self.os));
         if let Some(ref shell) = self.shell {
             lines.push(format!("- Shell: {}", shell));
@@ -164,7 +176,8 @@ mod tests {
             build_system: Some("Rust (Cargo)".into()),
         };
         let block = ctx.to_prompt_block();
-        assert!(block.contains("Working directory: /home/user/project"));
+        assert!(block.contains("Working directory: ./project"));
+        assert!(block.contains("use relative paths"));
         assert!(block.contains("OS: Linux"));
         assert!(block.contains("Shell: /bin/bash"));
         assert!(block.contains("Git branch: main"));

@@ -45,7 +45,7 @@ impl Tool for ReadTool {
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "File path (relative to cwd or absolute)."
+                            "description": "Path to the file (absolute, relative, or ~/path)."
                         },
                         "offset": {
                             "type": "integer",

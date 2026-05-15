@@ -40,7 +40,7 @@ impl Tool for GrepTool {
                         },
                         "path": {
                             "type": "string",
-                            "description": "Directory or file to search in (default: cwd)."
+                            "description": "Directory or file to search in."
                         },
                         "include": {
                             "type": "string",

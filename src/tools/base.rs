@@ -176,10 +176,35 @@ impl ToolContext {
         self
     }
 
-    /// Resolve a path relative to cwd.
+    /// Resolve a path: expand `~`, join relative paths to cwd, then normalize.
     pub fn resolve_path(&self, path: &str) -> PathBuf {
-        let p = PathBuf::from(path);
-        if p.is_absolute() { p } else { self.cwd.join(p) }
+        let expanded = if path.starts_with("~/") || path == "~" {
+            let suffix = path.strip_prefix("~/").unwrap_or("");
+            if let Some(home) = std::env::var_os("HOME") {
+                PathBuf::from(home).join(suffix)
+            } else {
+                PathBuf::from(path)
+            }
+        } else {
+            PathBuf::from(path)
+        };
+        let joined = if expanded.is_absolute() {
+            expanded
+        } else {
+            self.cwd.join(&expanded)
+        };
+        // Normalize: resolve . and .. segments without following symlinks
+        let mut normalized = PathBuf::new();
+        for component in joined.components() {
+            match component {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    normalized.pop();
+                }
+                other => normalized.push(other),
+            }
+        }
+        normalized
     }
 }
 

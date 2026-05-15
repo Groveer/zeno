@@ -34,7 +34,7 @@ impl Tool for GlobTool {
                         },
                         "path": {
                             "type": "string",
-                            "description": "Base directory (default: cwd)."
+                            "description": "Base directory."
                         },
                         "limit": {
                             "type": "integer",
