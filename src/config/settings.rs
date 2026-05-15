@@ -661,9 +661,9 @@ pub struct MemoryProviderEntry {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct MemoryConfig {
-    /// Character limit for MEMORY.md (agent notes). Default: 4000.
+    /// Character limit for MEMORY.md (agent notes). Default: 2200.
     pub memory_char_limit: usize,
-    /// Character limit for USER.md (user profile). Default: 2500.
+    /// Character limit for USER.md (user profile). Default: 1375.
     pub user_char_limit: usize,
     /// Name of the active external memory provider (e.g. "mem0", "honcho").
     /// Empty string means no external provider (built-in only).
@@ -678,8 +678,8 @@ pub struct MemoryConfig {
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
-            memory_char_limit: 4000,
-            user_char_limit: 2500,
+            memory_char_limit: 2200,
+            user_char_limit: 1375,
             provider: String::new(),
             providers: HashMap::new(),
         }

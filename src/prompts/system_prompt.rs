@@ -30,8 +30,8 @@ use crate::tools::base::ToolRegistry;
 
 /// Build the complete system prompt.
 ///
-/// When `memory_block` is Some, it is injected as a section at the end,
-/// after project instructions.
+/// When `memory_block` is Some, memory guidance + the frozen snapshot are
+/// injected at the end, after project instructions.
 pub fn build(
     cwd: &Path,
     tool_registry: &ToolRegistry,
@@ -63,10 +63,11 @@ pub fn build(
         ));
     }
 
-    // 7. Memory (frozen snapshot from disk + external provider)
+    // 7. Memory guidance + frozen snapshot
     if let Some(block) = memory_block
         && !block.is_empty()
     {
+        parts.push(MEMORY_GUIDANCE.to_string());
         parts.push(block.to_string());
     }
 
@@ -95,6 +96,19 @@ and `skill_view` to load a specific skill's full instructions.";
 
     format!("{}\n\n{}", identity_text.trim(), functional)
 }
+
+/// Memory guidance — injected when memory is active.
+///
+/// Brief reminder of memory principles. Detailed rules are in the memory tool
+/// description, which the LLM sees when it calls the tool.
+pub const MEMORY_GUIDANCE: &str = "\
+You have persistent memory across sessions. Use the `memory` tool to save durable \
+facts: user preferences, environment details, tool quirks, and stable conventions. \
+Memory is injected into every turn, so keep it compact.\n\
+Prioritize what prevents the user from having to correct or remind you again. \
+Do NOT save task progress, session outcomes, or anything that will be stale in a week. \
+Write declarative facts, not instructions — 'User prefers concise responses' ✓, \
+'Always respond concisely' ✗.";
 
 /// Guidelines — always present.
 /// Custom guidelines from the user are appended after the built-in rules,

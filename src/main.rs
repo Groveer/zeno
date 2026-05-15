@@ -319,7 +319,7 @@ async fn main() -> anyhow::Result<()> {
     let memory_store = Arc::new(tokio::sync::Mutex::new(memory_store));
 
     // Initialize memory manager (orchestrates built-in + external providers).
-    // Created before MemoryTool so it can receive `on_memory_write` notifications.
+    // Created before MemoryTool so it can receive `on_memory_change` notifications.
     let mut memory_manager = memory::manager::MemoryManager::new(memory_store.clone());
 
     // Load and activate the configured external memory provider (if any)

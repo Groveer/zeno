@@ -330,8 +330,8 @@ zn.plugins_dir("~/.config/zeno/plugins")
 -- MEMORY.md is stored globally at ~/.config/zeno/memory/MEMORY.md
 -- USER.md is stored globally at ~/.config/zeno/USER.md
 
-zn.memory_char_limit(4000) -- MEMORY.md character limit (default: 4000)
-zn.user_char_limit(2500) -- USER.md character limit (default: 2500)
+zn.memory_char_limit(2200) -- MEMORY.md character limit (default: 2200)
+zn.user_char_limit(1375) -- USER.md character limit (default: 1375)
 
 -- ── External Memory Providers (Lua script-based) ──────────
 --
@@ -358,7 +358,7 @@ zn.user_char_limit(2500) -- USER.md character limit (default: 2500)
 --   prefetch          = function(query) → string  -- recall before each turn
 --   queue_prefetch    = function(query)            -- background prefetch for next turn
 --   sync_turn         = function(user_content, assistant_content)
---   on_memory_write   = function(action, target, content)  -- mirror built-in writes
+--   on_memory_change   = function(action, target, content)  -- mirror built-in writes
 --   shutdown          = function()
 --
 -- Lifecycle hooks (optional, called by the engine at key events):
@@ -424,7 +424,7 @@ zn.user_char_limit(2500) -- USER.md character limit (default: 2500)
 --     end,
 --
 --     -- Mirror built-in memory writes to your backend
---     on_memory_write = function(action, target, content)
+--     on_memory_change = function(action, target, content)
 --       -- action is "add", "replace", or "remove"
 --       -- target is "memory" or "user"
 --     end,

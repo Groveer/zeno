@@ -61,7 +61,7 @@
 //!     sync_turn = function(user_content, assistant_content) end,
 //!
 //!     -- Mirror built-in memory writes (optional)
-//!     on_memory_write = function(action, target, content) end,
+//!     on_memory_change = function(action, target, content) end,
 //!
 //!     -- Per-turn tick with turn number and user message (optional)
 //!     on_turn_start = function(turn_number, message) end,
@@ -417,18 +417,18 @@ impl MemoryProvider for LuaMemoryProvider {
         self.initialized = false;
     }
 
-    fn on_memory_write(&self, action: &str, target: &str, content: &str) {
+    fn on_memory_change(&self, action: &str, target: &str, content: &str) {
         // Best-effort synchronous call — skip if VM is busy
         if let Ok(lua) = self.lua.try_lock() {
             let globals = lua.globals();
             if let Ok(provider) = globals.get::<mlua::Table>("_provider")
-                && let Ok(func) = provider.get::<mlua::Function>("on_memory_write")
+                && let Ok(func) = provider.get::<mlua::Function>("on_memory_change")
                 && let Err(e) = func.call::<()>((action, target, content))
             {
                 tracing::debug!(
                     provider = %self.config.name,
                     error = %e,
-                    "Memory provider on_memory_write failed"
+                    "Memory provider on_memory_change failed"
                 );
             }
         }

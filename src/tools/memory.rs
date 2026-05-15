@@ -41,13 +41,13 @@ impl Tool for MemoryTool {
             "type": "function",
             "function": {
                 "name": "memory",
-                "description": "Save durable information to persistent memory that survives across sessions. Memory is injected into future turns, so keep it compact and focused on facts that will still matter later.\n\nWHEN TO SAVE (do this proactively, don't wait to be asked):\n- User corrects you or says 'remember this' / 'don't do that again'\n- User shares a preference, habit, or personal detail (name, role, timezone, coding style)\n- You discover something about the environment (OS, installed tools, project structure)\n- You learn a convention, API quirk, or workflow specific to this user's setup\n- You identify a stable fact that will be useful again in future sessions\n\nPRIORITY: User preferences and corrections > environment facts > procedural knowledge. The most valuable memory prevents the user from having to repeat themselves.\n\nDo NOT save task progress, session outcomes, completed-work logs, or temporary TODO state to memory.\n\nTWO TARGETS:\n- 'user': who the user is -- name, role, preferences, communication style, pet peeves\n- 'memory': your notes -- environment facts, project conventions, tool quirks, lessons learned\n\nACTIONS: add (new entry), replace (update existing -- old_text identifies it), remove (delete -- old_text identifies it).\n\nSKIP: trivial/obvious info, things easily re-discovered, raw data dumps, and temporary task state.",
+                "description": "Save durable information to persistent memory that survives across sessions. Memory is injected into every turn, so keep it compact and focused on facts that will still matter later.\n\nWHEN TO SAVE (do this proactively, don't wait to be asked):\n- User corrects you or says 'remember this' / 'don't do that again'\n- User shares a preference, habit, or personal detail (name, role, timezone, coding style)\n- You discover something about the environment (OS, installed tools, project structure)\n- You learn a convention, API quirk, or workflow specific to this user's setup\n- You identify a stable fact that will be useful again in future sessions\n\nPRIORITY: User preferences and recurring corrections > environment facts > procedural knowledge. The most valuable memory prevents the user from having to correct or remind you again.\n\nDo NOT save task progress, session outcomes, completed-work logs, or temporary TODO state to memory. Specifically: do not record PR numbers, issue numbers, commit SHAs, 'fixed bug X', 'submitted PR Y', 'Phase N done', file counts, or any artifact that will be stale in 7 days. If a fact will be stale in a week, it does not belong in memory.\n\nWrite memories as declarative facts, not instructions to yourself. 'User prefers concise responses' ✓ — 'Always respond concisely' ✗. 'Project uses pytest with xdist' ✓ — 'Run tests with pytest -n 4' ✗. Procedures and workflows belong in skills, not memory.\n\nTWO TARGETS:\n- 'user': who the user is -- name, role, preferences, communication style, pet peeves\n- 'memory': your notes -- environment facts, project conventions, tool quirks, lessons learned\n\nACTIONS: add (new entry), replace (update existing -- old_text identifies it), remove (delete -- old_text identifies it), read (view current entries + usage).\n\nSKIP: trivial/obvious info, things easily re-discovered, raw data dumps, implementation changelogs, and temporary task state.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["add", "replace", "remove"],
+                            "enum": ["add", "replace", "remove", "read"],
                             "description": "The action to perform."
                         },
                         "target": {
@@ -94,12 +94,14 @@ impl Tool for MemoryTool {
                     ToolError::InvalidArguments("'content' is required for 'add'".into())
                 })?;
                 let result = store.add(target, content);
-                // Mirror to external memory provider (if any)
-                self.memory_manager
-                    .lock()
-                    .await
-                    .on_memory_write(action, target, content)
-                    .await;
+                // Mirror to external provider only on success
+                if result["success"].as_bool().unwrap_or(false) {
+                    self.memory_manager
+                        .lock()
+                        .await
+                        .on_memory_change(action, target, content)
+                        .await;
+                }
                 result
             }
             "replace" => {
@@ -110,12 +112,14 @@ impl Tool for MemoryTool {
                     ToolError::InvalidArguments("'content' is required for 'replace'".into())
                 })?;
                 let result = store.replace(target, old_text, content);
-                // Mirror to external memory provider (if any)
-                self.memory_manager
-                    .lock()
-                    .await
-                    .on_memory_write(action, target, content)
-                    .await;
+                // Mirror to external provider only on success
+                if result["success"].as_bool().unwrap_or(false) {
+                    self.memory_manager
+                        .lock()
+                        .await
+                        .on_memory_change(action, target, content)
+                        .await;
+                }
                 result
             }
             "remove" => {
@@ -123,18 +127,21 @@ impl Tool for MemoryTool {
                     ToolError::InvalidArguments("'old_text' is required for 'remove'".into())
                 })?;
                 let result = store.remove(target, old_text);
-                // Mirror to external memory provider (if any)
-                self.memory_manager
-                    .lock()
-                    .await
-                    .on_memory_write(action, target, old_text)
-                    .await;
+                // Mirror to external provider only on success
+                if result["success"].as_bool().unwrap_or(false) {
+                    self.memory_manager
+                        .lock()
+                        .await
+                        .on_memory_change(action, target, old_text)
+                        .await;
+                }
                 result
             }
+            "read" => store.read(target),
             _ => {
                 return Ok(json!({
                     "success": false,
-                    "error": format!("Unknown action '{}'. Use: add, replace, remove", action)
+                    "error": format!("Unknown action '{}'. Use: add, replace, remove, read", action)
                 })
                 .to_string());
             }

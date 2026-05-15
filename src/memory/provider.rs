@@ -143,7 +143,7 @@ pub trait MemoryProvider: Send + Sync {
 
     /// Called when the built-in memory tool writes an entry.
     /// Use to mirror built-in memory writes to your backend.
-    fn on_memory_write(&self, action: &str, target: &str, content: &str) {
+    fn on_memory_change(&self, action: &str, target: &str, content: &str) {
         let _ = (action, target, content);
     }
 }

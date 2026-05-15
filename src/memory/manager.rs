@@ -192,11 +192,11 @@ impl MemoryManager {
     }
 
     /// Notify the external provider of a built-in memory write.
-    pub async fn on_memory_write(&self, action: &str, target: &str, content: &str) {
+    pub async fn on_memory_change(&self, action: &str, target: &str, content: &str) {
         if let Some(ref p) = self.external_provider
             && self.external_initialized
         {
-            p.on_memory_write(action, target, content);
+            p.on_memory_change(action, target, content);
         }
     }
 

@@ -111,6 +111,12 @@ static THREAT_REGEXES: LazyLock<Vec<(regex::Regex, &str)>> = LazyLock::new(|| {
         .collect()
 });
 
+/// Compiled regex for normalizing consecutive entry delimiters.
+/// Matches a complete delimiter sequence (`\n§\n`) optionally followed by
+/// additional consecutive delimiters. Avoids matching `§` inside entry content.
+static DELIMITER_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"\n\s*§\s*\n(?:\s*§\s*\n)*").unwrap());
+
 /// Subset of invisible Unicode characters that could be used for injection.
 const INVISIBLE_CHARS: &[char] = &[
     '\u{200b}', '\u{200c}', '\u{200d}', '\u{2060}', '\u{feff}', '\u{202a}', '\u{202b}', '\u{202c}',
@@ -264,14 +270,22 @@ impl MemoryStore {
 
         if new_total > limit {
             let current = self.char_count(target);
-            let entries_json: Vec<&str> = entries.iter().map(|s| s.as_str()).collect();
+            // Numbered entry list so the LLM can refer to specific entries
+            let numbered: Vec<String> = entries
+                .iter()
+                .enumerate()
+                .map(|(i, e)| format!("{}. {}", i + 1, truncate_preview(e, 80)))
+                .collect();
             return serde_json::json!({
                 "success": false,
                 "error": format!(
-                    "Memory at {}/{} chars. Adding this entry ({} chars) would exceed the limit. Replace or remove existing entries first.",
+                    "Memory full: {}/{} chars. Adding this entry ({} chars) would exceed the limit. \
+                     Call memory(action='read') to review entries, then \
+                     memory(action='replace', old_text='...') to update an existing entry, \
+                     or memory(action='remove', old_text='...') to free space.",
                     current, limit, content.len()
                 ),
-                "current_entries": entries_json,
+                "current_entries": numbered,
                 "usage": format!("{}/{}", current, limit),
             });
         }
@@ -342,7 +356,7 @@ impl MemoryStore {
 
         if new_total > limit {
             return error_response(&format!(
-                "Replacement would put memory at {}/{} chars. Shorten the new content or remove other entries first.",
+                "Replacement too long: would use {}/{} chars. Shorten the replacement, or remove another entry first.",
                 new_total, limit
             ));
         }
@@ -394,6 +408,13 @@ impl MemoryStore {
         self.save_to_disk(target);
 
         self.success_response(target, Some("Entry removed."))
+    }
+
+    /// Read entries from the specified target. Reloads from disk to pick up
+    /// concurrent writes. Returns entries + usage as JSON.
+    pub fn read(&mut self, target: &str) -> serde_json::Value {
+        self.reload_target(target);
+        self.success_response(target, None)
     }
 
     /// Return a summary of both stores for `/memory` display.
@@ -602,6 +623,9 @@ fn truncate_preview(s: &str, max_chars: usize) -> String {
 // ---------------------------------------------------------------------------
 
 /// Read a memory file and split into entries.
+///
+/// Normalizes consecutive delimiters (e.g. `\n§\n§\n` from LLM writing
+/// extra separators) before splitting, so empty phantom entries never appear.
 fn read_entry_file(path: &Path) -> Vec<String> {
     let raw = match fs::read_to_string(path) {
         Ok(s) => s,
@@ -616,10 +640,34 @@ fn read_entry_file(path: &Path) -> Vec<String> {
     if raw.trim().is_empty() {
         return Vec::new();
     }
-    raw.split(ENTRY_DELIMITER)
+    // Normalize: collapse runs of "\n§\n" (with optional extra whitespace/newlines
+    // between them) into a single delimiter. This handles LLMs that write extra
+    // § markers or leave blank lines between entries.
+    let normalized = normalize_delimiters(&raw);
+    normalized
+        .split(ENTRY_DELIMITER)
         .map(|e| e.trim().to_string())
         .filter(|e| !e.is_empty())
         .collect()
+}
+
+/// Collapse consecutive entry delimiters into a single one.
+///
+/// The LLM sometimes writes `\n§\n\n§\n` (double delimiter with blank line)
+/// or `\n§\n§\n` (adjacent delimiters with no content between them, leaving
+/// orphan `§` chars after split). This normalizes any run of `§` characters
+/// separated by whitespace/newlines into a single delimiter, then splits.
+fn normalize_delimiters(raw: &str) -> String {
+    // Pattern: one or more `§` chars, each optionally surrounded by whitespace.
+    // This matches single `\n§\n`, double `\n§\n\n§\n`, adjacent `\n§\n§\n`, etc.
+    // Use split+filter+join instead of replace to avoid consuming trailing newlines
+    // that belong to the next entry's content.
+    let parts: Vec<&str> = DELIMITER_RE
+        .split(raw)
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    parts.join(ENTRY_DELIMITER)
 }
 
 /// Write entries to a memory file using atomic temp-file + rename.
@@ -697,8 +745,8 @@ mod tests {
         let store = MemoryStore::new(
             dir.path().join("MEMORY.md"),
             dir.path().join("USER.md"),
-            4000,
-            2500,
+            2200,
+            1375,
         );
         (dir, store)
     }
@@ -776,13 +824,13 @@ mod tests {
         let usr_path = dir.path().join("USER.md");
 
         {
-            let mut store = MemoryStore::new(mem_path.clone(), usr_path.clone(), 4000, 2500);
+            let mut store = MemoryStore::new(mem_path.clone(), usr_path.clone(), 2200, 1375);
             store.add("memory", "persistent entry");
             store.add("user", "user info");
         }
 
         {
-            let mut store = MemoryStore::new(mem_path, usr_path, 4000, 2500);
+            let mut store = MemoryStore::new(mem_path, usr_path, 2200, 1375);
             store.load_from_disk();
             assert_eq!(store.memory_entries, vec!["persistent entry"]);
             assert_eq!(store.user_entries, vec!["user info"]);
@@ -796,7 +844,7 @@ mod tests {
         let usr_path = dir.path().join("USER.md");
 
         {
-            let mut store = MemoryStore::new(mem_path.clone(), usr_path.clone(), 4000, 2500);
+            let mut store = MemoryStore::new(mem_path.clone(), usr_path.clone(), 2200, 1375);
             store.add("memory", "test note");
             store.load_from_disk();
 
@@ -869,7 +917,7 @@ mod tests {
             dir.path().join("MEMORY.md"),
             dir.path().join("USER.md"),
             50,
-            2500,
+            1375,
         );
 
         let result = store.add("memory", &"x".repeat(60));
@@ -891,9 +939,63 @@ mod tests {
         // Write a file with duplicates manually
         fs::write(&mem_path, "entry one\n§\nentry one\n§\nentry two").unwrap();
 
-        let mut store = MemoryStore::new(mem_path, usr_path, 4000, 2500);
+        let mut store = MemoryStore::new(mem_path, usr_path, 2200, 1375);
         store.load_from_disk();
         assert_eq!(store.memory_entries, vec!["entry one", "entry two"]);
+    }
+
+    #[test]
+    fn test_double_delimiter_normalized() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem_path = dir.path().join("MEMORY.md");
+        let usr_path = dir.path().join("USER.md");
+
+        // LLM writes extra § between entries (real-world scenario)
+        fs::write(&mem_path, "entry one\n§\n\n§\nentry two\n§\n§\nentry three").unwrap();
+
+        let mut store = MemoryStore::new(mem_path, usr_path, 2200, 1375);
+        store.load_from_disk();
+        assert_eq!(
+            store.memory_entries,
+            vec!["entry one", "entry two", "entry three"]
+        );
+    }
+
+    #[test]
+    fn test_read_action() {
+        let (_dir, mut store) = temp_store();
+        store.add("memory", "note one");
+        store.add("memory", "note two");
+
+        let result = store.read("memory");
+        assert_eq!(result["success"], true);
+        let entries: Vec<&str> = result["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(entries, vec!["note one", "note two"]);
+        assert!(result["usage"].as_str().unwrap().contains("chars"));
+    }
+
+    #[test]
+    fn test_add_full_shows_numbered_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = MemoryStore::new(
+            dir.path().join("MEMORY.md"),
+            dir.path().join("USER.md"),
+            20,
+            1375,
+        );
+        store.add("memory", "short entry");
+        let result = store.add("memory", "another entry that is also long");
+        assert_eq!(result["success"], false);
+        // Should show numbered entry list
+        let entries = result["current_entries"].as_array().unwrap();
+        assert!(entries[0].as_str().unwrap().starts_with("1. "));
+        // Error should mention 'read' action
+        assert!(result["error"].as_str().unwrap().contains("read"));
     }
 
     #[test]
@@ -955,7 +1057,7 @@ mod tests {
         let usr_path = dir2.path().join("USER.md");
 
         {
-            let mut store = MemoryStore::new(mem_path.clone(), usr_path.clone(), 4000, 2500);
+            let mut store = MemoryStore::new(mem_path.clone(), usr_path.clone(), 2200, 1375);
             store.load_from_disk();
             store.add("memory", "note about env");
             store.add("user", "likes Rust");
@@ -964,7 +1066,7 @@ mod tests {
         assert!(mem_path.exists());
         assert!(usr_path.exists());
 
-        let mut store = MemoryStore::new(mem_path, usr_path, 4000, 2500);
+        let mut store = MemoryStore::new(mem_path, usr_path, 2200, 1375);
         store.load_from_disk();
         assert_eq!(store.memory_entries, vec!["note about env"]);
         assert_eq!(store.user_entries, vec!["likes Rust"]);
@@ -977,7 +1079,7 @@ mod tests {
         let mem_path = dir.path().join("MEMORY.md");
         let usr_path = dir.path().join("USER.md");
 
-        let mut store = MemoryStore::new(mem_path.clone(), usr_path.clone(), 4000, 2500);
+        let mut store = MemoryStore::new(mem_path.clone(), usr_path.clone(), 2200, 1375);
         store.load_from_disk();
         store.add("memory", "note");
         store.add("user", "profile");
