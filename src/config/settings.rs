@@ -646,18 +646,6 @@ impl Default for SkillsConfig {
 // Memory
 // ---------------------------------------------------------------------------
 
-/// Config for a single Lua memory provider entry.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default)]
-#[derive(Default)]
-pub struct MemoryProviderEntry {
-    /// Path to the Lua script (relative to config dir), or inline script source.
-    pub script: String,
-    /// Whether the script is inline (true) or a file path (false).
-    #[serde(default)]
-    pub inline: bool,
-}
-
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct MemoryConfig {
@@ -665,14 +653,11 @@ pub struct MemoryConfig {
     pub memory_char_limit: usize,
     /// Character limit for USER.md (user profile). Default: 1375.
     pub user_char_limit: usize,
-    /// Name of the active external memory provider (e.g. "mem0", "honcho").
+    /// Name of the active external memory provider (e.g. "mem0", "hindsight").
     /// Empty string means no external provider (built-in only).
-    /// Configured via `zn.memory_provider("name", {...})` in init.lua.
+    /// Configured via `zn.memory_provider("name", require("module"))` in init.lua.
+    /// The provider table lives in the shared Lua VM's registry.
     pub provider: String,
-    /// Registered memory provider configs (name → config).
-    /// Populated by `zn.memory_provider()` calls in init.lua.
-    #[serde(default)]
-    pub providers: HashMap<String, MemoryProviderEntry>,
 }
 
 impl Default for MemoryConfig {
@@ -681,7 +666,6 @@ impl Default for MemoryConfig {
             memory_char_limit: 2200,
             user_char_limit: 1375,
             provider: String::new(),
-            providers: HashMap::new(),
         }
     }
 }

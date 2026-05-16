@@ -9,6 +9,7 @@
 //! can be stored in `Arc<Mutex<QueryEngine>>`.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use mlua::{Lua, RegistryKey, Value};
 
@@ -30,17 +31,19 @@ struct StoredHook {
 /// for the entire session.
 pub struct HookExecutor {
     /// The Lua VM from the config loader — holds hook functions in its registry.
-    lua: Lua,
+    /// Shared with LuaMemoryProvider so provider tables (with functions) are
+    /// directly accessible without cross-VM serialization.
+    lua: Arc<Mutex<Lua>>,
     /// event → list of stored callbacks.
     hooks: HashMap<HookEvent, Vec<StoredHook>>,
 }
 
 impl HookExecutor {
-    /// Create a new executor wrapping an existing Lua VM.
+    /// Create a new executor wrapping a shared Lua VM.
     ///
     /// The VM should be the one used by the config loader, which already
     /// has the hook functions registered in its `_rc_hooks` registry table.
-    pub fn new(lua: Lua) -> Self {
+    pub fn new(lua: Arc<Mutex<Lua>>) -> Self {
         Self {
             lua,
             hooks: HashMap::new(),
@@ -52,7 +55,7 @@ impl HookExecutor {
     /// The function is stored in the Lua registry and the `RegistryKey`
     /// is kept in the executor for later invocation.
     pub fn register(&mut self, event: HookEvent, func: mlua::Function) -> Result<(), mlua::Error> {
-        let key = self.lua.create_registry_value(&func)?;
+        let key = self.lua.lock().unwrap().create_registry_value(&func)?;
         let event_name = event_name_for(event);
         self.hooks
             .entry(event)
@@ -74,10 +77,11 @@ impl HookExecutor {
 
         let mut results = Vec::new();
         for stored in callbacks {
-            match self.lua.registry_value::<mlua::Function>(&stored.key) {
+            let lua = self.lua.lock().unwrap();
+            match lua.registry_value::<mlua::Function>(&stored.key) {
                 Ok(func) => match func.call::<Value>(context.clone()) {
                     Ok(val) => {
-                        if let Some(result) = parse_hook_result(&self.lua, event, &val) {
+                        if let Some(result) = parse_hook_result(&lua, event, &val) {
                             results.push(result);
                         }
                     }
@@ -159,15 +163,15 @@ impl HookExecutor {
     /// Convenience method to create the context table that is passed to
     /// hook callbacks.
     pub fn build_context(&self) -> Result<mlua::Table, mlua::Error> {
-        self.lua.create_table()
+        self.lua.lock().unwrap().create_table()
     }
 
-    /// Get a reference to the underlying Lua VM.
+    /// Get a locked handle to the underlying Lua VM.
     ///
     /// Used by callers that need to convert `serde_json::Value` to native
     /// Lua values via `json_to_lua_value()`.
-    pub fn lua(&self) -> &Lua {
-        &self.lua
+    pub fn lua(&self) -> std::sync::MutexGuard<'_, Lua> {
+        self.lua.lock().unwrap()
     }
 
     /// Number of registered hooks total (for diagnostics).
@@ -302,7 +306,7 @@ mod tests {
     /// Create a test executor with a fresh Lua VM (no hooks pre-registered).
     fn test_executor() -> HookExecutor {
         let lua = Lua::new();
-        HookExecutor::new(lua)
+        HookExecutor::new(Arc::new(Mutex::new(lua)))
     }
 
     #[test]
@@ -324,7 +328,7 @@ mod tests {
         let lua = Lua::new();
         let func = lua.create_function(|_, ()| Ok(())).unwrap();
 
-        let mut exec = HookExecutor::new(lua);
+        let mut exec = HookExecutor::new(Arc::new(Mutex::new(lua)));
         exec.register(HookEvent::PreToolUse, func).unwrap();
         assert_eq!(exec.hook_count(), 1);
         assert!(exec.has_hooks_for(HookEvent::PreToolUse));
@@ -336,7 +340,7 @@ mod tests {
         let lua = Lua::new();
         let func = lua.create_function(|_, ()| Ok(Value::Nil)).unwrap();
 
-        let mut exec = HookExecutor::new(lua);
+        let mut exec = HookExecutor::new(Arc::new(Mutex::new(lua)));
         exec.register(HookEvent::PreToolUse, func).unwrap();
 
         let ctx = exec.build_context().unwrap();
@@ -355,7 +359,7 @@ mod tests {
             })
             .unwrap();
 
-        let mut exec = HookExecutor::new(lua);
+        let mut exec = HookExecutor::new(Arc::new(Mutex::new(lua)));
         exec.register(HookEvent::PreToolUse, func).unwrap();
 
         let ctx = exec.build_context().unwrap();
@@ -374,7 +378,7 @@ mod tests {
             .create_function(|_, ()| -> Result<String, mlua::Error> { Ok("forbidden".into()) })
             .unwrap();
 
-        let mut exec = HookExecutor::new(lua);
+        let mut exec = HookExecutor::new(Arc::new(Mutex::new(lua)));
         exec.register(HookEvent::PreToolUse, func).unwrap();
 
         let ctx = exec.build_context().unwrap();
@@ -396,7 +400,7 @@ mod tests {
             .create_function(|_, ()| -> Result<String, mlua::Error> { Ok("blocked!".into()) })
             .unwrap();
 
-        let mut exec = HookExecutor::new(lua);
+        let mut exec = HookExecutor::new(Arc::new(Mutex::new(lua)));
         exec.register(HookEvent::PreToolUse, func1).unwrap();
         exec.register(HookEvent::PreToolUse, func2).unwrap();
 
@@ -412,7 +416,7 @@ mod tests {
             .create_function(|_, ()| -> Result<String, mlua::Error> { Ok("modified input".into()) })
             .unwrap();
 
-        let mut exec = HookExecutor::new(lua);
+        let mut exec = HookExecutor::new(Arc::new(Mutex::new(lua)));
         exec.register(HookEvent::UserMessage, func).unwrap();
 
         let ctx = exec.build_context().unwrap();
@@ -427,7 +431,7 @@ mod tests {
             .create_function(|_, ()| -> Result<String, mlua::Error> { Ok("extra context".into()) })
             .unwrap();
 
-        let mut exec = HookExecutor::new(lua);
+        let mut exec = HookExecutor::new(Arc::new(Mutex::new(lua)));
         exec.register(HookEvent::PreLlmCall, func).unwrap();
 
         let ctx = exec.build_context().unwrap();
@@ -445,7 +449,7 @@ mod tests {
             })
             .unwrap();
 
-        let mut exec = HookExecutor::new(lua);
+        let mut exec = HookExecutor::new(Arc::new(Mutex::new(lua)));
         exec.register(HookEvent::PreToolUse, func).unwrap();
 
         let ctx = exec.build_context().unwrap();

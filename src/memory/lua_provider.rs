@@ -87,56 +87,47 @@
 //!
 //! Configuration in init.lua:
 //! ```lua
-//! -- From a script file (relative to config dir)
-//! zn.memory_provider("mem0", {
-//!     script = "memory_providers/mem0.lua",
-//! })
+//! -- From a Lua module file (copy hindsight.lua to ~/.config/zeno/lua/):
+//! zn.memory_provider("hindsight", require("hindsight"))
 //!
-//! -- Or inline script
+//! -- Or inline (for simple providers):
 //! zn.memory_provider("simple", {
-//!     script = [[
-//!         return {
-//!             name = "simple",
-//!             system_prompt = "Custom provider active.",
-//!             is_available = function() return true end,
-//!             initialize = function(sid) end,
-//!             handle_tool_call = function(name, args_json)
-//!                 return '{"success": true}'
-//!             end,
-//!             tool_schemas = {
-//!                 {
-//!                     name = "my_search",
-//!                     description = "Search my backend.",
-//!                     parameters = {
-//!                         type = "object",
-//!                         properties = { query = { type = "string" } },
-//!                         required = { "query" },
-//!                     },
-//!                 },
+//!     name = "simple",
+//!     system_prompt = "Custom provider active.",
+//!     is_available = function() return true end,
+//!     initialize = function(sid) end,
+//!     handle_tool_call = function(name, args_json)
+//!         return '{"success": true}'
+//!     end,
+//!     tool_schemas = {
+//!         {
+//!             name = "my_search",
+//!             description = "Search my backend.",
+//!             parameters = {
+//!                 type = "object",
+//!                 properties = { query = { type = "string" } },
+//!                 required = { "query" },
 //!             },
-//!         }
-//!     ]],
+//!         },
+//!     },
 //! })
 //! ```
 
 use async_trait::async_trait;
-use mlua::{Lua, LuaOptions, StdLib};
+use mlua::Lua;
 use serde_json::Value;
-use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::Mutex;
 
 use super::provider::{MemoryProvider, ProviderError, ProviderResult};
 
-/// Config for a Lua memory provider, extracted from init.lua.
+/// Config for a Lua memory provider, identified by name.
+/// The actual provider table lives in the shared Lua VM's registry.
 #[derive(Debug, Clone)]
 pub struct LuaProviderConfig {
-    /// Provider name (e.g. "mem0", "honcho").
+    /// Provider name (e.g. "mem0", "hindsight").
+    /// Used to look up the provider table from the registry at `_rc_provider_{name}`.
     pub name: String,
-    /// The Lua script source code.
-    pub script: String,
-    /// Whether the script is inline (true) or a file path (false).
-    pub inline: bool,
 }
 
 /// Static data extracted from the Lua provider script at load time.
@@ -156,88 +147,37 @@ pub struct LuaMemoryProvider {
 }
 
 impl LuaMemoryProvider {
-    /// Create a new Lua memory provider.
-    pub fn new(config: LuaProviderConfig, config_dir: PathBuf) -> Result<Self, ProviderError> {
-        let lua = Self::create_lua_vm()
-            .map_err(|e| ProviderError::Config(format!("Failed to create Lua VM: {}", e)))?;
-
-        let static_data = Self::load_script(&lua, &config, &config_dir)?;
+    /// Create a new Lua memory provider using a shared Lua VM.
+    ///
+    /// The provider table is looked up from the VM's registry at
+    /// `_rc_provider_{name}`, which was stored there by `zn.memory_provider()`
+    /// during config loading.
+    pub fn new(config: LuaProviderConfig, lua: Arc<Mutex<Lua>>) -> Result<Self, ProviderError> {
+        let static_data = Self::load_provider(&lua, &config)?;
 
         Ok(Self {
             config,
-            lua: Arc::new(Mutex::new(lua)),
+            lua,
             static_data,
             initialized: false,
         })
     }
 
-    /// Create a Lua VM with safe stdlibs + provider-specific extensions.
-    fn create_lua_vm() -> Result<Lua, mlua::Error> {
-        let stdlibs =
-            StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8 | StdLib::COROUTINE;
-
-        let lua = Lua::new_with(stdlibs, LuaOptions::new())?;
-
-        let globals = lua.globals();
-
-        // Add os.getenv (safe, read-only access to env vars)
-        let os_table = lua.create_table()?;
-        let getenv_fn =
-            lua.create_function(|_, name: String| -> Result<Option<String>, mlua::Error> {
-                Ok(std::env::var(&name).ok())
-            })?;
-        os_table.set("getenv", getenv_fn)?;
-        globals.set("os", os_table)?;
-
-        // Add json library (json.encode / json.decode)
-        let json_table = lua.create_table()?;
-        let encode_fn = lua.create_function(|_, val: mlua::Value| {
-            match serde_json::to_string(&lua_value_to_json(&val)) {
-                Ok(s) => Ok(s),
-                Err(e) => Err(mlua::Error::external(format!("json.encode failed: {}", e))),
-            }
-        })?;
-        let decode_fn =
-            lua.create_function(|lua, s: String| match serde_json::from_str::<Value>(&s) {
-                Ok(v) => Ok(json_to_lua_value(lua, &v)),
-                Err(e) => Err(mlua::Error::external(format!("json.decode failed: {}", e))),
-            })?;
-        json_table.set("encode", encode_fn)?;
-        json_table.set("decode", decode_fn)?;
-        globals.set("json", json_table)?;
-
-        Ok(lua)
-    }
-
-    /// Load the provider script and extract static data.
-    fn load_script(
-        lua: &Lua,
+    /// Look up the provider table from the registry and extract static data.
+    fn load_provider(
+        lua: &Arc<Mutex<Lua>>,
         config: &LuaProviderConfig,
-        config_dir: &std::path::Path,
     ) -> Result<ProviderStatic, ProviderError> {
-        let source = if config.inline {
-            config.script.clone()
-        } else {
-            let script_path = config_dir.join(&config.script);
-            std::fs::read_to_string(&script_path).map_err(|e| {
-                ProviderError::Config(format!(
-                    "Failed to read memory provider script '{}': {}",
-                    script_path.display(),
-                    e
-                ))
-            })?
-        };
-
-        let provider_table: mlua::Table = lua
-            .load(&source)
-            .set_name(format!("memory_provider:{}", config.name))
-            .eval()
-            .map_err(|e| {
-                ProviderError::Config(format!(
-                    "Failed to load memory provider '{}': {}",
-                    config.name, e
-                ))
-            })?;
+        let lua = lua
+            .lock()
+            .map_err(|e| ProviderError::Config(format!("Failed to lock Lua VM: {}", e)))?;
+        let registry_key = format!("_rc_provider_{}", config.name);
+        let provider_table: mlua::Table = lua.named_registry_value(&registry_key).map_err(|e| {
+            ProviderError::Config(format!(
+                "Memory provider '{}' not found in registry: {}",
+                config.name, e
+            ))
+        })?;
 
         let mut static_data = ProviderStatic::default();
 
@@ -301,7 +241,7 @@ impl MemoryProvider for LuaMemoryProvider {
     }
 
     async fn initialize(&mut self, session_id: &str) -> Result<(), ProviderError> {
-        let lua = self.lua.lock().await;
+        let lua = self.lua.lock().unwrap();
         let globals = lua.globals();
         if let Ok(provider) = globals.get::<mlua::Table>("_provider")
             && let Ok(func) = provider.get::<mlua::Function>("initialize")
@@ -322,7 +262,7 @@ impl MemoryProvider for LuaMemoryProvider {
     }
 
     async fn prefetch(&self, query: &str) -> String {
-        let lua = self.lua.lock().await;
+        let lua = self.lua.lock().unwrap();
         let globals = lua.globals();
         if let Ok(provider) = globals.get::<mlua::Table>("_provider")
             && let Ok(func) = provider.get::<mlua::Function>("prefetch")
@@ -342,7 +282,7 @@ impl MemoryProvider for LuaMemoryProvider {
     }
 
     async fn sync_turn(&self, user_content: &str, assistant_content: &str) {
-        let lua = self.lua.lock().await;
+        let lua = self.lua.lock().unwrap();
         let globals = lua.globals();
         if let Ok(provider) = globals.get::<mlua::Table>("_provider")
             && let Ok(func) = provider.get::<mlua::Function>("sync_turn")
@@ -358,7 +298,7 @@ impl MemoryProvider for LuaMemoryProvider {
 
     async fn on_session_end(&self, messages: &[Value]) {
         let messages_json = serde_json::to_string(messages).unwrap_or_default();
-        let lua = self.lua.lock().await;
+        let lua = self.lua.lock().unwrap();
         let globals = lua.globals();
         if let Ok(provider) = globals.get::<mlua::Table>("_provider")
             && let Ok(func) = provider.get::<mlua::Function>("on_session_end")
@@ -379,7 +319,7 @@ impl MemoryProvider for LuaMemoryProvider {
     async fn handle_tool_call(&self, tool_name: &str, args: &Value) -> ProviderResult {
         let args_json = serde_json::to_string(args).unwrap_or_default();
 
-        let lua = self.lua.lock().await;
+        let lua = self.lua.lock().unwrap();
         let globals = lua.globals();
         let provider: mlua::Table = globals
             .get("_provider")
@@ -402,7 +342,7 @@ impl MemoryProvider for LuaMemoryProvider {
     }
 
     async fn shutdown(&mut self) {
-        let lua = self.lua.lock().await;
+        let lua = self.lua.lock().unwrap();
         let globals = lua.globals();
         if let Ok(provider) = globals.get::<mlua::Table>("_provider")
             && let Ok(func) = provider.get::<mlua::Function>("shutdown")
@@ -510,7 +450,7 @@ impl MemoryProvider for LuaMemoryProvider {
 // ---------------------------------------------------------------------------
 
 /// Convert a Lua value to a serde_json::Value.
-fn lua_value_to_json(val: &mlua::Value) -> Value {
+pub fn lua_value_to_json(val: &mlua::Value) -> Value {
     match val {
         mlua::Value::Nil => Value::Null,
         mlua::Value::Boolean(b) => Value::Bool(*b),
@@ -568,7 +508,7 @@ fn lua_value_to_json(val: &mlua::Value) -> Value {
 }
 
 /// Convert a serde_json::Value to a Lua value.
-fn json_to_lua_value(lua: &Lua, val: &Value) -> mlua::Value {
+pub fn json_to_lua_value(lua: &Lua, val: &Value) -> mlua::Value {
     match val {
         Value::Null => mlua::Value::Nil,
         Value::Bool(b) => mlua::Value::Boolean(*b),

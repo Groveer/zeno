@@ -1593,7 +1593,7 @@ async fn execute_single_tool_tui(
                 let _ = hook_ctx.set("tool_name", tu.name.as_str());
                 let _ = hook_ctx.set(
                     "tool_input",
-                    crate::hooks::executor::json_to_lua_value(he.lua(), &input),
+                    crate::hooks::executor::json_to_lua_value(&*he.lua(), &input),
                 );
                 let _ = hook_ctx.set("cwd", ctx.cwd.to_string_lossy().to_string());
                 if let Some(block_reason) = he
@@ -1854,7 +1854,7 @@ async fn execute_single_tool_tui(
                         let _ = hook_ctx.set("tool_name", tu.name.as_str());
                         let _ = hook_ctx.set(
                             "tool_input",
-                            crate::hooks::executor::json_to_lua_value(he.lua(), &input),
+                            crate::hooks::executor::json_to_lua_value(&*he.lua(), &input),
                         );
                         let _ = hook_ctx.set("tool_output", result.clone());
                         let _ = hook_ctx.set("tool_is_error", false);
@@ -1890,7 +1890,7 @@ async fn execute_single_tool_tui(
                         let _ = hook_ctx.set("tool_name", tu.name.as_str());
                         let _ = hook_ctx.set(
                             "tool_input",
-                            crate::hooks::executor::json_to_lua_value(he.lua(), &input),
+                            crate::hooks::executor::json_to_lua_value(&*he.lua(), &input),
                         );
                         let _ = hook_ctx.set("tool_output", e.to_string());
                         let _ = hook_ctx.set("tool_is_error", true);

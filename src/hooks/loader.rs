@@ -10,6 +10,8 @@
 //! 3. The executor takes ownership of the Lua VM and is returned
 //!    alongside the `Settings`.
 
+use std::sync::{Arc, Mutex};
+
 use mlua::Lua;
 
 use super::executor::HookExecutor;
@@ -20,12 +22,13 @@ use super::types::VALID_HOOK_EVENTS;
 /// Reads the `_rc_hooks` registry table (populated by `zn.hook()` calls
 /// in init.lua) and registers each callback in the executor.
 ///
-/// Takes ownership of the `Lua` VM so that the registered `Function`
-/// values remain valid throughout the session.
+/// Takes a clone of the shared `Arc<Mutex<Lua>>` so that the registered
+/// `Function` values remain valid throughout the session. The same VM is
+/// shared with `LuaMemoryProvider` for memory provider callbacks.
 ///
-/// Returns `None` if no hooks were registered (and the Lua VM is dropped).
-pub fn load_hooks(lua: Lua) -> anyhow::Result<Option<HookExecutor>> {
-    let hooks_table: mlua::Table = match lua.named_registry_value("_rc_hooks") {
+/// Returns `None` if no hooks were registered.
+pub fn load_hooks(lua: Arc<Mutex<Lua>>) -> anyhow::Result<Option<HookExecutor>> {
+    let hooks_table: mlua::Table = match lua.lock().unwrap().named_registry_value("_rc_hooks") {
         Ok(t) => t,
         Err(_) => return Ok(None), // no `zn.hook()` calls were made
     };

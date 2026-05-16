@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context as _;
 use mlua::{Lua, LuaOptions, LuaSerdeExt, StdLib, Value};
@@ -37,12 +38,18 @@ fn safe_stdlibs() -> StdLib {
 
 /// Load settings from `~/.config/zeno/init.lua`.
 ///
-/// If the file does not exist, returns `Settings::default()` and `None` hooks.
-pub fn load() -> anyhow::Result<(Settings, Option<crate::hooks::executor::HookExecutor>)> {
+/// If the file does not exist, returns `Settings::default()`, `None` hooks,
+/// and a minimal Lua VM.
+pub fn load() -> anyhow::Result<(
+    Settings,
+    Option<crate::hooks::executor::HookExecutor>,
+    Arc<Mutex<Lua>>,
+)> {
     let init_path = paths::config_path();
     if !init_path.exists() {
         tracing::info!(path = %init_path.display(), event = "no_init_lua", "No init.lua found, using defaults");
-        return Ok((Settings::default(), None));
+        let lua = Lua::new_with(safe_stdlibs(), LuaOptions::new()).context("creating Lua VM")?;
+        return Ok((Settings::default(), None, Arc::new(Mutex::new(lua))));
     }
     load_lua(&init_path, &paths::config_dir())
 }
@@ -51,11 +58,16 @@ pub fn load() -> anyhow::Result<(Settings, Option<crate::hooks::executor::HookEx
 #[cfg(test)]
 pub fn load_from_dir(
     config_dir: &std::path::Path,
-) -> anyhow::Result<(Settings, Option<crate::hooks::executor::HookExecutor>)> {
+) -> anyhow::Result<(
+    Settings,
+    Option<crate::hooks::executor::HookExecutor>,
+    Arc<Mutex<Lua>>,
+)> {
     let init_path = config_dir.join("init.lua");
     if !init_path.exists() {
         tracing::info!(path = %init_path.display(), event = "no_init_lua", "No init.lua found, using defaults");
-        return Ok((Settings::default(), None));
+        let lua = Lua::new_with(safe_stdlibs(), LuaOptions::new()).context("creating Lua VM")?;
+        return Ok((Settings::default(), None, Arc::new(Mutex::new(lua))));
     }
     load_lua(&init_path, config_dir)
 }
@@ -63,7 +75,11 @@ pub fn load_from_dir(
 fn load_lua(
     path: &Path,
     config_dir: &Path,
-) -> anyhow::Result<(Settings, Option<crate::hooks::executor::HookExecutor>)> {
+) -> anyhow::Result<(
+    Settings,
+    Option<crate::hooks::executor::HookExecutor>,
+    Arc<Mutex<Lua>>,
+)> {
     // 1. Create sandboxed Lua VM
     let lua = Lua::new_with(safe_stdlibs(), LuaOptions::new()).context("creating Lua VM")?;
 
@@ -103,6 +119,93 @@ fn load_lua(
     )
     .exec()
     .context("setting up safe require")?;
+
+    // 3b. Add provider extensions to the config VM (shared with LuaMemoryProvider)
+    // os.getenv (safe, read-only access to env vars)
+    let os_table = lua.create_table()?;
+    let getenv_fn =
+        lua.create_function(|_, name: String| -> Result<Option<String>, mlua::Error> {
+            Ok(std::env::var(&name).ok())
+        })?;
+    os_table.set("getenv", getenv_fn)?;
+    globals.set("os", os_table)?;
+
+    // json library (json.encode / json.decode)
+    let json_table = lua.create_table()?;
+    let encode_fn = lua.create_function(|_, val: mlua::Value| {
+        let json_val = crate::memory::lua_provider::lua_value_to_json(&val);
+        serde_json::to_string(&json_val)
+            .map_err(|e| mlua::Error::external(format!("json.encode failed: {}", e)))
+    })?;
+    let decode_fn = lua.create_function(|lua, s: String| {
+        match serde_json::from_str::<serde_json::Value>(&s) {
+            Ok(v) => Ok(crate::memory::lua_provider::json_to_lua_value(lua, &v)),
+            Err(e) => Err(mlua::Error::external(format!("json.decode failed: {}", e))),
+        }
+    })?;
+    json_table.set("encode", encode_fn)?;
+    json_table.set("decode", decode_fn)?;
+    globals.set("json", json_table)?;
+
+    // http library for memory providers that need HTTP calls
+    // http.request(method, url, body, headers) -> response_body, status_code, error
+    let http_table = lua.create_table()?;
+    let request_fn = lua.create_function(
+        |_, (method, url, body, headers): (String, String, Option<String>, Option<mlua::Table>)| {
+            let client = reqwest::blocking::Client::new();
+            let method_upper = method.to_uppercase();
+            let mut req = match method_upper.as_str() {
+                "GET" => client.get(&url),
+                "POST" => client.post(&url),
+                "PUT" => client.put(&url),
+                "DELETE" => client.delete(&url),
+                "PATCH" => client.patch(&url),
+                _ => {
+                    return Err(mlua::Error::external(format!(
+                        "Unsupported HTTP method: {}",
+                        method
+                    )));
+                }
+            };
+
+            // Add headers
+            if let Some(headers_table) = headers {
+                for pair in headers_table.pairs::<String, String>() {
+                    if let Ok((key, value)) = pair {
+                        req = req.header(&key, &value);
+                    }
+                }
+            }
+
+            // Add body
+            if let Some(body_str) = body {
+                req = req
+                    .header("Content-Type", "application/json")
+                    .body(body_str);
+            }
+
+            match req.send() {
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    match response.text() {
+                        Ok(text) => Ok((text, status, None::<String>)),
+                        Err(e) => Ok((
+                            String::new(),
+                            status,
+                            Some(format!("Failed to read response: {}", e)),
+                        )),
+                    }
+                }
+                Err(e) => Ok((
+                    String::new(),
+                    0u16,
+                    Some(format!("HTTP request failed: {}", e)),
+                )),
+            }
+        },
+    )?;
+    http_table.set("request", request_fn)?;
+    globals.set("http", http_table)?;
 
     // 4. Build the `zeno` Lua module.
     // Strategy: use an "overrides" table in the registry.
@@ -167,10 +270,13 @@ fn load_lua(
     // 7. Validate
     validate(&settings)?;
 
-    // 8. Load hook registrations from Lua (takes ownership of the VM)
-    let hooks = crate::hooks::loader::load_hooks(lua)?;
+    // 8. Wrap VM in Arc<Mutex<>> for shared ownership between hooks and provider
+    let lua = Arc::new(Mutex::new(lua));
 
-    Ok((settings, hooks))
+    // 9. Load hook registrations from Lua
+    let hooks = crate::hooks::loader::load_hooks(lua.clone())?;
+
+    Ok((settings, hooks, lua))
 }
 
 // ---------------------------------------------------------------------------
@@ -321,37 +427,7 @@ fn build_settings(lua: &Lua) -> anyhow::Result<Settings> {
         settings.memory.user_char_limit = v;
     }
 
-    // --- memory providers ---
-    if let Ok(memory_providers) = overrides.get::<mlua::Table>("memory_providers") {
-        let mut providers = HashMap::new();
-        for pair in memory_providers.pairs::<String, mlua::Table>() {
-            match pair {
-                Ok((name, entry)) => {
-                    let script = match entry.get::<String>("script") {
-                        Ok(s) => s,
-                        Err(_) => {
-                            tracing::warn!(
-                                provider_name = %name,
-                                "Memory provider missing 'script' field, skipping"
-                            );
-                            continue;
-                        }
-                    };
-                    let inline = entry.get::<bool>("inline").unwrap_or(false);
-                    providers.insert(
-                        name,
-                        crate::config::settings::MemoryProviderEntry { script, inline },
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to parse memory provider entry");
-                }
-            }
-        }
-        if !providers.is_empty() {
-            settings.memory.providers = providers;
-        }
-    }
+    // --- memory provider (active name only — table lives in Lua registry) ---
     if let Ok(v) = overrides.get::<String>("memory_provider_active")
         && !v.is_empty()
     {
@@ -690,18 +766,18 @@ fn register_zeno_api(lua: &Lua, table: &mlua::Table) -> anyhow::Result<()> {
     )?;
 
     // --- Memory Provider ---
-    // zn.memory_provider("name", { script = "path.lua" }) or
-    // zn.memory_provider("name", { script = [[inline code]], inline = true })
+    // zn.memory_provider("name", require("module")) or
+    // zn.memory_provider("name", { source = [[inline code]] })
+    //
+    // Stores the provider table in the registry under `_rc_provider_{name}`
+    // so it can be looked up later by LuaMemoryProvider in the same VM.
     table.set(
         "memory_provider",
-        lua.create_function(move |lua, (name, opts): (String, mlua::Table)| {
-            // Store the provider entry in memory_providers table
-            let providers: mlua::Table = get_overrides(lua)?
-                .get::<mlua::Table>("memory_providers")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
-            providers.set(name.clone(), opts)?;
-            get_overrides(lua)?.set("memory_providers", providers)?;
-            // Also set as the active provider
+        lua.create_function(move |lua, (name, provider_table): (String, mlua::Table)| {
+            // Store the provider table in the registry for later retrieval
+            let registry_key = format!("_rc_provider_{}", name);
+            lua.set_named_registry_value(&registry_key, provider_table)?;
+            // Record the active provider name in overrides (for Settings)
             get_overrides(lua)?.set("memory_provider_active", name)?;
             Ok(())
         })?,
@@ -991,7 +1067,7 @@ mod tests {
     fn load_from_tmpdir(init_lua_content: &str) -> anyhow::Result<Settings> {
         let dir = tempfile::tempdir()?;
         std::fs::write(dir.path().join("init.lua"), init_lua_content)?;
-        let (settings, _hooks) = load_from_dir(dir.path())?;
+        let (settings, _hooks, _lua) = load_from_dir(dir.path())?;
         Ok(settings)
     }
 
@@ -1217,7 +1293,7 @@ mod tests {
     fn test_no_init_lua_returns_defaults() {
         let dir = tempfile::tempdir().unwrap();
         // No init.lua created — should return defaults
-        let (settings, _hooks) = load_from_dir(dir.path()).unwrap();
+        let (settings, _hooks, _lua) = load_from_dir(dir.path()).unwrap();
         assert!(settings.providers.is_empty());
         assert_eq!(settings.max_turns, 200);
     }
@@ -1515,7 +1591,11 @@ return zn.config()
     /// Helper: load settings AND hooks from a temp dir.
     fn load_full_from_tmpdir(
         init_lua_content: &str,
-    ) -> anyhow::Result<(Settings, Option<crate::hooks::executor::HookExecutor>)> {
+    ) -> anyhow::Result<(
+        Settings,
+        Option<crate::hooks::executor::HookExecutor>,
+        Arc<Mutex<Lua>>,
+    )> {
         let dir = tempfile::tempdir()?;
         std::fs::write(dir.path().join("init.lua"), init_lua_content)?;
         load_from_dir(dir.path())
@@ -1523,7 +1603,7 @@ return zn.config()
 
     #[test]
     fn test_no_hooks_when_none_registered() {
-        let (_settings, hooks) = load_full_from_tmpdir(MINIMAL_INIT_LUA).unwrap();
+        let (_settings, hooks, _lua) = load_full_from_tmpdir(MINIMAL_INIT_LUA).unwrap();
         assert!(hooks.is_none());
     }
 
@@ -1543,7 +1623,7 @@ return zn.config()
             end)
             return zn.config()
         "#;
-        let (settings, hooks) = load_full_from_tmpdir(init_lua).unwrap();
+        let (settings, hooks, _lua) = load_full_from_tmpdir(init_lua).unwrap();
         assert_eq!(settings.active_provider, "anthropic");
         let he = hooks.expect("hooks should be registered");
         assert_eq!(he.hook_count(), 1);
@@ -1572,7 +1652,7 @@ return zn.config()
             end)
             return zn.config()
         "#;
-        let (_settings, hooks) = load_full_from_tmpdir(init_lua).unwrap();
+        let (_settings, hooks, _lua) = load_full_from_tmpdir(init_lua).unwrap();
         let he = hooks.unwrap();
         let ctx = he.build_context().unwrap();
         let results = he.execute_pre_llm(&ctx).await;
@@ -1593,7 +1673,7 @@ return zn.config()
             end)
             return zn.config()
         "#;
-        let (_settings, hooks) = load_full_from_tmpdir(init_lua).unwrap();
+        let (_settings, hooks, _lua) = load_full_from_tmpdir(init_lua).unwrap();
         let he = hooks.unwrap();
         let ctx = he.build_context().unwrap();
         ctx.set("input", "hello").unwrap();
@@ -1613,7 +1693,7 @@ return zn.config()
             zn.hook("nonexistent_event", function() end)
             return zn.config()
         "#;
-        let (_settings, hooks) = load_full_from_tmpdir(init_lua).unwrap();
+        let (_settings, hooks, _lua) = load_full_from_tmpdir(init_lua).unwrap();
         // Unknown events are silently skipped; no hooks should be registered
         assert!(hooks.is_none());
     }
@@ -1635,7 +1715,7 @@ return zn.config()
             end)
             return zn.config()
         "#;
-        let (_settings, hooks) = load_full_from_tmpdir(init_lua).unwrap();
+        let (_settings, hooks, _lua) = load_full_from_tmpdir(init_lua).unwrap();
         let he = hooks.unwrap();
         assert_eq!(he.hook_count(), 2);
         let ctx = he.build_context().unwrap();
@@ -1663,7 +1743,7 @@ return zn.config()
             end)
             return zn.config()
         "#;
-        let (_settings, hooks) = load_full_from_tmpdir(init_lua).unwrap();
+        let (_settings, hooks, _lua) = load_full_from_tmpdir(init_lua).unwrap();
         let he = hooks.unwrap();
         assert!(he.has_hooks_for(crate::hooks::types::HookEvent::PreToolUse));
     }

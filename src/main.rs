@@ -188,7 +188,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let (settings, hook_executor) = config_load()?;
+    let (settings, hook_executor, lua_vm) = config_load()?;
     config::paths::cleanup_old_logs(settings.log_retention_days);
     let settings = Arc::new(settings);
 
@@ -324,40 +324,30 @@ async fn main() -> anyhow::Result<()> {
 
     // Load and activate the configured external memory provider (if any)
     if !settings.memory.provider.is_empty() {
-        if let Some(provider_entry) = settings.memory.providers.get(&settings.memory.provider) {
-            let config_dir = config::paths::config_dir();
-            let lua_config = memory::lua_provider::LuaProviderConfig {
-                name: settings.memory.provider.clone(),
-                script: provider_entry.script.clone(),
-                inline: provider_entry.inline,
-            };
-            match memory::lua_provider::LuaMemoryProvider::new(lua_config, config_dir) {
-                Ok(provider) => {
-                    let prov_name = provider.name().to_string();
-                    let prov_available = provider.is_available();
-                    if prov_available {
-                        memory_manager.set_external(Box::new(provider)).await;
-                        tracing::info!(provider = %prov_name, event = "external_memory_activated", "External memory provider activated");
-                    } else {
-                        tracing::warn!(
-                            provider = %prov_name,
-                            "External memory provider is not available (missing credentials or deps), skipping"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(
-                        provider = %settings.memory.provider,
-                        error = %e,
-                        "Failed to load external memory provider"
+        let lua_config = memory::lua_provider::LuaProviderConfig {
+            name: settings.memory.provider.clone(),
+        };
+        match memory::lua_provider::LuaMemoryProvider::new(lua_config, lua_vm.clone()) {
+            Ok(provider) => {
+                let prov_name = provider.name().to_string();
+                let prov_available = provider.is_available();
+                if prov_available {
+                    memory_manager.set_external(Box::new(provider)).await;
+                    tracing::info!(provider = %prov_name, event = "external_memory_activated", "External memory provider activated");
+                } else {
+                    tracing::warn!(
+                        provider = %prov_name,
+                        "External memory provider is not available (missing credentials or deps), skipping"
                     );
                 }
             }
-        } else {
-            tracing::warn!(
-                provider = %settings.memory.provider,
-                "Memory provider referenced in config but not registered"
-            );
+            Err(e) => {
+                tracing::error!(
+                    provider = %settings.memory.provider,
+                    error = %e,
+                    "Failed to load external memory provider"
+                );
+            }
         }
     }
 

@@ -337,10 +337,9 @@ zn.user_char_limit(1375) -- USER.md character limit (default: 1375)
 --
 -- External providers run alongside the built-in MEMORY.md/USER.md store.
 -- Only ONE external provider can be active at a time.
--- Configure via script file or inline Lua code.
+-- Configure via require() which returns a provider table:
 --
--- zn.memory_provider("mem0", { script = "memory_providers/mem0.lua" })
--- zn.memory_provider("custom", { script = [[inline code]], inline = true })
+-- zn.memory_provider("hindsight", require("hindsight"))
 --
 -- ── Memory Provider Lifecycle Hooks ────────────────────────
 --
@@ -460,6 +459,28 @@ zn.user_char_limit(1375) -- USER.md character limit (default: 1375)
 --     end,
 --   }
 -- ]])
+--
+-- ── Hindsight Memory Provider ───────────────────────
+--
+-- Hindsight is a long-term memory backend with knowledge graph, entity
+-- resolution, and multi-strategy retrieval. Supports cloud and local modes.
+--
+-- Setup:
+--   1. Get API key from https://ui.hindsight.vectorize.io (cloud mode)
+--   2. Set environment variables (see below)
+--   3. Uncomment the zn.memory_provider line below
+--
+-- Environment variables:
+--   HINDSIGHT_API_KEY    — API key for cloud mode (required for cloud)
+--   HINDSIGHT_MODE       — "cloud" (default) or "local"
+--   HINDSIGHT_API_URL    — API endpoint (default: https://api.hindsight.vectorize.io)
+--   HINDSIGHT_BANK_ID    — Memory bank name (default: "zeno")
+--   HINDSIGHT_BUDGET     — Recall thoroughness: "low", "mid" (default), "high"
+--
+-- The provider script is at lua/hindsight.lua (project example).
+-- Copy it to ~/.config/zeno/lua/hindsight.lua, then use require() to load it.
+
+-- zn.memory_provider("hindsight", require("hindsight"))
 
 -- ═══════════════════════════════════════════════
 -- Role (Identity & Persona)
