@@ -4,7 +4,7 @@
 //! to find the most relevant sessions based on their summaries.
 
 use crate::config::settings::Settings;
-use crate::engine::session::SessionIndexEntry;
+use crate::engine::session::{SessionIndexEntry, utc_to_local_display};
 
 use super::client::{AuxiliaryMessage, call_auxiliary};
 use super::router::AuxiliaryError;
@@ -46,10 +46,12 @@ fn format_index_for_search(index: &[SessionIndexEntry]) -> String {
         .iter()
         .enumerate()
         .map(|(i, entry)| {
+            // Convert UTC to local time for display
+            let local_time = utc_to_local_display(&entry.saved_at);
             format!(
                 "[{}] {} — {} ({}, {} tokens)",
                 i + 1,
-                entry.saved_at,
+                local_time,
                 entry.one_liner,
                 entry.model,
                 entry.total_tokens,
@@ -63,8 +65,8 @@ fn format_index_for_search(index: &[SessionIndexEntry]) -> String {
 const SEARCH_SYSTEM_PROMPT: &str = r#"You are a session search assistant. Given a user query and a list of past conversation sessions, find the most relevant sessions.
 
 Rules:
-- Return the numbers of the most relevant sessions (e.g., [1], [3], [5]).
+- Return matching sessions as a numbered list (1. 2. 3.), one per line.
+- Each line: "N. **date** — title or summary — why it matches"
 - Order by relevance, most relevant first.
-- Briefly explain why each session matches the query.
 - If no sessions match, say so.
-- Keep your response concise."#;
+- Keep your response concise. No extra commentary."#;

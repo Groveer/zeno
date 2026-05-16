@@ -55,9 +55,9 @@ fn dispatch_command(input: &str) -> CommandAction {
         "/cost" => CommandAction::NeedEngine("cost", String::new()),
         "/clear" => CommandAction::NeedEngine("clear", String::new()),
         "/compact" => CommandAction::Compact,
-        "/resume" => CommandAction::NeedEngine("resume", String::new()),
-        s if s.starts_with("/resume") => {
-            let arg = s.strip_prefix("/resume").unwrap_or("").trim().to_string();
+        "/restore" => CommandAction::NeedEngine("resume", String::new()),
+        s if s.starts_with("/restore") => {
+            let arg = s.strip_prefix("/restore").unwrap_or("").trim().to_string();
             CommandAction::NeedEngine("resume", arg)
         }
         s if s.starts_with("/model") => {
@@ -84,36 +84,48 @@ fn dispatch_command(input: &str) -> CommandAction {
 }
 
 /// Help text (constant to avoid re-allocation every call).
+/// Rendered through the markdown pipeline: `##` headings, `**bold**`,
+/// `` `code` ``, and `-` list items all get styled automatically.
 const HELP_TEXT: &str = "\
-Available commands:
-/help — Show this help
-/exit, /quit — Exit
-/clear — Clear history
-/compact — Compress history
-/cost — Token usage
-/model — Current model
-/tools — List builtin tools
-/mcp — List MCP servers and tools
-/skills — List loaded skills
-/memory — Memory files
-/hooks — List hooks
-/resume — Restore the last session (conversation history + output)
-/resume N — Restore session #N (use /resume to list all)
-/search — Search past sessions
-/search [query] — Search past sessions by topic
-/goal [text] — Set/show/clear auto-continue goal
-/goal clear — Clear goal
-/goal pause — Pause goal
-/goal resume — Resume goal
+## Available Commands
 
-Navigation:
- / — History (input) or scroll (output)
-PgUp/PgDn — Scroll output
-Mouse wheel — Scroll output
-Shift+drag — Select & copy text
- Ctrl+C — Clear input (when not empty) / Interrupt (when running) / No-op (when idle)
- Ctrl+D — Hard quit (immediate, any mode)
+**Session**
+- `/help` — Show this help
+- `/exit` `/quit` — Exit
+- `/clear` — Clear history
+- `/compact` — Compress history
+- `/cost` — Token usage
+- `/model` — Current model
+
+**Inspect**
+- `/tools` — List builtin tools
+- `/mcp` — List MCP servers and tools
+- `/skills` — List loaded skills
+- `/memory` — Memory files
+- `/hooks` — List hooks
+
+**History**
+- `/restore` — Restore the last session
+- `/restore N` — Restore session #N
+- `/search` — Search past sessions
+- `/search [query]` — Search by topic
+
+**Goal**
+- `/goal [text]` — Set goal
+- `/goal clear` — Clear goal
+- `/goal pause` — Pause goal
+- `/goal resume` — Resume goal
+
+## Navigation
+
+- `/` — History (input) or scroll (output)
+- `PgUp` `PgDn` — Scroll output
+- `Mouse wheel` — Scroll output
+- `Shift+drag` — Select and copy text
+- `Ctrl+C` — Clear input / Interrupt
+- `Ctrl+D` — Hard quit (immediate)
 ";
+
 /// Send a simple text response + QueryDone through the channel.
 fn send_text_response(sender: &engine::tui_events::UiSender, text: &str) {
     let _ = sender.send(engine::tui_events::UiEvent::TextDelta(text.to_string()));
@@ -864,7 +876,7 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                     "resume" => {
-                        // Parse optional index argument: "/resume" or "/resume 2"
+                        // Parse optional index argument: "/restore" or "/restore 2"
                         let session_data = {
                             if arg.trim().is_empty() {
                                 engine::session::load_latest_session()
@@ -959,7 +971,7 @@ async fn main() -> anyhow::Result<()> {
                             let list = engine::session::format_session_list(&index);
                             send_text_response(
                                 &sender,
-                                &format!("Usage: /search [query]\n\n{}", list),
+                                &format!("Usage: `/search [query]`\n\n{}", list),
                             );
                         } else {
                             let settings = settings.clone();
@@ -979,10 +991,10 @@ async fn main() -> anyhow::Result<()> {
                                 {
                                     Ok(result) => {
                                         let mut output = format!(
-                                            "━━━ Session Search: {} ━━━\n\n{}",
+                                            "### Session Search: {}\n\n{}",
                                             query_owned, result
                                         );
-                                        output.push_str("\n\nUse /resume N to load a session.");
+                                        output.push_str("\n\nUse `/restore N` to load a session.");
                                         let _ = sender2
                                             .send(engine::tui_events::UiEvent::TextDelta(output));
                                         let _ =

@@ -9,53 +9,35 @@
 
 use crate::api::types::ContentBlock;
 use crate::engine::messages::ConversationEntry;
+use chrono::{Local, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-/// Format a SystemTime as a simple ISO-like string "YYYY-MM-DD HH:MM:SS".
+/// Format a SystemTime as a local time string "YYYY-MM-DD HH:MM:SS".
 pub fn format_timestamp(time: SystemTime) -> String {
-    let secs = time
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    // Convert to date/time components
-    let days = secs / 86400;
-    let time_secs = secs % 86400;
-    let hours = time_secs / 3600;
-    let minutes = (time_secs % 3600) / 60;
-    let seconds = time_secs % 60;
+    let datetime: chrono::DateTime<Local> = time.into();
+    datetime.format("%Y-%m-%d %H:%M:%S").to_string()
+}
 
-    // Days since epoch (1970-01-01)
-    let mut y = 1970i64;
-    let mut remaining_days = days as i64;
-    loop {
-        let days_in_year = if is_leap_year(y) { 366 } else { 365 };
-        if remaining_days < days_in_year {
-            break;
-        }
-        remaining_days -= days_in_year;
-        y += 1;
+/// Convert a UTC time string ("YYYY-MM-DD HH:MM:SS") to local time display.
+/// Returns the input unchanged if parsing fails.
+pub fn utc_to_local_display(utc_str: &str) -> String {
+    // Try parsing as "YYYY-MM-DD HH:MM:SS" (UTC)
+    if let Some(dt) = chrono::NaiveDateTime::parse_from_str(utc_str, "%Y-%m-%d %H:%M:%S").ok() {
+        let utc_dt = Utc.from_utc_datetime(&dt);
+        let local_dt = utc_dt.with_timezone(&Local);
+        return local_dt.format("%Y-%m-%d %H:%M:%S").to_string();
     }
-    let month_days = if is_leap_year(y) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-    let mut m = 1usize;
-    for &md in &month_days {
-        if remaining_days < md as i64 {
-            break;
-        }
-        remaining_days -= md as i64;
-        m += 1;
+    // Try parsing as "YYYY-MM-DDTHH:MM:SS" (ISO format without Z)
+    if let Some(dt) = chrono::NaiveDateTime::parse_from_str(utc_str, "%Y-%m-%dT%H:%M:%S").ok() {
+        let utc_dt = Utc.from_utc_datetime(&dt);
+        let local_dt = utc_dt.with_timezone(&Local);
+        return local_dt.format("%Y-%m-%d %H:%M:%S").to_string();
     }
-    let d = remaining_days + 1; // day of month, 1-based
-    format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-        y, m, d, hours, minutes, seconds
-    )
+    // Return original if parsing fails
+    utc_str.to_string()
 }
 
 /// Generate a unique session ID using epoch microseconds + PID.
@@ -70,10 +52,6 @@ pub fn generate_session_id() -> String {
     let micros = duration.as_micros();
     let pid = std::process::id();
     format!("{}-{}", micros, pid)
-}
-
-fn is_leap_year(y: i64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
 /// Complete session data persisted to disk.
@@ -526,7 +504,7 @@ pub fn build_index_liner(data: &SessionData) -> String {
         .and_then(|e| {
             e.content.iter().find_map(|b| {
                 if let ContentBlock::Text { text } = b {
-                    let clean = text.trim();
+                    let clean = text.trim().replace('\n', " ");
                     let preview: String = clean.chars().take(80).collect();
                     Some(if clean.len() > 80 {
                         format!("{}…", preview)
@@ -575,27 +553,31 @@ fn count_user_messages(entries: &[ConversationEntry]) -> usize {
         .count()
 }
 
-/// Format the session index as a human-readable list for the `/resume` picker.
+/// Format the session index as a human-readable markdown list for the `/restore` picker.
 pub fn format_session_list(index: &[SessionIndexEntry]) -> String {
     if index.is_empty() {
         return "No saved sessions found.".to_string();
     }
 
-    let mut lines = vec![format!("Found {} saved session(s):\n", index.len())];
+    let mut lines = vec![format!("### Saved Sessions ({})\n", index.len())];
 
     for (i, entry) in index.iter().enumerate() {
-        let date = entry
-            .saved_at
-            .get(..19)
-            .unwrap_or(&entry.saved_at)
+        // Convert stored UTC time to local time for display
+        let local_time = utc_to_local_display(&entry.saved_at);
+        let date = local_time
+            .get(..16)
+            .unwrap_or(&local_time)
             .replace('T', " ");
-        lines.push(format!("  [{}] {} — {}", i + 1, date, entry.one_liner,));
+        let label = if entry.title.is_empty() {
+            &entry.one_liner
+        } else {
+            &entry.title
+        };
+        lines.push(format!("{}. **{}** — {}", i + 1, date, label));
     }
 
     lines.push(String::new());
-    lines.push("Usage:".to_string());
-    lines.push("  /resume       — load the most recent session".to_string());
-    lines.push("  /resume N     — load session #N from the list above".to_string());
+    lines.push("Use `/restore N` to load a session.".to_string());
 
     lines.join("\n")
 }
@@ -650,20 +632,12 @@ mod tests {
     }
 
     #[test]
-    fn test_is_leap_year() {
-        assert!(is_leap_year(2000));
-        assert!(is_leap_year(2020));
-        assert!(is_leap_year(2024));
-        assert!(!is_leap_year(1900));
-        assert!(!is_leap_year(2023));
-        assert!(!is_leap_year(2100));
-    }
-
-    #[test]
     fn test_format_timestamp_epoch() {
         let epoch = std::time::UNIX_EPOCH;
         let formatted = format_timestamp(epoch);
-        assert_eq!(formatted, "1970-01-01 00:00:00");
+        // The result depends on local timezone, but should be a valid date
+        assert!(formatted.starts_with("1969-12-31") || formatted.starts_with("1970-01-01"));
+        assert!(formatted.contains(":"));
     }
 
     #[test]
@@ -712,10 +686,11 @@ mod tests {
             title: String::new(),
         }];
         let result = format_session_list(&entries);
-        assert!(result.contains("Found 1 saved session(s)"));
-        assert!(result.contains("2025-07-23 10:30:00"));
+        assert!(result.contains("### Saved Sessions (1)"));
+        // Check that date is present (converted to local time)
+        assert!(result.contains("2025-07-23"));
         assert!(result.contains("code review"));
-        assert!(result.contains("/resume"));
+        assert!(result.contains("/restore"));
     }
 
     #[test]

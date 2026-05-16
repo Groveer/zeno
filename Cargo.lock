@@ -4223,6 +4223,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64",
+ "chrono",
  "crossterm",
  "dirs",
  "eventsource-stream",
