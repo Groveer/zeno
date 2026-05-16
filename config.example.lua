@@ -372,7 +372,7 @@ zn.user_char_limit(1375) -- USER.md character limit (default: 1375)
 -- Lifecycle hooks (optional, called by the engine at key events):
 --   on_turn_start     = function(turn_number, message)
 --   on_session_end    = function(messages_json)          -- session exit/timeout
---   on_session_switch = function(new_id, parent_id, reset) -- /resume, /reset etc.
+--   on_session_switch = function(new_id, parent_id, reset) -- /restore, /reset etc.
 --   on_pre_compress   = function(messages_json) → string -- before context compression
 --
 -- ── Example: Full-featured memory provider ─────────────────
@@ -449,7 +449,7 @@ zn.user_char_limit(1375) -- USER.md character limit (default: 1375)
 --       -- Flush any pending writes or background tasks
 --     end,
 --
---     -- Session ID rotation: /resume, /branch, /reset, context compression
+--     -- Session ID rotation: /restore, /branch, /reset, context compression
 --     on_session_switch = function(new_id, parent_id, reset)
 --       -- Update internal session tracking
 --       -- If reset == true, flush per-session buffers

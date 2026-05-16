@@ -30,7 +30,7 @@ const MAX_POPUP_ITEMS: usize = 5;
 /// Maximum number of history entries to persist to disk.
 const MAX_PERSISTED_HISTORY: usize = 2000;
 
-// ── Completion popup state ──
+// Completion popup state
 
 /// Completion type to distinguish between command and path completions.
 #[derive(Debug, Clone, PartialEq)]
@@ -429,7 +429,7 @@ impl InputState {
         self.draft = None;
     }
 
-    // ── Multi-line cursor helpers ──
+    // Multi-line cursor helpers
 
     /// Return (row, col_byte) of the cursor position in the text.
     /// col_byte is the byte offset within the current line.
@@ -531,7 +531,7 @@ impl InputState {
         self.cursor = self.line_end_byte(row);
     }
 
-    // ── Popup logic ──
+    // Popup logic
 
     /// Open the popup or cycle selection if already open.
     fn open_or_cycle_popup(&mut self) {
@@ -904,7 +904,7 @@ impl InputState {
         results
     }
 
-    // ── helpers ──
+    // helpers
 
     /// Return the display-column offset of the cursor on the current line (accounts for CJK etc.).
     pub fn cursor_display_col(&self) -> u16 {
@@ -1045,7 +1045,7 @@ fn snap_to_char_boundary(s: &str, offset: usize) -> usize {
     }
 }
 
-// ── Rendering ──
+// Rendering
 
 /// Render the input area.
 pub fn render(
@@ -1288,7 +1288,7 @@ fn draw_border(frame: &mut Frame, area: Rect, color: Color, suffix: &str) {
     frame.render_widget(Paragraph::new(line), top);
 }
 
-// ── Session history persistence ──
+// Session history persistence
 
 /// Load input history from disk. Returns an empty Vec if the file doesn't
 /// exist or is corrupted, so the user never loses the ability to type.

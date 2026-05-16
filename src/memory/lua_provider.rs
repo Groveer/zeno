@@ -72,7 +72,7 @@
 //!     on_session_end = function(messages_json) end,
 //!
 //!     -- Mid-process session_id rotation (optional)
-//!     -- Fires on /resume, /branch, /reset, /new, and context compression.
+//!     -- Fires on /restore, /branch, /reset, /new, and context compression.
 //!     on_session_switch = function(new_id, parent_id, reset) end,
 //!
 //!     -- Called before context compression discards old messages (optional)

@@ -445,7 +445,7 @@ impl QueryEngine {
 
             self.history.sanitize();
 
-            // ── Inner retry loop ──────────────────────────────────────
+            // Inner retry loop
             // Retries up to `settings.llm.max_retries` times on:
             //   - API call errors (non-prompt-too-long)
             //   - Stream consumption errors
@@ -556,7 +556,7 @@ impl QueryEngine {
                     }
                 }
 
-                // ── Acquire stream (with reactive compact on prompt-too-long) ──
+                // Acquire stream (with reactive compact on prompt-too-long)
                 let stream = match tokio::select! {
                     result = self
                         .client
@@ -642,7 +642,7 @@ impl QueryEngine {
                     }
                 };
 
-                // ── Consume the stream ─────────────────────────────────
+                // Consume the stream
                 tokio::pin!(stream);
                 let mut stream_failed = false;
 
@@ -1070,7 +1070,7 @@ impl QueryEngine {
                 });
             }
 
-            // ── Parallel safety check ──────────────────────────────────
+            // Parallel safety check
             // Decide whether this batch can run concurrently or must be
             // sequential.  Read-only tools and independent-path file tools
             // are safe in parallel; interactive tools (ask_user) and
@@ -1085,7 +1085,7 @@ impl QueryEngine {
             }
 
             if parallel {
-                // ── Concurrent execution ────────────────────────────────
+                // Concurrent execution
                 // Error-tolerant parallel execution: each tool failure is
                 // captured as a ToolResult { is_error: true } so no orphaned
                 // ToolUse blocks remain — matching return_exceptions=True.
@@ -1145,7 +1145,7 @@ impl QueryEngine {
                     tool_results.push(res);
                 }
             } else {
-                // ── Sequential execution (fallback) ─────────────────────
+                // Sequential execution (fallback)
                 for tu in &tool_uses {
                     if cancel.is_cancelled() {
                         tracing::info!(
@@ -1180,7 +1180,7 @@ impl QueryEngine {
 
             self.history.push_tool_results(tool_results);
 
-            // ── Compress edit tool inputs ──────────────────────────────
+            // Compress edit tool inputs
             // After successful edits, strip common prefix/suffix context
             // lines from the ToolUse.input to save tokens in future API calls.
             {
@@ -1211,7 +1211,7 @@ impl QueryEngine {
                 }
             }
 
-            // ── Drain pending steer ────────────────────────────────
+            // Drain pending steer
             // If the user typed input while the agent was running, inject
             // it into the last tool result's content so the model sees it
             // on the next turn. This preserves role alternation — we don't
@@ -1289,7 +1289,7 @@ impl QueryEngine {
             }
         }
 
-        // ── Background skill review ──────────────────────────────────
+        // Background skill review
         // After the conversation turn completes, check if we should spawn
         // a background review to capture learnings into the skill library.
         self.turns_since_skill_review += 1;

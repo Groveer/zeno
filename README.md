@@ -23,7 +23,7 @@ $ zeno    # 瞬间进入全屏 TUI
 
 - **流式渲染** — LLM 输出逐 token 实时渲染，Markdown + 代码语法高亮（syntect）
 - **多行输入** — 支持多行编辑、斜杠命令补全、文件路径补全弹窗（Tab 触发）
-- **斜杠命令** — `/help` `/cost` `/compact` `/goal` `/resume` `/search` 等
+- **斜杠命令** — `/help` `/cost` `/compact` `/goal` `/restore` `/search` 等
 - **状态栏** — 实时显示模型名、token 用量、权限状态
 - **鼠标支持** — 滚轮滚动、Shift+拖拽选择复制
 
@@ -183,8 +183,8 @@ Provider 生命周期钩子：`initialize` / `prefetch` / `queue_prefetch` / `sy
 ### 💾 会话持久化
 
 - 输入历史自动保存（最多 2000 条）
-- `/resume` 恢复上次会话（对话历史 + 输出）
-- `/resume N` 恢复指定编号的会话
+- `/restore` 恢复上次会话（对话历史 + 输出）
+- `/restore N` 恢复指定编号的会话
 - `/search [query]` 按主题搜索历史会话
 - 会话标题自动生成（辅助模型）
 
@@ -229,7 +229,7 @@ zeno
 | `/compact`        | 手动压缩对话历史      |
 | `/clear`          | 清空对话历史          |
 | `/goal <text>`    | 设置自动续写目标      |
-| `/resume [N]`     | 恢复会话              |
+| `/restore [N]`     | 恢复会话              |
 | `/search [query]` | 搜索历史会话          |
 | `/tools`          | 列出内置工具          |
 | `/mcp`            | 列出 MCP 服务器和工具 |

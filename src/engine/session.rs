@@ -327,7 +327,7 @@ pub fn build_summary(entries: &[ConversationEntry]) -> String {
 
     let mut parts: Vec<String> = Vec::new();
 
-    // ── Statistics ──
+    // Statistics
     let mut user_count = 0u32;
     let mut tool_use_count = 0u32;
     let mut tool_result_count = 0u32;
@@ -374,7 +374,7 @@ pub fn build_summary(entries: &[ConversationEntry]) -> String {
         assistant_text_chars as f64 / 1024.0,
     ));
 
-    // ── Recent user messages (last 3) ──
+    // Recent user messages (last 3)
     let recent_user: Vec<String> = entries
         .iter()
         .rev() // iterate backwards
@@ -417,7 +417,7 @@ pub fn build_summary(entries: &[ConversationEntry]) -> String {
         parts.push(format!("Recent messages:\n{}", msgs.join("\n")));
     }
 
-    // ── Last assistant text (the most valuable recall context) ──
+    // Last assistant text (the most valuable recall context)
     if let Some(last_response) = extract_final_response(entries) {
         const MAX_RESPONSE_LEN: usize = 2000;
         let truncated = if last_response.len() > MAX_RESPONSE_LEN {
@@ -521,7 +521,7 @@ pub fn build_index_liner(data: &SessionData) -> String {
     format!("{} msgs, {} model — {}", user_msgs, data.model, topic,)
 }
 
-/// Build a short one-line summary suitable for the `/resume` response header.
+/// Build a short one-line summary suitable for the `/restore` response header.
 pub fn build_one_liner(data: &SessionData) -> String {
     let entry_count = data.entries.len();
     let user_msgs = count_user_messages(&data.entries);

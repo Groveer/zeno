@@ -123,7 +123,7 @@ pub trait MemoryProvider: Send + Sync {
     }
 
     /// Called when the agent switches session_id mid-process.
-    /// Fires on /resume, /branch, /reset, /new and context compression.
+    /// Fires on /restore, /branch, /reset, /new and context compression.
     ///
     /// - `new_session_id`: The session_id the agent just switched to.
     /// - `parent_session_id`: The previous session_id, if meaningful.

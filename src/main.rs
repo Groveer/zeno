@@ -569,7 +569,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(saved) = engine::session::load_latest_session() {
         let one_liner = engine::session::build_one_liner(&saved);
         app.output.push(ui::output::OutputSegment::Status(
-            "󰄘 Previous session found. Type `/resume` to restore it.".to_string(),
+            "󰄘 Previous session found. Type `/restore` to restore it.".to_string(),
         ));
         app.output.push(ui::output::OutputSegment::Status(format!(
             "   {}",
@@ -1153,7 +1153,7 @@ async fn main() -> anyhow::Result<()> {
             idle_frames += 1;
         }
 
-        // ── Curator: background skill maintenance (idle-only) ──────────
+        // Curator: background skill maintenance (idle-only)
         // Runs periodically when the system is idle. Lock order: engine → skill_registry
         // (consistent across all code paths to avoid deadlock).
         if !is_active && crate::engine::curator::should_run_now(&settings.skills) {
@@ -1231,7 +1231,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // ── Restore terminal ───────────────────────────────────────────
+    // Restore terminal
     // Drain any buffered stdin events (mouse sequences etc.) before restoring
     // the terminal so they don't leak as garbage characters to the shell.
     while crossterm::event::poll(std::time::Duration::from_millis(0))? {
@@ -1240,7 +1240,7 @@ async fn main() -> anyhow::Result<()> {
 
     ui::app::restore_terminal(&mut terminal)?;
 
-    // ── Session persistence (after terminal restore) ───────────────
+    // Session persistence (after terminal restore)
     // Capture engine state for session persistence (with timeout).
     // If the engine is still busy, we proceed with whatever we can get.
     let (entries, total_tokens, current_model) =

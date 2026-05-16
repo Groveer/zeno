@@ -21,7 +21,7 @@ use syntect::parsing::SyntaxSet;
 
 use super::theme;
 
-// ── Syntect globals (loaded once) ───────────────────────────────
+// Syntect globals (loaded once)
 
 static SYNTAX_SET: std::sync::LazyLock<SyntaxSet> =
     std::sync::LazyLock::new(SyntaxSet::load_defaults_newlines);
@@ -69,7 +69,7 @@ fn highlight_code_line(highlighter: &mut HighlightLines, line: &str) -> Vec<Span
     }
 }
 
-// ── Heading colors by level ────────────────────────────────────
+// Heading colors by level
 
 const H1_FG: Color = theme::HEADING_1;
 const H2_FG: Color = theme::HEADING;
@@ -100,7 +100,7 @@ fn heading_level(level: HeadingLevel) -> u8 {
     }
 }
 
-// ── Table rendering state ──────────────────────────────────────
+// Table rendering state
 
 /// A single cell in the table being built.
 #[derive(Default)]
@@ -193,7 +193,7 @@ impl TableState {
         let head_style = Style::new().fg(head_fg).add_modifier(Modifier::BOLD);
         let cell_style = Style::new().fg(theme::TEXT);
 
-        // ── Top border: ┌─────┬─────┐
+        // Top border: ┌─────┬─────┐
         lines.push(Line::from(make_border(
             &col_widths,
             '┌',
@@ -203,7 +203,7 @@ impl TableState {
             border_fg,
         )));
 
-        // ── Header row
+        // Header row
         if let Some(head) = self.head {
             lines.push(make_row(
                 &head.cells,
@@ -215,7 +215,7 @@ impl TableState {
                 border_fg,
             ));
 
-            // ── Header separator: ├─────┼─────┤  (use ╪ for aligned columns)
+            // Header separator: ├─────┼─────┤  (use ╪ for aligned columns)
             lines.push(Line::from(make_border(
                 &col_widths,
                 '├',
@@ -226,7 +226,7 @@ impl TableState {
             )));
         }
 
-        // ── Body rows
+        // Body rows
         for (row_idx, row) in self.body.iter().enumerate() {
             lines.push(make_row(
                 &row.cells,
@@ -250,7 +250,7 @@ impl TableState {
             }
         }
 
-        // ── Bottom border: └─────┴─────┘
+        // Bottom border: └─────┴─────┘
         lines.push(Line::from(make_border(
             &col_widths,
             '└',
@@ -335,7 +335,7 @@ fn make_row(
     Line::from(spans)
 }
 
-// ── Renderer ───────────────────────────────────────────────────
+// Renderer
 
 struct MdRenderer {
     lines: Vec<Line<'static>>,
@@ -411,7 +411,7 @@ impl MdRenderer {
     }
 
     fn handle(&mut self, event: Event<'_>) {
-        // ── Table events need special routing ───────────────
+        // Table events need special routing
         match &event {
             Event::Start(Tag::Table(alignment)) => {
                 self.flush_line();
@@ -464,9 +464,9 @@ impl MdRenderer {
             _ => {}
         }
 
-        // ── Non-table events ────────────────────────────────
+        // Non-table events
         match event {
-            // ── block starts ─────────────────────────────
+            // block starts
             Event::Start(Tag::Paragraph) => {
                 self.maybe_blank();
                 self.current.extend(self.quote_prefix());
@@ -577,7 +577,7 @@ impl MdRenderer {
                 self.push_span(alt, Style::new().fg(theme::TEXT_DIM));
             }
 
-            // ── block ends ───────────────────────────────
+            // block ends
             Event::End(TagEnd::Paragraph) => {
                 self.flush_line();
                 self.needs_blank = true;
@@ -650,7 +650,7 @@ impl MdRenderer {
 
             Event::End(TagEnd::Image) => {}
 
-            // ── inline content ────────────────────────────
+            // inline content
             Event::Text(text) => {
                 if self.in_table() {
                     // Accumulate cell text
@@ -754,7 +754,7 @@ impl MdRenderer {
     }
 }
 
-// ── Public API ─────────────────────────────────────────────────
+// Public API
 
 /// Convert a block of markdown text into styled `Line`s.
 ///
@@ -777,7 +777,7 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
     renderer.finish()
 }
 
-// ── Tests ──────────────────────────────────────────────────────
+// Tests
 
 #[cfg(test)]
 mod tests {

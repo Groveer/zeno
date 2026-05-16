@@ -844,7 +844,7 @@ impl App {
             (vert_output_area, Rect::default())
         };
 
-        // ── Title bar ──
+        // Title bar
         let title = format!(
             " zeno {} (Ctrl+D to quit, Ctrl+C to interrupt) ",
             env!("CARGO_PKG_VERSION")
@@ -863,7 +863,7 @@ impl App {
             title_area,
         );
 
-        // ── Output area (skip title row) ──
+        // Output area (skip title row)
         let output_render_area = Rect {
             y: output_area.y + 1,
             height: output_area.height.saturating_sub(1),
@@ -881,18 +881,18 @@ impl App {
             super::output::render(frame, output_render_area, &mut self.output);
         }
 
-        // ── Input area ──
+        // Input area
         input::render(frame, input_area, &self.input, &self.mode);
 
-        // ── Status bar ──
+        // Status bar
         status_bar::render(frame, status_area, &self.status);
 
-        // ── Side panel (todo list) ──
+        // Side panel (todo list)
         if let Some(ref state_arc) = self.todo_state {
             Self::render_side_panel(frame, side_area, state_arc);
         }
 
-        // ── Cursor ──
+        // Cursor
         if self.mode == AppMode::Idle
             || self.mode == AppMode::WaitingInput
             || self.mode == AppMode::Running
@@ -975,7 +975,7 @@ impl App {
 
         let mut lines: Vec<Line<'static>> = Vec::new();
 
-        // ── Title line ──
+        // Title line
         lines.push(Line::from(vec![
             Span::styled(" ", Style::new().fg(theme::ACCENT)),
             Span::styled(
@@ -987,7 +987,7 @@ impl App {
         ]));
         lines.push(Line::from(""));
 
-        // ── Plan name ──
+        // Plan name
         if !state.plan.is_empty() {
             lines.push(Line::from(Span::styled(
                 truncate_str(&state.plan, area.width.saturating_sub(4) as usize),
@@ -996,7 +996,7 @@ impl App {
             lines.push(Line::from(""));
         }
 
-        // ── Text-based progress bar ──
+        // Text-based progress bar
         if total > 0 {
             let bar_width = area.width.saturating_sub(6) as usize;
             let filled = if bar_width > 0 && total > 0 {
@@ -1019,7 +1019,7 @@ impl App {
             lines.push(Line::from(""));
         }
 
-        // ── Task items ──
+        // Task items
         let content_width = area.width.saturating_sub(4) as usize;
         for task in &state.tasks {
             let (checkbox, color) = match task.status.as_str() {

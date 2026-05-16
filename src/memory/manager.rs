@@ -220,7 +220,7 @@ impl MemoryManager {
     }
 
     /// Notify the external provider of a session_id change.
-    /// Fires on /resume, /branch, /reset, /new and context compression.
+    /// Fires on /restore, /branch, /reset, /new and context compression.
     pub fn on_session_switch(&self, new_session_id: &str, parent_session_id: &str, reset: bool) {
         if let Some(ref p) = self.external_provider
             && self.external_initialized

@@ -89,7 +89,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // ── common_prefix_suffix_len ────────────────────────────────────────
+    // common_prefix_suffix_len
 
     #[test]
     fn prefix_suffix_basic() {
@@ -126,7 +126,7 @@ mod tests {
         assert_eq!(common_prefix_suffix_len(&old, &new), (0, 3));
     }
 
-    // ── compress_edit_input ─────────────────────────────────────────────
+    // compress_edit_input
 
     #[test]
     fn compress_strips_common_context() {
