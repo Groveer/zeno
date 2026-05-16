@@ -143,7 +143,7 @@ impl Tool for DelegateTaskTool {
             let child_timeout = deps.delegation_config.child_timeout.max(30.0);
             let results = run_delegated_tasks_batch(
                 deps,
-                ctx.cwd.clone(),
+                ctx.get_cwd(),
                 task_pairs,
                 extra_tools,
                 max_concurrent,
@@ -186,7 +186,7 @@ impl Tool for DelegateTaskTool {
 
         let result = run_delegated_task(
             &deps,
-            ctx.cwd.clone(),
+            ctx.get_cwd(),
             goal.to_string(),
             context,
             extra_tools,

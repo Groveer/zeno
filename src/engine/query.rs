@@ -1610,7 +1610,7 @@ async fn execute_single_tool_tui(
                     "tool_input",
                     crate::hooks::executor::json_to_lua_value(&*he.lua(), &input),
                 );
-                let _ = hook_ctx.set("cwd", ctx.cwd.to_string_lossy().to_string());
+                let _ = hook_ctx.set("cwd", ctx.get_cwd().to_string_lossy().to_string());
                 if let Some(block_reason) = he
                     .execute_first_block(HookEvent::PreToolUse, &hook_ctx)
                     .await
@@ -1674,7 +1674,8 @@ async fn execute_single_tool_tui(
         );
         true
     } else {
-        let resolved = checker::resolve_paths(&tu.name, &input, &ctx.cwd);
+        let cwd = ctx.get_cwd();
+        let resolved = checker::resolve_paths(&tu.name, &input, &cwd);
         let decision = checker::evaluate_permission(
             permission_mode,
             trusted_paths,
@@ -1682,7 +1683,7 @@ async fn execute_single_tool_tui(
             is_read_only,
             resolved.file_path.as_deref(),
             resolved.command.as_deref(),
-            &ctx.cwd,
+            &cwd,
             ask_commands,
             safe_paths,
             denied_commands,
@@ -1839,19 +1840,17 @@ async fn execute_single_tool_tui(
                 output: display,
             });
 
-            // For edit tool, extract diff lines from the result and send a ToolDiff event
+            // For edit tool, extract diff from structured JSON result
             if tu.name == "edit" {
-                let diff_lines: Vec<&str> = result
-                    .lines()
-                    .skip_while(|l| !l.starts_with('-') && !l.starts_with('+'))
-                    .take_while(|l| l.starts_with('-') || l.starts_with('+') || l.starts_with(' '))
-                    .collect();
-                if !diff_lines.is_empty() {
-                    let diff_text = diff_lines.join("\n");
-                    let _ = sender.send(UiEvent::ToolDiff {
-                        name: tu.name.clone(),
-                        diff: diff_text,
-                    });
+                if let Ok(parsed) = serde_json::from_str::<Value>(&result) {
+                    if let Some(diff_str) = parsed.get("diff").and_then(|d| d.as_str()) {
+                        if !diff_str.is_empty() {
+                            let _ = sender.send(UiEvent::ToolDiff {
+                                name: tu.name.clone(),
+                                diff: diff_str.to_string(),
+                            });
+                        }
+                    }
                 }
             }
             tracing::info!(
@@ -1873,7 +1872,7 @@ async fn execute_single_tool_tui(
                         );
                         let _ = hook_ctx.set("tool_output", result.clone());
                         let _ = hook_ctx.set("tool_is_error", false);
-                        let _ = hook_ctx.set("cwd", ctx.cwd.to_string_lossy().to_string());
+                        let _ = hook_ctx.set("cwd", ctx.get_cwd().to_string_lossy().to_string());
                         he.execute(HookEvent::PostToolUse, &hook_ctx).await;
                     }
                 }
@@ -1909,7 +1908,7 @@ async fn execute_single_tool_tui(
                         );
                         let _ = hook_ctx.set("tool_output", e.to_string());
                         let _ = hook_ctx.set("tool_is_error", true);
-                        let _ = hook_ctx.set("cwd", ctx.cwd.to_string_lossy().to_string());
+                        let _ = hook_ctx.set("cwd", ctx.get_cwd().to_string_lossy().to_string());
                         he.execute(HookEvent::PostToolUse, &hook_ctx).await;
                     }
                 }
@@ -1942,7 +1941,7 @@ async fn execute_single_tool_tui(
                     if let Ok(hook_ctx) = he.build_context() {
                         let _ = hook_ctx.set("tool_name", tu.name.as_str());
                         let _ = hook_ctx.set("tool_is_error", true);
-                        let _ = hook_ctx.set("cwd", ctx.cwd.to_string_lossy().to_string());
+                        let _ = hook_ctx.set("cwd", ctx.get_cwd().to_string_lossy().to_string());
                         he.execute(HookEvent::PostToolUse, &hook_ctx).await;
                     }
                 }
@@ -2088,46 +2087,14 @@ fn summarize_tool_output(tool_name: &str, output: &str, _input_json: &str) -> St
         }
         // edit: compute diff from input for color-coded display
         "edit" => {
-            let input = parse_tool_input_or_empty(_input_json);
-            let old_str = input
-                .get("old_string")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let new_str = input
-                .get("new_string")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let replace_all = input
-                .get("replace_all")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            if old_str.is_empty() && new_str.is_empty() {
-                return output.to_string();
+            // Structured JSON result from the edit tool
+            if let Ok(parsed) = serde_json::from_str::<Value>(output) {
+                if let Some(summary) = parsed.get("summary").and_then(|s| s.as_str()) {
+                    return summary.to_string();
+                }
             }
-
-            let diff_lines = crate::utils::diff::compute_edit_diff(old_str, new_str);
-
-            if diff_lines.is_empty() {
-                return output.to_string();
-            }
-
-            let mut result_lines: Vec<String> = Vec::new();
-
-            // First line: tool's own summary
-            if let Some(first) = output.lines().next() {
-                result_lines.push(first.to_string());
-            }
-
-            for line in &diff_lines {
-                result_lines.push(line.clone());
-            }
-
-            if replace_all {
-                result_lines.push("(replace all)".into());
-            }
-
-            result_lines.join("\n")
+            // Fallback: plain text result
+            return output.to_string();
         }
         // todo: only show the action result line (e.g. " Updated T1 → in_progress").
         // The right-side UI panel already renders the full task list with progress,

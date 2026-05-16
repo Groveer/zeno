@@ -88,6 +88,23 @@ impl Tool for EditTool {
 
         let resolved = ctx.resolve_path(path);
 
+        // Check write path safety
+        if let Some(reason) = crate::tools::path_safety::is_write_denied(&resolved) {
+            return Err(ToolError::Execution(reason));
+        }
+
+        // Check file staleness
+        if let Some(warning) = crate::tools::file_state::check_stale(&ctx.task_id, &resolved).await
+        {
+            return Err(ToolError::Execution(format!(
+                "Stale file: {}. Re-read the file before editing.",
+                warning
+            )));
+        }
+
+        // Acquire per-path lock for read→modify→write serialization
+        let _lock = crate::tools::file_state::lock_path(&resolved).await;
+
         if !resolved.exists() {
             return Err(ToolError::NotFound(format!("{}", resolved.display())));
         }
@@ -143,84 +160,43 @@ impl Tool for EditTool {
             }
         }
 
-        // Build a compact change summary: compare actual file content before/after
-        // (instead of raw old_string/new_string which may have wrong indentation
-        //  that was corrected by fuzzy matching)
-        let change_preview = build_diff_preview(&content, &new_content);
+        // Record write for file-staleness tracking
+        crate::tools::file_state::note_write(&ctx.task_id, &resolved).await;
+
+        // Generate unified diff from actual file content before/after
+        let diff_text = similar::TextDiff::from_lines(&content, &new_content)
+            .unified_diff()
+            .context_radius(3)
+            .to_string();
 
         let strategy_info = if strategy != "exact" {
             format!(" [fuzzy: {}]", strategy)
         } else {
             String::new()
         };
-        Ok(format!(
-            "Replaced {} occurrence(s) in {}{}{}",
-            match_count,
-            resolved.display(),
-            strategy_info,
-            change_preview
-        ))
-    }
-}
 
-// ===========================================================================
-// Diff preview: compare actual file content before/after
-// ===========================================================================
-
-/// Build a compact change preview by comparing actual file content before and after.
-/// This avoids showing wrong indentation from raw old_string/new_string.
-fn build_diff_preview(old_content: &str, new_content: &str) -> String {
-    let old_lines: Vec<&str> = old_content.lines().collect();
-    let new_lines: Vec<&str> = new_content.lines().collect();
-
-    // Find first differing line
-    let first_diff = old_lines
-        .iter()
-        .zip(new_lines.iter())
-        .position(|(a, b)| a != b);
-
-    let truncate =
-        |s: &str, max_chars: usize| -> String { s.chars().take(max_chars).collect::<String>() };
-
-    match first_diff {
-        None => {
-            // No line-level diff — show length change
-            let old_len = old_content.len();
-            let new_len = new_content.len();
-            if old_len != new_len {
-                format!("\n  changed: {} → {} chars", old_len, new_len)
-            } else {
-                String::new()
-            }
-        }
-        Some(idx) => {
-            let old_line = old_lines.get(idx).unwrap_or(&"").trim();
-            let new_line = new_lines.get(idx).unwrap_or(&"").trim();
-
-            if old_line == new_line {
-                // Same first differing line content (after trim) — show range
-                let old_last = old_lines.last().unwrap_or(&"").trim();
-                let new_last = new_lines.last().unwrap_or(&"").trim();
-                let range = if old_last == new_last {
-                    format!("line {}", idx + 1)
-                } else {
-                    format!("line {} … {}", idx + 1, old_lines.len())
-                };
-                format!("\n  changed: {}", range)
-            } else {
-                let old_trunc = if old_line.chars().count() > 60 {
-                    truncate(old_line, 57)
-                } else {
-                    old_line.to_string()
-                };
-                let new_trunc = if new_line.chars().count() > 60 {
-                    truncate(new_line, 57)
-                } else {
-                    new_line.to_string()
-                };
-                format!("\n  -: {}\n  +: {}", old_trunc, new_trunc)
-            }
-        }
+        // Return structured JSON so the LLM and TUI can parse the details
+        let result = serde_json::json!({
+            "success": true,
+            "diff": diff_text,
+            "files_modified": [resolved.to_string_lossy()],
+            "strategy": strategy,
+            "match_count": match_count,
+            "summary": format!(
+                "Replaced {} occurrence(s) in {}{}",
+                match_count,
+                resolved.display(),
+                strategy_info,
+            )
+        });
+        Ok(serde_json::to_string(&result).unwrap_or_else(|_| {
+            format!(
+                "Replaced {} occurrence(s) in {}{}",
+                match_count,
+                resolved.display(),
+                strategy_info,
+            )
+        }))
     }
 }
 

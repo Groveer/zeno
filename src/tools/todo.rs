@@ -333,7 +333,8 @@ mod tests {
 
     fn empty_ctx() -> ToolContext {
         ToolContext {
-            cwd: std::path::PathBuf::from("/tmp"),
+            cwd: Arc::new(std::sync::RwLock::new(std::path::PathBuf::from("/tmp"))),
+            task_id: String::from("test"),
             ask_sender: None,
             mcp_manager: None,
             sub_agent_deps: None,

@@ -79,7 +79,7 @@ impl Tool for GrepTool {
 
         let base_path = match arguments.get("path").and_then(|v| v.as_str()) {
             Some(p) => ctx.resolve_path(p),
-            None => ctx.cwd.clone(),
+            None => ctx.get_cwd(),
         };
 
         if !base_path.exists() {

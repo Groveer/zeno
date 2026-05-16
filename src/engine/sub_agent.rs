@@ -387,7 +387,8 @@ async fn run_single_sub_agent(
     // Build tool context (no ask_user channel for sub-agents)
     // Pass sub_agent_deps through so skill_manage can read write_origin provenance.
     let ctx = ToolContext {
-        cwd,
+        cwd: Arc::new(std::sync::RwLock::new(cwd)),
+        task_id: format!("sub_{}", task_index),
         ask_sender: None,
         mcp_manager: None,
         sub_agent_deps: Some(deps.clone()),

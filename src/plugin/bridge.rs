@@ -253,7 +253,7 @@ impl Tool for PluginTool {
     }
 
     async fn execute(&self, arguments: Value, ctx: &ToolContext) -> Result<String, ToolError> {
-        let cwd = ctx.cwd.to_string_lossy().to_string();
+        let cwd = ctx.get_cwd().to_string_lossy().to_string();
 
         match execute_plugin(&self.plugin, &arguments, &cwd) {
             Ok(result) => Ok(result.output),

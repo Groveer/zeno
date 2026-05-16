@@ -66,6 +66,26 @@ impl Tool for WriteTool {
 
         let resolved = ctx.resolve_path(path);
 
+        // Check write path safety
+        if let Some(reason) = crate::tools::path_safety::is_write_denied(&resolved) {
+            return Err(ToolError::Execution(reason));
+        }
+
+        // Check file staleness
+        if resolved.exists() {
+            if let Some(warning) =
+                crate::tools::file_state::check_stale(&ctx.task_id, &resolved).await
+            {
+                return Err(ToolError::Execution(format!(
+                    "Stale file: {}. Re-read the file before writing.",
+                    warning
+                )));
+            }
+        }
+
+        // Acquire per-path lock for read→modify→write serialization
+        let _lock = crate::tools::file_state::lock_path(&resolved).await;
+
         // Create parent directories
         if let Some(parent) = resolved.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -93,6 +113,9 @@ impl Tool for WriteTool {
                 )));
             }
         }
+
+        // Record write for file-staleness tracking
+        crate::tools::file_state::note_write(&ctx.task_id, &resolved).await;
 
         let lines = content.lines().count();
         Ok(format!("Written {} lines to {}", lines, resolved.display()))

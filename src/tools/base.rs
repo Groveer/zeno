@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -113,8 +113,11 @@ impl SubAgentDeps {
 /// Execution context passed to every tool invocation.
 #[derive(Debug, Clone)]
 pub struct ToolContext {
-    /// Current working directory.
-    pub cwd: PathBuf,
+    /// Current working directory (wrapped in Arc<RwLock> so bash `cd` updates it).
+    pub cwd: Arc<RwLock<PathBuf>>,
+    /// Agent identifier for file-staleness tracking.
+    /// "main" for the primary query, task-specific ID for sub-agents.
+    pub task_id: String,
     /// For ask_user tool: channel to send the question to the TUI and receive the answer.
     pub ask_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::engine::tui_events::UiEvent>>,
     /// Shared MCP manager for lazy MCP server connections.
@@ -139,7 +142,8 @@ impl ToolContext {
         mcp_manager: Option<std::sync::Arc<tokio::sync::Mutex<crate::mcp::manager::McpManager>>>,
     ) -> Self {
         Self {
-            cwd,
+            cwd: Arc::new(RwLock::new(cwd)),
+            task_id: String::from("main"),
             ask_sender: Some(sender),
             mcp_manager,
             sub_agent_deps: None,
@@ -191,7 +195,7 @@ impl ToolContext {
         let joined = if expanded.is_absolute() {
             expanded
         } else {
-            self.cwd.join(&expanded)
+            self.cwd.read().unwrap().join(&expanded)
         };
         // Normalize: resolve . and .. segments without following symlinks
         let mut normalized = PathBuf::new();
@@ -205,6 +209,16 @@ impl ToolContext {
             }
         }
         normalized
+    }
+
+    /// Get the current working directory (thread-safe read).
+    pub fn get_cwd(&self) -> PathBuf {
+        self.cwd.read().unwrap().clone()
+    }
+
+    /// Set the current working directory (e.g. after bash `cd`).
+    pub fn set_cwd(&self, new_cwd: PathBuf) {
+        *self.cwd.write().unwrap() = new_cwd;
     }
 }
 

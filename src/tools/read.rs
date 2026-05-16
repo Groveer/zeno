@@ -79,6 +79,9 @@ impl Tool for ReadTool {
             return Err(ToolError::NotFound(format!("{}", resolved.display())));
         }
 
+        // Record read for file-staleness tracking
+        crate::tools::file_state::record_read(&ctx.task_id, &resolved).await;
+
         // Check file size before reading to prevent OOM
         let file_size = tokio::fs::metadata(&resolved)
             .await

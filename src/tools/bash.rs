@@ -329,10 +329,8 @@ impl Tool for BashTool {
             // rtk rewritten command may contain shell syntax (|, &&, ||, redirects),
             // so execute via bash -c with the cd directory as working directory
             let mut bash_cmd = tokio::process::Command::new("bash");
-            bash_cmd
-                .arg("-c")
-                .arg(&rtk_cmd_str)
-                .current_dir(cd_override.as_ref().unwrap_or(&ctx.cwd));
+            let cwd = cd_override.clone().unwrap_or_else(|| ctx.get_cwd());
+            bash_cmd.arg("-c").arg(&rtk_cmd_str).current_dir(&cwd);
             for (k, v) in &self.env {
                 bash_cmd.env(k, v);
             }
@@ -373,7 +371,8 @@ impl Tool for BashTool {
         // cancelled (e.g. by tokio::select! on Ctrl+C), the child process
         // is killed immediately instead of becoming an orphan.
         let mut bash_cmd = tokio::process::Command::new("bash");
-        bash_cmd.arg("-c").arg(cmd).current_dir(&ctx.cwd);
+        let cwd = ctx.get_cwd();
+        bash_cmd.arg("-c").arg(cmd).current_dir(&cwd);
         for (k, v) in &self.env {
             bash_cmd.env(k, v);
         }
@@ -414,6 +413,38 @@ impl Tool for BashTool {
         }
         if result.is_empty() {
             result = "(no output)".into();
+        }
+
+        // CWD tracking: detect standalone `cd <dir>` commands and update the
+        // shared context so subsequent tool calls use the new directory.
+        let trimmed_cmd = cmd.trim();
+        if let Some(dir_str) = trimmed_cmd.strip_prefix("cd ") {
+            // Only update for bare `cd <dir>` (no `&&`, `;`, `|` chaining).
+            let is_bare_cd = !dir_str.contains("&&")
+                && !dir_str.contains(';')
+                && !dir_str.contains('|')
+                && !dir_str.contains('>')
+                && !dir_str.contains('<');
+            if is_bare_cd && output.status.success() {
+                let dir = dir_str.trim().trim_matches(&['"', '\''][..]);
+                let new_cwd = if dir.starts_with('/') {
+                    PathBuf::from(dir)
+                } else if dir == ".." {
+                    let mut parent = ctx.get_cwd();
+                    parent.pop();
+                    parent
+                } else if dir == "." {
+                    ctx.get_cwd()
+                } else {
+                    ctx.get_cwd().join(dir)
+                };
+                // Canonicalize to resolve any `..` / `.` components
+                if let Ok(canonical) = std::fs::canonicalize(&new_cwd) {
+                    ctx.set_cwd(canonical);
+                } else if new_cwd.is_absolute() {
+                    ctx.set_cwd(new_cwd);
+                }
+            }
         }
 
         Ok(result)

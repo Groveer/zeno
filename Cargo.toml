@@ -61,6 +61,9 @@ tokio-util = { version = "0.7.18", features = ["rt"] }
 # IndexMap (ordered map for skill categories)
 indexmap = { version = "2", features = ["serde"] }
 
+# Diff generation for edit tool
+similar = "2"
+
 # File watcher for config hot-reload
 notify = { version = "8", default-features = false, features = ["macos_kqueue"] }
 
