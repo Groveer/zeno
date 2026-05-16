@@ -412,13 +412,6 @@ fn build_settings(lua: &Lua) -> anyhow::Result<Settings> {
         settings.theme = v;
     }
 
-    // --- plugins_dir ---
-    if let Ok(v) = overrides.get::<String>("plugins_dir")
-        && !v.is_empty()
-    {
-        settings.plugins.dir = v;
-    }
-
     // --- memory char limits ---
     if let Ok(v) = overrides.get::<usize>("memory_char_limit") {
         settings.memory.memory_char_limit = v;
@@ -737,14 +730,6 @@ fn register_zeno_api(lua: &Lua, table: &mlua::Table) -> anyhow::Result<()> {
         "theme",
         lua.create_function(move |lua, name: String| {
             get_overrides(lua)?.set("theme", name)?;
-            Ok(())
-        })?,
-    )?;
-
-    table.set(
-        "plugins_dir",
-        lua.create_function(move |lua, path: String| {
-            get_overrides(lua)?.set("plugins_dir", path)?;
             Ok(())
         })?,
     )?;

@@ -34,7 +34,6 @@ pub struct Settings {
     #[serde(default)]
     pub model_contexts: HashMap<String, u32>,
     pub theme: String,
-    pub plugins: PluginConfig,
     pub memory: MemoryConfig,
     pub auxiliary: AuxiliaryConfig,
     pub llm: LlmConfig,
@@ -75,7 +74,6 @@ impl Default for Settings {
             max_tokens: 0, // 0 = auto (derived from model context window)
             model_contexts: HashMap::new(),
             theme: "default".into(),
-            plugins: PluginConfig::default(),
             memory: MemoryConfig::default(),
             auxiliary: AuxiliaryConfig::default(),
             llm: LlmConfig::default(),
@@ -488,24 +486,6 @@ impl FromStr for PermissionMode {
 }
 
 // ---------------------------------------------------------------------------
-// Plugins
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(default)]
-pub struct PluginConfig {
-    pub dir: String,
-}
-
-impl Default for PluginConfig {
-    fn default() -> Self {
-        Self {
-            dir: "~/.config/zeno/plugins".into(),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // LLM
 // ---------------------------------------------------------------------------
 
@@ -516,7 +496,7 @@ pub struct LlmConfig {
     /// or the request times out / fails with a transient error.
     pub max_retries: u32,
     /// Fraction of the model context window (0.0–1.0) at which
-    /// auto-compaction triggers.  0.33 = compact when total tokens
+    /// auto-compaction triggers.  0.5 = compact when total tokens
     /// exceed 33% of the context window.  Set to 0.0 to disable.
     pub compact_threshold: f64,
 }
@@ -525,7 +505,7 @@ impl Default for LlmConfig {
     fn default() -> Self {
         Self {
             max_retries: 3,
-            compact_threshold: 0.33,
+            compact_threshold: 0.5,
         }
     }
 }

@@ -984,7 +984,6 @@ zn.permissions("ask" | "allow" | "deny")
 zn.max_turns(n)
 zn.max_tokens(n)                 -- 0 = auto
 zn.theme(name)
-zn.plugins_dir(path)
 zn.memory_dir(path)
 zn.memory_global(enabled)        -- true = XDG data dir, false = cwd-relative
 zn.memory_char_limit(n)          -- MEMORY.md 字符限制（默认 4000）

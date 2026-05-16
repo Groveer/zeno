@@ -32,6 +32,51 @@ zn.set_provider("openai")
 zn.set_model("gpt-5.5")
 
 -- ═══════════════════════════════════════════════
+-- Role (Identity & Persona)
+-- ═══════════════════════════════════════════════
+-- Customize the agent's identity and behavioral principles.
+-- All fields are optional — unset ones use the built-in defaults.
+-- Note: Tools and Skills guidance is always included and cannot be overridden.
+
+-- Bulk configuration:
+-- zn.role({
+--   identity = "You are Alice, a senior Rust engineer.",
+--   guidelines = "- Always write tests first.\n- Prefer zero-cost abstractions.",
+-- })
+
+-- Or set individually:
+-- zn.identity("You are a data engineer specializing in ETL pipelines.")
+-- zn.guidelines("- Validate all inputs.\n- Prefer SQL for data queries.")
+
+-- ═══════════════════════════════════════════════
+-- Auxiliary models (cheaper models for specific tasks)
+-- ═══════════════════════════════════════════════
+--
+-- Each task can override provider, model, url, api_key, timeout, extra_body, max_tokens, temperature.
+-- provider = "auto" → try active provider first, then fallback to others.
+-- model = "" → inherit from the resolved provider or main model.
+-- url = nil → use the resolved provider's base_url.
+-- api_key = nil → use the resolved provider's api_key.
+
+zn.auxiliaries({
+  -- Full fields reference (compression shows all available fields):
+  compression = {
+    provider = "auto",
+    model = "",
+    url = nil,
+    api_key = nil,
+    timeout = 30,
+    max_tokens = 0,
+    temperature = nil,
+  },
+  vision = { provider = "auto", model = "", timeout = 30 },
+  web_fetch = { provider = "auto", model = "", timeout = 60 },
+  title_generation = { provider = "auto", model = "", timeout = 30, max_tokens = 256 },
+  session_search = { provider = "auto", model = "", timeout = 30, max_tokens = 1024 },
+  delegation = { provider = "auto", model = "", timeout = 60 },
+})
+
+-- ═══════════════════════════════════════════════
 -- Tools
 -- ═══════════════════════════════════════════════
 --
@@ -46,12 +91,17 @@ zn.set_model("gpt-5.5")
 --   web_fetch   = true   (fetch URL content)
 
 -- Disable tools (booleans), skip dirs, bash env — all in one table:
---   zn.tools({
---     web_fetch = false,
---     bash = false,
---     skip_dirs = { ".turbo", ".nx", "bazel-out" },  -- extra dirs to skip in glob/grep
---     bash_env = { NODE_ENV = "development" },         -- env vars for every bash call
---   })
+zn.tools({
+  -- web_fetch = false,
+  skip_dirs = {
+    ".turbo",
+    "build",
+    "target",
+  }, -- extra dirs to skip in glob/grep
+  bash_env = {
+    LC_ALL = "C",
+  }, -- env vars for every bash call
+})
 
 -- ═══════════════════════════════════════════════
 -- Commands
@@ -70,13 +120,16 @@ zn.set_model("gpt-5.5")
 --   "kubectl"       → matches "kubectl delete pod", "kubectl drain node", etc.
 --
 -- zn.commands({
---   allow = { "pnpm list", "just --list", "make -n", "docker ps" },
+--   allow = {
+--     "pnpm list",
+--     "just --list",
+--     "make -n",
+--     "docker ps",
+--   },
 --   ask = {
---     "terraform",                          -- all terraform commands
---     "kubectl delete", "kubectl drain",    -- specific kubectl subcommands
---     "helm uninstall",
---     "git rebase", "git cherry-pick",      -- destructive git operations
---     "gh repo delete",                     -- GitHub CLI destructive actions
+--     "git checkout",
+--     "git restore",
+--     "git commit",
 --   },
 --   -- deny = { "some-dangerous-cmd" },
 -- })
@@ -114,28 +167,10 @@ zn.set_model("gpt-5.5")
 -- ── Local commands (stdio transport) ──────────────
 --
 -- zn.mcp_servers({
---   ["context7"] = {
---     command = { "npx", "-y", "@upstash/context7-mcp@latest" },
---     description = "Library/framework documentation lookup. Use for any programming library docs, API references, or framework guides.",
---     tags = { "docs", "library", "api" },
---   },
---   ["filesystem"] = {
---     command = { "npx", "-y", "@modelcontextprotocol/server-filesystem", "/home/user/documents" },
---     description = "File system operations (read/write/list) on /home/user/documents.",
---   },
---   ["github"] = {
---     command = { "npx", "-y", "@modelcontextprotocol/server-github" },
---     description = "GitHub operations: repos, issues, pull requests, code search.",
---     tags = { "git", "github", "code" },
---   },
 --   ["git"] = {
---     command = { "npx", "-y", "@modelcontextprotocol/server-git", "--repository", "." },
---     description = "Local git operations: log, diff, blame, branch management on current repo.",
---   },
---   ["postgres"] = {
---     command = { "npx", "-y", "@modelcontextprotocol/server-postgres", "postgresql://localhost/mydb" },
---     description = "PostgreSQL database queries and schema inspection.",
---     tags = { "database", "sql" },
+--     command = { "uvx", "mcp-server-git" },
+--     description = "Git repository interaction and automation. This server provides tools to read, search, and manipulate Git repositories via Large Language Models.",
+--     tags = { "git", "code" },
 --   },
 -- })
 --
@@ -145,44 +180,24 @@ zn.set_model("gpt-5.5")
 --   -- Simple HTTP (no auth):
 --   ["local-api"] = { url = "http://localhost:3000", description = "Local development API." },
 --   -- With custom headers:
---   ["remote-api"] = {
---     url = "https://api.example.com/mcp",
+--   ["context7"] = {
+--     url = "https://mcp.context7.com/mcp",
 --     headers = {
---       ["Authorization"] = "Bearer sk-your-token-here",
---       ["X-API-Key"] = "your-api-key",
+--       CONTEXT7_API_KEY = "CONTEXT7_API_KEY",
 --     },
---     description = "Example remote API with custom auth.",
+--     description = "Library/framework documentation lookup. Use for any programming library docs, API references, or framework guides.",
+--     tags = { "docs", "library", "api" },
 --   },
---   -- GitLab MCP:
---   ["gitlab"] = {
---     url = "https://gitlab.com/api/v4/mcp",
+--   ["jina-mcp-server"] = {
+--     url = "https://mcp.jina.ai/v1",
 --     headers = {
---       ["PRIVATE-TOKEN"] = "glpat-xxxxxxxxxxxx",
+--       Authorization = "Bearer jina_5381569fbb2f4245ad419dd6ec1da251qrLOOcaydPLGF_yAJBgieFIXQ0QZ",
 --     },
---     description = "GitLab operations: repos, issues, merge requests, CI/CD pipelines.",
---     tags = { "gitlab", "git", "ci" },
+--     description = "A suite of URL-to-markdown, web search, image search, and embeddings/reranker tools.",
+--     tags = { "web", "search", "reranker" },
 --   },
 -- })
 
--- ═══════════════════════════════════════════════
--- Auxiliary models (cheaper models for specific tasks)
--- ═══════════════════════════════════════════════
---
--- Each task can override provider, model, url, api_key, timeout, extra_body, max_tokens, temperature.
--- provider = "auto" → try active provider first, then fallback to others.
--- model = "" → inherit from the resolved provider or main model.
--- url = nil → use the resolved provider's base_url.
--- api_key = nil → use the resolved provider's api_key.
-
-zn.auxiliaries({
-  -- Full fields reference (compression shows all available fields):
-  compression = { provider = "auto", model = "", url = nil, api_key = nil, timeout = 30, max_tokens = 0, temperature = nil },
-  vision = { provider = "auto", model = "", timeout = 30 },
-  web_fetch = { provider = "auto", model = "", timeout = 60 },
-  title_generation = { provider = "auto", model = "", timeout = 30, max_tokens = 256 },
-  session_search = { provider = "auto", model = "", timeout = 30, max_tokens = 1024 },
-  delegation = { provider = "auto", model = "", timeout = 60 },
-})
 -- ═══════════════════════════════════════════════
 -- Model Context Windows
 -- ═══════════════════════════════════════════════
@@ -254,9 +269,9 @@ zn.log_retention_days(7)
 zn.llm_max_retries(3) -- retry on empty response or transient error (default: 3)
 
 -- Auto-compact: compress conversation history when estimated tokens exceed
--- this fraction of the model's context window (0.0-1.0, default: 0.33).
+-- this fraction of the model's context window (0.0-1.0, default: 0.5).
 -- Set to 0 to disable auto-compaction entirely.
-zn.compact_threshold(0.33)
+zn.compact_threshold(0.5)
 
 -- ═══════════════════════════════════════════════
 -- Engine Behavior
@@ -317,12 +332,6 @@ zn.compact_threshold(0.33)
 --   stale_after_days = 30,               -- 30 days unused → stale
 --   archive_after_days = 90,             -- 90 days unused → archived
 -- })
-
--- ═══════════════════════════════════════════════
--- Paths
--- ═══════════════════════════════════════════════
-
-zn.plugins_dir("~/.config/zeno/plugins")
 
 -- ═══════════════════════════════════════════════
 -- Memory
@@ -481,23 +490,6 @@ zn.user_char_limit(1375) -- USER.md character limit (default: 1375)
 -- Copy it to ~/.config/zeno/lua/hindsight.lua, then use require() to load it.
 
 -- zn.memory_provider("hindsight", require("hindsight"))
-
--- ═══════════════════════════════════════════════
--- Role (Identity & Persona)
--- ═══════════════════════════════════════════════
--- Customize the agent's identity and behavioral principles.
--- All fields are optional — unset ones use the built-in defaults.
--- Note: Tools and Skills guidance is always included and cannot be overridden.
-
--- Bulk configuration:
--- zn.role({
---   identity = "You are Alice, a senior Rust engineer.",
---   guidelines = "- Always write tests first.\n- Prefer zero-cost abstractions.",
--- })
-
--- Or set individually:
--- zn.identity("You are a data engineer specializing in ETL pipelines.")
--- zn.guidelines("- Validate all inputs.\n- Prefer SQL for data queries.")
 
 -- ═══════════════════════════════════════════════
 -- Hooks (Lua callbacks at lifecycle points)

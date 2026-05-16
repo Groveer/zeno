@@ -55,7 +55,7 @@ pub struct CompactResult {
 
 pub struct CompactConfig {
     /// Fraction (0.0–1.0) of the model context window that triggers compaction.
-    /// E.g., 0.33 = compact when estimated tokens exceed 33% of context window.
+    /// E.g., 0.5 = compact when estimated tokens exceed 33% of context window.
     /// Set to 0.0 to disable auto-compact entirely.
     pub threshold_ratio: f64,
     pub keep_recent: usize,
@@ -65,7 +65,7 @@ pub struct CompactConfig {
 impl Default for CompactConfig {
     fn default() -> Self {
         Self {
-            threshold_ratio: 0.33,
+            threshold_ratio: 0.5,
             keep_recent: 3,
             enabled: true,
         }

@@ -430,17 +430,8 @@ async fn main() -> anyhow::Result<()> {
         skill_dirs.clone(),
     )))?;
 
-    // Load Lua plugins from configured directory and register as tools
-    let plugin_dir =
-        if settings.plugins.dir.is_empty() || settings.plugins.dir == "~/.config/zeno/plugins" {
-            crate::plugin::bridge::default_plugins_dir()
-        } else {
-            let dir = settings
-                .plugins
-                .dir
-                .replace('~', &dirs::home_dir().unwrap_or_default().to_string_lossy());
-            std::path::PathBuf::from(dir)
-        };
+    // Load Lua plugins from default directory and register as tools
+    let plugin_dir = crate::plugin::bridge::default_plugins_dir();
     let plugins = crate::plugin::bridge::load_plugins_from_dir(&plugin_dir);
     let plugin_count = plugins.len();
     for plugin_def in plugins {
