@@ -481,9 +481,18 @@ impl QueryEngine {
                         max_retries = max_retries,
                         "LLM retry attempt after empty or failed response"
                     );
+                    let error_detail = match &last_error {
+                        Some(e) => format!(": {}", e),
+                        None => String::new(),
+                    };
+                    let label = if last_error.is_some() {
+                        "LLM response failed"
+                    } else {
+                        "LLM response empty"
+                    };
                     let _ = sender.send(UiEvent::Status(format!(
-                        "LLM response empty or failed, retrying ({}/{})...",
-                        retry_attempt, max_retries
+                        "{}{} — retrying ({}/{})...",
+                        label, error_detail, retry_attempt, max_retries
                     )));
                     // Exponential backoff with jitter (via shared retry module)
                     let last_status = match &last_error {
@@ -879,15 +888,21 @@ impl QueryEngine {
                     has_tool_parse_error = failed_raw.is_some(),
                     "dropping empty assistant message from provider response"
                 );
+                let error_detail = match &last_error {
+                    Some(e) => format!(". Last error: {}", e),
+                    None => String::new(),
+                };
                 let msg = if failed_raw.is_some() {
                     format!(
-                        "Model returned empty response after {} attempts (tool input parse error occurred).",
-                        max_retries + 1
+                        "Model returned empty response after {} attempts (tool input parse error occurred){}",
+                        max_retries + 1,
+                        error_detail
                     )
                 } else {
                     format!(
-                        "Model returned empty response after {} attempts.",
-                        max_retries + 1
+                        "Model returned empty response after {} attempts{}",
+                        max_retries + 1,
+                        error_detail
                     )
                 };
                 let _ = sender.send(UiEvent::Status(msg));
