@@ -7,7 +7,6 @@ use std::path::Path;
 
 /// Collected runtime context information.
 pub struct RuntimeContext {
-    pub cwd: String,
     pub os: String,
     pub shell: Option<String>,
     pub git_branch: Option<String>,
@@ -17,8 +16,6 @@ pub struct RuntimeContext {
 impl RuntimeContext {
     /// Collect runtime context from the current environment.
     pub fn collect(cwd: &Path) -> Self {
-        let cwd_str = cwd.display().to_string();
-
         let os = if cfg!(target_os = "linux") {
             "Linux".to_string()
         } else if cfg!(target_os = "macos") {
@@ -37,7 +34,6 @@ impl RuntimeContext {
         let build_system = detect_build_system(cwd);
 
         Self {
-            cwd: cwd_str,
             os,
             shell,
             git_branch,
@@ -47,19 +43,16 @@ impl RuntimeContext {
 
     /// Format as a concise block for system prompt injection.
     ///
-    /// Shows only the project directory name (not the full absolute path)
-    /// to discourage the LLM from fabricating absolute paths.
+    /// Shows `./` as the working directory so the LLM constructs correct
+    /// relative paths rather than accidentally doubling path components
+    /// when the cwd name matches a subdirectory name.
     pub fn to_prompt_block(&self) -> String {
         let mut lines = Vec::new();
-        // Show only the directory name, not the full absolute path.
-        // This prevents the LLM from prefixing cwd to paths it shouldn't.
-        let dir_name = self
-            .cwd
-            .rsplit(std::path::MAIN_SEPARATOR)
-            .next()
-            .unwrap_or(&self.cwd);
+        // Show ./ as the working directory so the LLM constructs correct
+        // relative paths (e.g. config.yaml) rather than ./data/config.yaml
+        // when the cwd already ends with the directory name.
         lines.push(format!(
-            "- Working directory: ./{dir_name} (use relative paths, e.g. src/file.rs)"
+            "- Working directory: ./ (use relative paths, e.g. src/file.rs)"
         ));
         lines.push(format!("- OS: {}", self.os));
         if let Some(ref shell) = self.shell {
@@ -169,14 +162,13 @@ mod tests {
     #[test]
     fn test_context_format() {
         let ctx = RuntimeContext {
-            cwd: "/home/user/project".into(),
             os: "Linux".into(),
             shell: Some("/bin/bash".into()),
             git_branch: Some("main".into()),
             build_system: Some("Rust (Cargo)".into()),
         };
         let block = ctx.to_prompt_block();
-        assert!(block.contains("Working directory: ./project"));
+        assert!(block.contains("Working directory: ./ "));
         assert!(block.contains("use relative paths"));
         assert!(block.contains("OS: Linux"));
         assert!(block.contains("Shell: /bin/bash"));
@@ -187,7 +179,6 @@ mod tests {
     #[test]
     fn test_context_no_shell_no_git() {
         let ctx = RuntimeContext {
-            cwd: "/tmp".into(),
             os: "Linux".into(),
             shell: None,
             git_branch: None,
