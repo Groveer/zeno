@@ -124,6 +124,8 @@ impl OpenAIClient {
 
                 if !text_parts.is_empty() {
                     msg["content"] = json!(text_parts.join(""));
+                } else if !tool_uses.is_empty() {
+                    msg["content"] = json!(null);
                 } else {
                     msg["content"] = json!(null);
                 }
@@ -339,42 +341,42 @@ fn parse_openai_sse_stream(
     let pending_complete: Arc<Mutex<Option<StreamEvent>>> = Arc::new(Mutex::new(None));
     let pending_complete_clone = pending_complete.clone();
 
-    let mapped = event_stream.filter_map(move |event| {
+    let mapped = event_stream.flat_map(move |event| {
         let id_map = id_map_clone.clone();
         let pending_reason = pending_reason_clone.clone();
         let pending_complete = pending_complete_clone.clone();
-        async move {
+
+        let evs = async move {
             let event = match event {
                 Ok(evt) => evt,
                 Err(e) => {
-                    return Some(Err(ApiError::Stream(format!("SSE error: {}", e))));
+                    return vec![Err(ApiError::Stream(format!("SSE error: {}", e)))];
                 }
             };
 
             if event.data == "[DONE]" {
-                // Drain any pending MessageComplete (content+usage in same chunk)
+                let mut flush = Vec::new();
                 if let Ok(mut pc) = pending_complete.lock() {
                     if let Some(event) = pc.take() {
-                        return Some(Ok(event));
+                        flush.push(Ok(event));
                     }
                 }
                 if let Ok(mut m) = id_map.lock() {
                     m.clear();
                 }
-                // Flush any pending finish_reason (provider never sent usage)
                 if let Ok(mut pr) = pending_reason.lock()
                     && let Some((reason, _idx)) = pr.take()
                 {
                     let stop_reason = parse_stop_reason(&reason);
-                    return Some(Ok(StreamEvent::MessageComplete {
+                    flush.push(Ok(StreamEvent::MessageComplete {
                         stop_reason,
                         usage: Usage::default(),
                     }));
                 }
-                return None;
+                return flush;
             }
             if event.data.is_empty() {
-                return None;
+                return Vec::new();
             }
 
             tracing::trace!(chunk_len = event.data.len().min(500), "SSE chunk received");
@@ -383,9 +385,10 @@ fn parse_openai_sse_stream(
                 Ok(mut m) => {
                     parse_openai_chunk(&event.data, &mut m, &pending_reason, &pending_complete)
                 }
-                Err(e) => Some(Err(ApiError::Stream(format!("lock error: {}", e)))),
+                Err(e) => vec![Err(ApiError::Stream(format!("lock error: {}", e)))],
             }
-        }
+        };
+        stream::once(evs).map(|v| stream::iter(v)).flatten()
     });
 
     // After the SSE stream ends (without [DONE]), drain any pending events.
@@ -525,7 +528,13 @@ fn parse_openai_nonstreaming(
             let args = tc
                 .get("function")
                 .and_then(|f| f.get("arguments"))
-                .and_then(|a| a.as_str());
+                .map(|a| {
+                    if a.is_string() {
+                        a.as_str().unwrap().to_string()
+                    } else {
+                        a.to_string()
+                    }
+                });
 
             events.push(Ok(StreamEvent::ToolUseStart {
                 id,
@@ -570,10 +579,11 @@ fn parse_openai_chunk(
     id_map: &mut HashMap<u64, String>,
     pending_reason: &Mutex<Option<(String, String)>>,
     pending_complete: &Mutex<Option<StreamEvent>>,
-) -> Option<Result<StreamEvent, ApiError>> {
+) -> Vec<Result<StreamEvent, ApiError>> {
+    let mut events = Vec::new();
     let v: serde_json::Value = match serde_json::from_str(data) {
         Ok(v) => v,
-        Err(e) => return Some(Err(ApiError::Json(e))),
+        Err(e) => return vec![Err(ApiError::Json(e))],
     };
 
     // Extract finish_reason from choices[0] if present (used both for
@@ -596,7 +606,6 @@ fn parse_openai_chunk(
             .unwrap_or(0);
         if prompt > 0 || output > 0 {
             let usage = parse_usage_from_value(usage_val);
-
             // Use finish_reason from this chunk if present, otherwise drain
             // the pending_reason cache (providers like DeepSeek send
             // finish_reason in a prior chunk and usage in a later one).
@@ -604,14 +613,11 @@ fn parse_openai_chunk(
                 Some("stop") => StopReason::EndTurn,
                 Some("tool_calls") => StopReason::ToolUse,
                 Some("length") => StopReason::MaxTokens,
-                _ => {
-                    // Try pending_reason cache
-                    match pending_reason.lock() {
-                        Ok(mut pr) => pr.take().map(|(r, _)| parse_stop_reason(&r)),
-                        Err(_) => None,
-                    }
-                    .unwrap_or(StopReason::EndTurn)
+                _ => match pending_reason.lock() {
+                    Ok(mut pr) => pr.take().map(|(r, _)| parse_stop_reason(&r)),
+                    Err(_) => None,
                 }
+                .unwrap_or(StopReason::EndTurn),
             };
 
             let complete_event = StreamEvent::MessageComplete { stop_reason, usage };
@@ -630,36 +636,40 @@ fn parse_openai_chunk(
                         || d.get("reasoning_content")
                             .and_then(|c| c.as_str())
                             .is_some_and(|s| !s.is_empty())
+                        || d.get("tool_calls").is_some()
                 });
 
+            // Buffer the MessageComplete — delta content will be emitted
+            // on this pass, and the buffer is drained on [DONE].
             if delta_has_content {
-                // Buffer the MessageComplete — delta content will be emitted
-                // on this pass, and the buffer is drained on [DONE].
                 if let Ok(mut pc) = pending_complete.lock() {
                     *pc = Some(complete_event);
                 }
             } else {
-                return Some(Ok(complete_event));
+                events.push(Ok(complete_event));
+                return events;
             }
         }
     }
 
-    let choices = v.get("choices")?.as_array()?;
-    if choices.is_empty() {
-        // Choices-empty chunk with usage=null — skip (DeepSeek sends this
-        // between finish_reason and [DONE]).
-        return None;
-    }
+    // Choices-empty chunk with usage=null — skip (DeepSeek sends this
+    // between finish_reason and [DONE]).
+    let choices = match v.get("choices").and_then(|c| c.as_array()) {
+        Some(c) if !c.is_empty() => c,
+        _ => return events,
+    };
 
     let choice = &choices[0];
-    let delta = choice.get("delta")?;
+    let delta = match choice.get("delta") {
+        Some(d) => d,
+        None => return events,
+    };
 
-    // Tool calls — handle the case where name AND arguments arrive in one chunk
-    // NOTE: if the chunk also has content, we can only return one event.
-    // Prefer tool_use events (they are time-sensitive for tool execution),
-    // but log a warning so we can detect non-standard provider behavior.
+    // Tool calls — handle the case where name AND arguments arrive in one chunk.
+    // Some providers batch multiple entries for the same tool call index
+    // into a single SSE chunk (e.g. name in one entry, arguments in another).
+    // We must NOT return early — collect all entries and merge by index.
     if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
-        // Check for co-occurring content (non-standard but possible)
         let content_also = delta
             .get("content")
             .and_then(|c| c.as_str())
@@ -672,15 +682,11 @@ fn parse_openai_chunk(
             );
         }
 
-        // Some providers batch multiple entries for the same tool call index
-        // into a single SSE chunk (e.g. name in one entry, arguments in another).
-        // We must NOT return early — collect all entries and merge by index.
-        let mut start_by_index: HashMap<u64, (String, String)> = HashMap::new(); // index -> (name, merged_args)
+        let mut start_by_index: HashMap<u64, (String, String)> = HashMap::new();
         let mut delta_by_index: HashMap<u64, String> = HashMap::new();
 
         for tc in tool_calls {
             let index = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
-
             // Track ID from first chunk
             if let Some(id) = tc.get("id").and_then(|i| i.as_str())
                 && !id.is_empty()
@@ -695,51 +701,61 @@ fn parse_openai_chunk(
                 .unwrap_or("");
             let arguments = func
                 .and_then(|f| f.get("arguments"))
-                .and_then(|a| a.as_str())
-                .unwrap_or("");
+                .map(|a| {
+                    if a.is_string() {
+                        a.as_str().unwrap().to_string()
+                    } else {
+                        a.to_string()
+                    }
+                })
+                .unwrap_or_default();
 
+            // Merge: if we already have partial args for this index, append
             if !name.is_empty() {
-                // Merge: if we already have partial args for this index, append
                 let merged = start_by_index
                     .remove(&index)
-                    .map(|(_, prev)| prev + arguments)
-                    .unwrap_or_else(|| arguments.to_string());
+                    .map(|(_, prev)| prev + &arguments)
+                    .unwrap_or_else(|| arguments.clone());
                 start_by_index.insert(index, (name.to_string(), merged));
+            // Merge: append to existing delta or start fresh
             } else if !arguments.is_empty() {
-                // Merge: append to existing delta or start fresh
                 let merged = delta_by_index
                     .remove(&index)
-                    .map(|prev| prev + arguments)
-                    .unwrap_or_else(|| arguments.to_string());
+                    .map(|prev| prev + &arguments)
+                    .unwrap_or_else(|| arguments.clone());
                 delta_by_index.insert(index, merged);
             }
         }
 
         // Emit ToolUseStart events (name present) — these are time-sensitive
-        if let Some((&idx, (name, args))) = start_by_index.iter().next() {
-            let id = id_map.get(&idx).cloned().unwrap_or_default();
-            let input_json = if args.is_empty() {
-                None
-            } else {
-                Some(args.clone())
-            };
-            return Some(Ok(StreamEvent::ToolUseStart {
-                id,
-                name: name.clone(),
-                input_json,
-            }));
+        let mut start_indices: Vec<_> = start_by_index.keys().cloned().collect();
+        start_indices.sort();
+        for idx in start_indices {
+            if let Some((name, args)) = start_by_index.remove(&idx) {
+                let id = id_map.get(&idx).cloned().unwrap_or_default();
+                let input_json = if args.is_empty() { None } else { Some(args) };
+                events.push(Ok(StreamEvent::ToolUseStart {
+                    id,
+                    name,
+                    input_json,
+                }));
+            }
         }
 
         // Emit ToolUseDelta events (no name, just arguments)
-        if let Some((&idx, args)) = delta_by_index.iter().next() {
-            let id = id_map
-                .get(&idx)
-                .cloned()
-                .unwrap_or_else(|| format!("call_{}", idx));
-            return Some(Ok(StreamEvent::ToolUseDelta {
-                id,
-                delta_json: args.clone(),
-            }));
+        let mut delta_indices: Vec<_> = delta_by_index.keys().cloned().collect();
+        delta_indices.sort();
+        for idx in delta_indices {
+            if let Some(args) = delta_by_index.remove(&idx) {
+                let id = id_map
+                    .get(&idx)
+                    .cloned()
+                    .unwrap_or_else(|| format!("call_{}", idx));
+                events.push(Ok(StreamEvent::ToolUseDelta {
+                    id,
+                    delta_json: args,
+                }));
+            }
         }
     }
 
@@ -749,27 +765,31 @@ fn parse_openai_chunk(
     if let Some(rc) = delta.get("reasoning_content").and_then(|c| c.as_str())
         && !rc.is_empty()
     {
-        return Some(Ok(StreamEvent::ReasoningDelta(rc.to_string())));
+        events.push(Ok(StreamEvent::ReasoningDelta(rc.to_string())));
     }
 
     // Text content
     if let Some(content) = delta.get("content").and_then(|c| c.as_str())
         && !content.is_empty()
     {
-        return Some(Ok(StreamEvent::TextDelta(content.to_string())));
+        events.push(Ok(StreamEvent::TextDelta(content.to_string())));
     }
 
-    // Finish reason without usage — cache it for later merging with usage
-    // chunk. Providers like DeepSeek send finish_reason in one chunk and
-    // usage in a separate subsequent chunk.
     if let Some(reason) = finish_reason
         && !reason.is_empty()
         && let Ok(mut pr) = pending_reason.lock()
     {
-        *pr = Some((reason.to_string(), "0".to_string()));
+        pr.replace((
+            reason.to_string(),
+            choice
+                .get("index")
+                .and_then(|i| i.as_u64())
+                .unwrap_or(0)
+                .to_string(),
+        ));
     }
 
-    None
+    events
 }
 
 // ---------------------------------------------------------------------------
@@ -958,8 +978,8 @@ mod tests {
         let pending_complete = make_pending_complete();
         let data = r#"{"choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}"#;
         let result = parse_openai_chunk(data, &mut id_map, &pending, &pending_complete);
-        assert!(result.is_some());
-        match result.unwrap() {
+        assert!(!result.is_empty(), "Expected at least one event");
+        match &result[0] {
             Ok(StreamEvent::TextDelta(text)) => assert_eq!(text, "hello"),
             other => panic!("Expected TextDelta, got {:?}", other),
         }
@@ -972,8 +992,8 @@ mod tests {
         let pending_complete = make_pending_complete();
         let data = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc","function":{"name":"read","arguments":"{\"path\":\"main.rs\"}"}}]},"finish_reason":null}]}"#;
         let result = parse_openai_chunk(data, &mut id_map, &pending, &pending_complete);
-        assert!(result.is_some());
-        match result.unwrap() {
+        assert!(!result.is_empty(), "Expected at least one event");
+        match &result[0] {
             Ok(StreamEvent::ToolUseStart {
                 id,
                 name,
@@ -981,7 +1001,7 @@ mod tests {
             }) => {
                 assert_eq!(id, "call_abc");
                 assert_eq!(name, "read");
-                assert_eq!(input_json, Some("{\"path\":\"main.rs\"}".into()));
+                assert_eq!(input_json, &Some("{\"path\":\"main.rs\"}".into()));
             }
             other => panic!("Expected ToolUseStart, got {:?}", other),
         }
@@ -995,8 +1015,8 @@ mod tests {
         let pending_complete = make_pending_complete();
         let data = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"main.rs\"}"}}]},"finish_reason":null}]}"#;
         let result = parse_openai_chunk(data, &mut id_map, &pending, &pending_complete);
-        assert!(result.is_some());
-        match result.unwrap() {
+        assert!(!result.is_empty(), "Expected at least one event");
+        match &result[0] {
             Ok(StreamEvent::ToolUseDelta { id, delta_json }) => {
                 assert_eq!(id, "call_abc");
                 assert_eq!(delta_json, "{\"path\":\"main.rs\"}");
@@ -1012,10 +1032,10 @@ mod tests {
         let pending_complete = make_pending_complete();
         let data = r#"{"usage":{"prompt_tokens":10,"completion_tokens":20},"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
         let result = parse_openai_chunk(data, &mut id_map, &pending, &pending_complete);
-        assert!(result.is_some());
-        match result.unwrap() {
+        assert!(!result.is_empty(), "Expected at least one event");
+        match &result[0] {
             Ok(StreamEvent::MessageComplete { stop_reason, usage }) => {
-                assert_eq!(stop_reason, StopReason::EndTurn);
+                assert_eq!(stop_reason, &StopReason::EndTurn);
                 assert_eq!(usage.input_tokens, 10);
                 assert_eq!(usage.output_tokens, 20);
             }
@@ -1030,10 +1050,10 @@ mod tests {
         let pending_complete = make_pending_complete();
         let data = r#"{"usage":{"prompt_tokens":100,"completion_tokens":30,"prompt_tokens_details":{"cached_tokens":40,"cache_write_tokens":10},"completion_tokens_details":{"reasoning_tokens":5}},"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#;
         let result = parse_openai_chunk(data, &mut id_map, &pending, &pending_complete);
-        assert!(result.is_some());
-        match result.unwrap() {
+        assert!(!result.is_empty(), "Expected at least one event");
+        match &result[0] {
             Ok(StreamEvent::MessageComplete { stop_reason, usage }) => {
-                assert_eq!(stop_reason, StopReason::ToolUse);
+                assert_eq!(stop_reason, &StopReason::ToolUse);
                 assert_eq!(usage.input_tokens, 50);
                 assert_eq!(usage.cache_read_input_tokens, 40);
                 assert_eq!(usage.cache_creation_input_tokens, 10);
@@ -1053,15 +1073,18 @@ mod tests {
         // First chunk: finish_reason without usage
         let chunk1 = r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
         let result1 = parse_openai_chunk(chunk1, &mut id_map, &pending, &pending_complete);
-        assert!(result1.is_none(), "finish-reason-only chunk caches reason");
+        assert!(
+            result1.is_empty(),
+            "finish-reason-only chunk caches reason (no events)"
+        );
 
         // Second chunk: usage without finish_reason
         let chunk2 = r#"{"usage":{"prompt_tokens":5,"completion_tokens":10},"choices":[{"index":0,"delta":{}}]}"#;
         let result2 = parse_openai_chunk(chunk2, &mut id_map, &pending, &pending_complete);
-        assert!(result2.is_some());
-        match result2.unwrap() {
+        assert!(!result2.is_empty(), "Expected at least one event");
+        match &result2[0] {
             Ok(StreamEvent::MessageComplete { stop_reason, usage }) => {
-                assert_eq!(stop_reason, StopReason::EndTurn);
+                assert_eq!(stop_reason, &StopReason::EndTurn);
                 assert_eq!(usage.input_tokens, 5);
                 assert_eq!(usage.output_tokens, 10);
             }
@@ -1075,8 +1098,8 @@ mod tests {
         let pending = make_pending();
         let pending_complete = make_pending_complete();
         let result = parse_openai_chunk("not json", &mut id_map, &pending, &pending_complete);
-        assert!(result.is_some());
-        assert!(result.unwrap().is_err());
+        assert!(!result.is_empty(), "Expected at least one event (error)");
+        assert!(result[0].is_err(), "Expected error for invalid JSON");
     }
 
     #[test]
@@ -1086,6 +1109,6 @@ mod tests {
         let pending_complete = make_pending_complete();
         let data = r#"{"choices":[],"usage":null}"#;
         let result = parse_openai_chunk(data, &mut id_map, &pending, &pending_complete);
-        assert!(result.is_none());
+        assert!(result.is_empty(), "Empty choices should produce no events");
     }
 }

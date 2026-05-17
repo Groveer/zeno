@@ -544,8 +544,24 @@ impl App {
                         existing.push_str(&delta);
                         pushed = true;
                     }
+
                     if !pushed {
                         self.output.push(OutputSegment::Text(delta));
+                    } else {
+                        self.output.mark_dirty();
+                    }
+                }
+                UiEvent::ReasoningDelta(delta) => {
+                    let mut pushed = false;
+                    if let Some(OutputSegment::Reasoning(existing)) =
+                        self.output.segments.last_mut()
+                    {
+                        existing.push_str(&delta);
+                        pushed = true;
+                    }
+
+                    if !pushed {
+                        self.output.push(OutputSegment::Reasoning(delta));
                     } else {
                         self.output.mark_dirty();
                     }

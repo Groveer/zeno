@@ -258,11 +258,15 @@ impl ConversationHistory {
 
             // Remove empty assistant messages
             if role == Role::Assistant {
-                let is_empty = self.entries[i].content.iter().all(|b| match b {
+                let has_reasoning = self.entries[i]
+                    .reasoning_content
+                    .as_ref()
+                    .is_some_and(|rc| !rc.trim().is_empty());
+                let is_empty_content = self.entries[i].content.iter().all(|b| match b {
                     ContentBlock::Text { text } => text.trim().is_empty(),
                     _ => false,
                 });
-                if is_empty {
+                if !has_reasoning && is_empty_content {
                     self.entries.remove(i);
                     continue;
                 }
@@ -305,7 +309,11 @@ impl ConversationHistory {
 
                 if cleaned.len() != self.entries[i].content.len() {
                     self.entries[i].content = cleaned;
-                    if self.entries[i].content.is_empty() {
+                    let has_reasoning = self.entries[i]
+                        .reasoning_content
+                        .as_ref()
+                        .is_some_and(|rc| !rc.trim().is_empty());
+                    if !has_reasoning && self.entries[i].content.is_empty() {
                         self.entries.remove(i);
                         continue;
                     }

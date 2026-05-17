@@ -725,6 +725,7 @@ impl QueryEngine {
                             assistant_text.push_str(&delta);
                         }
                         Ok(StreamEvent::ReasoningDelta(delta)) => {
+                            let _ = sender.send(UiEvent::ReasoningDelta(delta.clone()));
                             reasoning_text.push_str(&delta);
                         }
                         Ok(StreamEvent::ToolUseStart {
@@ -732,6 +733,12 @@ impl QueryEngine {
                             name,
                             input_json,
                         }) => {
+                            tracing::debug!(
+                                event = "tool_use_start",
+                                name = name,
+                                id = id,
+                                "Received ToolUseStart from API"
+                            );
                             if let Some(tool) = current_tool.take() {
                                 tool_uses.push(tool);
                             }
@@ -873,7 +880,10 @@ impl QueryEngine {
             //
             // If we got here, all retry attempts returned empty. Now check
             // if we have a pending goal and can auto-continue.
-            if assistant_text.trim().is_empty() && tool_uses.is_empty() {
+            if assistant_text.trim().is_empty()
+                && reasoning_text.trim().is_empty()
+                && tool_uses.is_empty()
+            {
                 // Check if the previous turn had a tool call that failed JSON parsing.
                 // If so, the LLM may have given up after receiving the parse error.
                 // Log the raw input for offline debugging.
@@ -956,10 +966,12 @@ impl QueryEngine {
             // Otherwise, check if there's a pending goal and loop again.
             if tool_uses.is_empty() {
                 let is_max_tokens = matches!(last_stop_reason, Some(StopReason::MaxTokens));
+                let has_content =
+                    !assistant_text.trim().is_empty() || !reasoning_text.trim().is_empty();
 
                 if is_max_tokens
                     && auto_continue_count < self.settings.engine.max_auto_continue
-                    && !assistant_text.trim().is_empty()
+                    && has_content
                 {
                     auto_continue_count += 1;
                     tracing::info!(
@@ -973,8 +985,37 @@ impl QueryEngine {
                     ));
                     // Tell the model its previous output was cut off and to continue
                     self.history.push_user(
-                "Your previous response was cut off because it reached the maximum output token limit. Please continue from exactly where you left off — do not repeat what you already said.",
-            );
+                        "Your previous response was cut off because it reached the maximum output token limit. Please continue from exactly where you left off — do not repeat what you already said.",
+                    );
+                    continue;
+                }
+
+                // Reasoning-only fallback: model produced thinking but no visible text
+                // and no tool calls. Auto-continue once to nudge the model to respond.
+                if !reasoning_text.trim().is_empty()
+                    && assistant_text.trim().is_empty()
+                    && auto_continue_count < self.settings.engine.max_auto_continue
+                {
+                    auto_continue_count += 1;
+                    tracing::info!(
+                        auto_continue = auto_continue_count,
+                        max_auto_continue = self.settings.engine.max_auto_continue,
+                        reason = "reasoning_only",
+                        "auto-continue: model returned only reasoning, nudging for response"
+                    );
+                    let _ = sender.send(UiEvent::Status("Model is thinking...".into()));
+
+                    if let Some(prompt) = self.carryover.build_continuation_prompt() {
+                        self.history.push_user(&prompt);
+                    } else {
+                        // Because the model stopped voluntarily (finish_reason = stop) after
+                        // outputting reasoning, giving it a strong "MUST use a tool" prompt
+                        // might break contexts where no tool use was actually intended
+                        // (e.g. general chat or explaining). Let's use a clear, neutral prompt.
+                        self.history.push_user(
+                            "Please provide your response or tool calls based on your analysis above. Do not repeat your reasoning.",
+                        );
+                    }
                     continue;
                 }
 
@@ -986,11 +1027,12 @@ impl QueryEngine {
                     tracing::info!(
                         auto_continue = auto_continue_count,
                         max_auto_continue = self.settings.engine.max_auto_continue,
-                        reason = "pending_goal",
-                        "auto-continue: model stopped without tool use, goal still pending"
+                        reason = "enforcement_or_pending_goal",
+                        "auto-continue: model stopped without tool use, goal pending or planning detected"
                     );
-                    let _ =
-                        sender.send(UiEvent::Status("Task not complete — continuing...".into()));
+                    let _ = sender.send(UiEvent::Status(
+                        "Task not complete — enforcing tool use...".into(),
+                    ));
                     if let Some(prompt) = self.carryover.build_continuation_prompt() {
                         self.history.push_user(&prompt);
                     }

@@ -14,6 +14,9 @@ use std::sync::{Arc, Mutex};
 pub enum UiEvent {
     /// A chunk of text from the LLM stream.
     TextDelta(String),
+    /// A chunk of reasoning / thinking content from the LLM stream.
+    /// Displayed separately from visible text (e.g. in a collapsible block).
+    ReasoningDelta(String),
     /// Clear all output segments (e.g. after /clear command).
     ClearOutput,
     /// A tool call is being executed.

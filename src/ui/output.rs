@@ -27,6 +27,8 @@ pub enum OutputSegment {
     AskResponse(String),
     /// Assistant text (LLM response).
     Text(String),
+    /// Assistant reasoning / thinking content (displayed dimmed, separate from visible text).
+    Reasoning(String),
     /// Tool invocation — executing (spinner).
     ToolExecuting(String),
     /// Tool completed — one-line result summary.
@@ -358,6 +360,21 @@ fn segment_to_lines(seg: &OutputSegment) -> Vec<Line<'static>> {
         OutputSegment::Text(text) => {
             // Render markdown to styled lines
             super::markdown::render_markdown(text)
+        }
+        OutputSegment::Reasoning(text) => {
+            // Render reasoning/thinking content dimmed and indented
+            let header = Span::styled("  ", Style::new().fg(theme::ACCENT_DIM));
+            let rendered = super::markdown::render_markdown(text);
+            let mut lines = Vec::with_capacity(rendered.len() + 1);
+            lines.push(Line::from(vec![header]));
+            for line in rendered {
+                let styled = Line::from(vec![Span::styled(
+                    line.to_string(),
+                    Style::new().fg(theme::TEXT_DIM),
+                )]);
+                lines.push(styled);
+            }
+            lines
         }
         OutputSegment::ToolExecuting(summary) => {
             vec![Line::from(vec![

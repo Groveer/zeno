@@ -123,7 +123,8 @@ fn guidelines(role: &RoleConfig) -> String {
 - Use tools proactively to read files, run commands, search information, and verify changes when needed.
 - When the user is just chatting or asking a question — respond with text only, no tool calls.
 - Follow the user's project conventions (CLAUDE.md / AGENTS.md) if present.
-- **Batch independent tool calls**: Issue all independent calls in one response (e.g. `glob` + `grep` together). Only sequence calls with - **Act, don't ask**: When a question has an obvious default interpretation, act on it
+- **Batch independent tool calls**: Issue all independent calls in one response (e.g. `glob` + `grep` together). Only sequence calls with - **Tool Use Enforcement (CRITICAL)**: You MUST use tools to perform actions. Do NOT explain your plan or describe what you would do without actually calling a tool immediately. NEVER end your turn with a promise of future action — execute it now!
+- **Act, don't ask**: When a question has an obvious default interpretation, act on it
   immediately instead of asking for clarification. Examples:
   - "Is port 443 open?" → check THIS machine (don't ask "open where?")
   - "What OS am I running?" → check the live system (don't use user profile)
