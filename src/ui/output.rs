@@ -362,19 +362,49 @@ fn segment_to_lines(seg: &OutputSegment) -> Vec<Line<'static>> {
             super::markdown::render_markdown(text)
         }
         OutputSegment::Reasoning(text) => {
-            // Render reasoning/thinking content dimmed and indented
-            let header = Span::styled("  ", Style::new().fg(theme::ACCENT_DIM));
-            let rendered = super::markdown::render_markdown(text);
-            let mut lines = Vec::with_capacity(rendered.len() + 1);
-            lines.push(Line::from(vec![header]));
-            for line in rendered {
-                let styled = Line::from(vec![Span::styled(
-                    line.to_string(),
-                    Style::new().fg(theme::TEXT_DIM),
-                )]);
-                lines.push(styled);
-            }
-            lines
+            // Single-line rolling display: show the latest snippet of reasoning.
+            // Reasoning text accumulates across deltas; we tail the last line for
+            // a rolling-in-place effect — just enough to show the model is thinking.
+            let header = Span::styled(" 󰧑 ", Style::new().fg(theme::ACCENT_DIM));
+
+            // Take the last non-empty line for the rolling display
+            let snippet = text
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or(text);
+            let trimmed = snippet.trim();
+
+            // Tail-truncate to fit roughly one line (wrap_line handles remainder).
+            // 120 chars is well within typical terminal widths.
+            const ROLLING_WIDTH: usize = 120;
+            let display = if display_width(trimmed) <= ROLLING_WIDTH {
+                trimmed.to_string()
+            } else {
+                let chars: Vec<char> = trimmed.chars().collect();
+                let mut w = 0usize;
+                let mut start = chars.len();
+                for i in (0..chars.len()).rev() {
+                    let next = chars.get(i + 1).copied();
+                    let cw = char_width(chars[i], next);
+                    if w + cw > ROLLING_WIDTH.saturating_sub(1) {
+                        start = i + 1;
+                        break;
+                    }
+                    w += cw;
+                    start = i;
+                }
+                if start > 0 {
+                    format!("…{}", chars[start..].iter().collect::<String>())
+                } else {
+                    trimmed.to_string()
+                }
+            };
+
+            vec![Line::from(vec![
+                header,
+                Span::styled(display, Style::new().fg(theme::TEXT_DIM)),
+            ])]
         }
         OutputSegment::ToolExecuting(summary) => {
             vec![Line::from(vec![
