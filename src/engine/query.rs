@@ -819,7 +819,10 @@ impl QueryEngine {
 
                 // Empty response — retry (unless this is the last attempt,
                 // in which case fall through to existing empty-handling below)
-                if assistant_text.trim().is_empty() && tool_uses.is_empty() {
+                if assistant_text.trim().is_empty()
+                    && reasoning_text.trim().is_empty()
+                    && tool_uses.is_empty()
+                {
                     tracing::warn!(
                         retry_attempt = retry_attempt + 1,
                         max_attempts = max_retries + 1,

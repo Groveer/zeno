@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, stream};
 use reqwest::Client;
 use serde_json::{Value, json};
 
@@ -297,7 +297,23 @@ impl SupportsStreamingMessages for OpenAIClient {
             });
         }
 
-        Ok(parse_openai_sse_stream(response))
+        // Check Content-Type for non-streaming fallback.
+        // Some OpenAI-compatible providers (e.g. Gemini proxy) intermittently
+        // ignore `stream: true` and return a plain JSON response instead of SSE.
+        // When that happens, parse the body as a complete non-streaming response.
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_lowercase();
+
+        if content_type.contains("text/event-stream") {
+            Ok(parse_openai_sse_stream(response))
+        } else {
+            let body = response.text().await.map_err(ApiError::Request)?;
+            Ok(parse_openai_nonstreaming(&body))
+        }
     }
 }
 
@@ -318,10 +334,15 @@ fn parse_openai_sse_stream(
     // choice index for later emission.
     let pending_reason: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
     let pending_reason_clone = pending_reason.clone();
+    // Some providers (e.g. Gemini proxy) send delta content AND usage in the
+    // same SSE chunk. Buffer the MessageComplete and emit it on [DONE].
+    let pending_complete: Arc<Mutex<Option<StreamEvent>>> = Arc::new(Mutex::new(None));
+    let pending_complete_clone = pending_complete.clone();
 
     let mapped = event_stream.filter_map(move |event| {
         let id_map = id_map_clone.clone();
         let pending_reason = pending_reason_clone.clone();
+        let pending_complete = pending_complete_clone.clone();
         async move {
             let event = match event {
                 Ok(evt) => evt,
@@ -331,6 +352,12 @@ fn parse_openai_sse_stream(
             };
 
             if event.data == "[DONE]" {
+                // Drain any pending MessageComplete (content+usage in same chunk)
+                if let Ok(mut pc) = pending_complete.lock() {
+                    if let Some(event) = pc.take() {
+                        return Some(Ok(event));
+                    }
+                }
                 if let Ok(mut m) = id_map.lock() {
                     m.clear();
                 }
@@ -353,13 +380,179 @@ fn parse_openai_sse_stream(
             tracing::trace!(chunk_len = event.data.len().min(500), "SSE chunk received");
 
             match id_map.lock() {
-                Ok(mut m) => parse_openai_chunk(&event.data, &mut m, &pending_reason),
+                Ok(mut m) => {
+                    parse_openai_chunk(&event.data, &mut m, &pending_reason, &pending_complete)
+                }
                 Err(e) => Some(Err(ApiError::Stream(format!("lock error: {}", e)))),
             }
         }
     });
 
-    Box::pin(mapped)
+    // After the SSE stream ends (without [DONE]), drain any pending events.
+    // This handles the case where the connection is closed without the [DONE]
+    // sentinel — e.g. provider timeout or non-standard stream termination.
+    let drain_complete = pending_complete.clone();
+    let drain_reason = pending_reason.clone();
+    let drain_id_map = id_map.clone();
+    let drain = stream::once(async move {
+        // Check pending_complete first (higher priority — has usage info)
+        if let Ok(mut pc) = drain_complete.lock() {
+            if let Some(event) = pc.take() {
+                return Some(Ok(event));
+            }
+        }
+        // Then check pending_reason (no usage chunk was ever sent)
+        if let Ok(mut pr) = drain_reason.lock()
+            && let Some((reason, _idx)) = pr.take()
+        {
+            let stop_reason = parse_stop_reason(&reason);
+            return Some(Ok(StreamEvent::MessageComplete {
+                stop_reason,
+                usage: Usage::default(),
+            }));
+        }
+        // Clean up id_map
+        if let Ok(mut m) = drain_id_map.lock() {
+            m.clear();
+        }
+        None
+    })
+    .filter_map(|x| async move { x });
+
+    Box::pin(mapped.chain(drain))
+}
+
+/// Parse an OpenAI-style usage JSON object into a Usage struct.
+///
+/// Handles the same fields as the streaming path: `prompt_tokens`,
+/// `completion_tokens`, `prompt_tokens_details` (cached_tokens,
+/// cache_write_tokens), and `completion_tokens_details` (reasoning_tokens).
+/// Non-cached input tokens are computed as `prompt - cached_read - cached_write`.
+fn parse_usage_from_value(usage: &Value) -> Usage {
+    let prompt = usage
+        .get("prompt_tokens")
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0);
+    let output = usage
+        .get("completion_tokens")
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0);
+
+    let (cached_read, cached_write) = usage
+        .get("prompt_tokens_details")
+        .map(|d| {
+            let cr = d.get("cached_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+            let cw = d
+                .get("cache_write_tokens")
+                .and_then(|t| t.as_u64())
+                .unwrap_or(0);
+            (cr, cw)
+        })
+        .unwrap_or((0, 0));
+
+    let reasoning = usage
+        .get("completion_tokens_details")
+        .and_then(|d| d.get("reasoning_tokens"))
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0);
+
+    let input_non_cached = prompt.saturating_sub(cached_read + cached_write);
+
+    Usage {
+        input_tokens: input_non_cached,
+        output_tokens: output,
+        cache_read_input_tokens: cached_read,
+        cache_creation_input_tokens: cached_write,
+        reasoning_tokens: reasoning,
+    }
+}
+
+/// Parse a non-streaming OpenAI response into a synthetic stream of events.
+///
+/// Some providers (e.g. Gemini proxy) intermittently ignore `stream: true`
+/// and return a plain JSON response. This converts that single-response JSON
+/// into the same event sequence that the SSE path would produce:
+///   ReasoningDelta (if present) → TextDelta → ToolUseStart(s) → MessageComplete
+fn parse_openai_nonstreaming(
+    body: &str,
+) -> Pin<Box<dyn Stream<Item = Result<StreamEvent, ApiError>> + Send>> {
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => return Box::pin(stream::once(async move { Err(ApiError::Json(e)) })),
+    };
+
+    let mut events: Vec<Result<StreamEvent, ApiError>> = Vec::new();
+
+    let choice = match v.get("choices").and_then(|c| c.get(0)) {
+        Some(c) => c,
+        None => return Box::pin(stream::iter(events)),
+    };
+
+    // In non-streaming responses, content is in `message`, not `delta`.
+    let message = match choice.get("message") {
+        Some(m) => m,
+        None => return Box::pin(stream::iter(events)),
+    };
+
+    // Reasoning content (Gemini proxy puts it in message, same as delta)
+    if let Some(rc) = message.get("reasoning_content").and_then(|c| c.as_str())
+        && !rc.is_empty()
+    {
+        events.push(Ok(StreamEvent::ReasoningDelta(rc.to_string())));
+    }
+
+    // Text content
+    if let Some(content) = message.get("content").and_then(|c| c.as_str())
+        && !content.is_empty()
+    {
+        events.push(Ok(StreamEvent::TextDelta(content.to_string())));
+    }
+
+    // Tool calls — non-streaming responses have complete tool_calls in message
+    if let Some(tool_calls) = message.get("tool_calls").and_then(|t| t.as_array()) {
+        for tc in tool_calls {
+            let id = tc
+                .get("id")
+                .and_then(|i| i.as_str())
+                .unwrap_or("")
+                .to_string();
+            let name = tc
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_string();
+            let args = tc
+                .get("function")
+                .and_then(|f| f.get("arguments"))
+                .and_then(|a| a.as_str());
+
+            events.push(Ok(StreamEvent::ToolUseStart {
+                id,
+                name,
+                input_json: args.map(|a| a.to_string()),
+            }));
+        }
+    }
+
+    // Stop reason
+    let stop_reason = match choice.get("finish_reason").and_then(|f| f.as_str()) {
+        Some("stop") => StopReason::EndTurn,
+        Some("tool_calls") => StopReason::ToolUse,
+        Some("length") => StopReason::MaxTokens,
+        Some(s) => StopReason::StopSequence(s.to_string()),
+        None => StopReason::EndTurn,
+    };
+
+    // Usage (same format as streaming chunks)
+    let usage = v
+        .get("usage")
+        .map(parse_usage_from_value)
+        .unwrap_or_default();
+
+    events.push(Ok(StreamEvent::MessageComplete { stop_reason, usage }));
+
+    Box::pin(stream::iter(events))
 }
 
 /// Convert an OpenAI finish_reason string to StopReason.
@@ -376,6 +569,7 @@ fn parse_openai_chunk(
     data: &str,
     id_map: &mut HashMap<u64, String>,
     pending_reason: &Mutex<Option<(String, String)>>,
+    pending_complete: &Mutex<Option<StreamEvent>>,
 ) -> Option<Result<StreamEvent, ApiError>> {
     let v: serde_json::Value = match serde_json::from_str(data) {
         Ok(v) => v,
@@ -391,45 +585,17 @@ fn parse_openai_chunk(
         .and_then(|f| f.as_str());
 
     // Extract usage if present (final chunk)
-    if let Some(usage) = v.get("usage") {
-        let prompt = usage
+    if let Some(usage_val) = v.get("usage") {
+        let prompt = usage_val
             .get("prompt_tokens")
             .and_then(|t| t.as_u64())
             .unwrap_or(0);
-        let output = usage
+        let output = usage_val
             .get("completion_tokens")
             .and_then(|t| t.as_u64())
             .unwrap_or(0);
         if prompt > 0 || output > 0 {
-            // Extract cache details from prompt_tokens_details
-            let (cached_read, cached_write) = usage
-                .get("prompt_tokens_details")
-                .map(|d| {
-                    let cr = d.get("cached_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
-                    let cw = d
-                        .get("cache_write_tokens")
-                        .and_then(|t| t.as_u64())
-                        .unwrap_or(0);
-                    (cr, cw)
-                })
-                .unwrap_or((0, 0));
-
-            // Extract reasoning tokens from completion_tokens_details
-            let reasoning = usage
-                .get("completion_tokens_details")
-                .and_then(|d| d.get("reasoning_tokens"))
-                .and_then(|t| t.as_u64())
-                .unwrap_or(0);
-
-            // OpenAI's prompt_tokens includes cached tokens AND cache writes.
-            // Subtract both to get the non-cached input portion.
-            // Matches hermes-agent normalize_usage() behavior.
-            let input_non_cached = prompt.saturating_sub(cached_read + cached_write);
-
-            // output_tokens is the raw completion_tokens — reasoning_tokens
-            // is a *subset* of output for display purposes only (no split).
-            // Matches hermes-agent where output_tokens = completion_tokens.
-            let output_total = output;
+            let usage = parse_usage_from_value(usage_val);
 
             // Use finish_reason from this chunk if present, otherwise drain
             // the pending_reason cache (providers like DeepSeek send
@@ -447,16 +613,34 @@ fn parse_openai_chunk(
                     .unwrap_or(StopReason::EndTurn)
                 }
             };
-            return Some(Ok(StreamEvent::MessageComplete {
-                stop_reason,
-                usage: Usage {
-                    input_tokens: input_non_cached,
-                    output_tokens: output_total,
-                    cache_read_input_tokens: cached_read,
-                    cache_creation_input_tokens: cached_write,
-                    reasoning_tokens: reasoning,
-                },
-            }));
+
+            let complete_event = StreamEvent::MessageComplete { stop_reason, usage };
+
+            // Check if this chunk's delta also has content/reasoning that
+            // needs to be emitted first (non-standard but common with Gemini
+            // proxies that send usage + content in the same SSE chunk).
+            let delta_has_content = v
+                .get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("delta"))
+                .is_some_and(|d| {
+                    d.get("content")
+                        .and_then(|c| c.as_str())
+                        .is_some_and(|s| !s.is_empty())
+                        || d.get("reasoning_content")
+                            .and_then(|c| c.as_str())
+                            .is_some_and(|s| !s.is_empty())
+                });
+
+            if delta_has_content {
+                // Buffer the MessageComplete — delta content will be emitted
+                // on this pass, and the buffer is drained on [DONE].
+                if let Ok(mut pc) = pending_complete.lock() {
+                    *pc = Some(complete_event);
+                }
+            } else {
+                return Some(Ok(complete_event));
+            }
         }
     }
 
@@ -559,18 +743,20 @@ fn parse_openai_chunk(
         }
     }
 
+    // Reasoning content (DeepSeek/Kimi/Gemini thinking mode) —
+    // check before text content so both are emitted when co-occurring
+    // in the same chunk (reasoning is logically first).
+    if let Some(rc) = delta.get("reasoning_content").and_then(|c| c.as_str())
+        && !rc.is_empty()
+    {
+        return Some(Ok(StreamEvent::ReasoningDelta(rc.to_string())));
+    }
+
     // Text content
     if let Some(content) = delta.get("content").and_then(|c| c.as_str())
         && !content.is_empty()
     {
         return Some(Ok(StreamEvent::TextDelta(content.to_string())));
-    }
-
-    // Reasoning content (DeepSeek/Kimi thinking mode)
-    if let Some(rc) = delta.get("reasoning_content").and_then(|c| c.as_str())
-        && !rc.is_empty()
-    {
-        return Some(Ok(StreamEvent::ReasoningDelta(rc.to_string())));
     }
 
     // Finish reason without usage — cache it for later merging with usage
@@ -761,12 +947,17 @@ mod tests {
         Mutex::new(None)
     }
 
+    fn make_pending_complete() -> Mutex<Option<StreamEvent>> {
+        Mutex::new(None)
+    }
+
     #[test]
     fn test_parse_openai_chunk_text_delta() {
         let mut id_map = HashMap::new();
         let pending = make_pending();
+        let pending_complete = make_pending_complete();
         let data = r#"{"choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}"#;
-        let result = parse_openai_chunk(data, &mut id_map, &pending);
+        let result = parse_openai_chunk(data, &mut id_map, &pending, &pending_complete);
         assert!(result.is_some());
         match result.unwrap() {
             Ok(StreamEvent::TextDelta(text)) => assert_eq!(text, "hello"),
@@ -778,8 +969,9 @@ mod tests {
     fn test_parse_openai_chunk_tool_use_start() {
         let mut id_map = HashMap::new();
         let pending = make_pending();
+        let pending_complete = make_pending_complete();
         let data = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc","function":{"name":"read","arguments":"{\"path\":\"main.rs\"}"}}]},"finish_reason":null}]}"#;
-        let result = parse_openai_chunk(data, &mut id_map, &pending);
+        let result = parse_openai_chunk(data, &mut id_map, &pending, &pending_complete);
         assert!(result.is_some());
         match result.unwrap() {
             Ok(StreamEvent::ToolUseStart {
@@ -800,8 +992,9 @@ mod tests {
         let mut id_map = HashMap::new();
         id_map.insert(0, "call_abc".into());
         let pending = make_pending();
+        let pending_complete = make_pending_complete();
         let data = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"main.rs\"}"}}]},"finish_reason":null}]}"#;
-        let result = parse_openai_chunk(data, &mut id_map, &pending);
+        let result = parse_openai_chunk(data, &mut id_map, &pending, &pending_complete);
         assert!(result.is_some());
         match result.unwrap() {
             Ok(StreamEvent::ToolUseDelta { id, delta_json }) => {
@@ -816,8 +1009,9 @@ mod tests {
     fn test_parse_openai_chunk_usage() {
         let mut id_map = HashMap::new();
         let pending = make_pending();
+        let pending_complete = make_pending_complete();
         let data = r#"{"usage":{"prompt_tokens":10,"completion_tokens":20},"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
-        let result = parse_openai_chunk(data, &mut id_map, &pending);
+        let result = parse_openai_chunk(data, &mut id_map, &pending, &pending_complete);
         assert!(result.is_some());
         match result.unwrap() {
             Ok(StreamEvent::MessageComplete { stop_reason, usage }) => {
@@ -833,8 +1027,9 @@ mod tests {
     fn test_parse_openai_chunk_usage_with_cache() {
         let mut id_map = HashMap::new();
         let pending = make_pending();
+        let pending_complete = make_pending_complete();
         let data = r#"{"usage":{"prompt_tokens":100,"completion_tokens":30,"prompt_tokens_details":{"cached_tokens":40,"cache_write_tokens":10},"completion_tokens_details":{"reasoning_tokens":5}},"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#;
-        let result = parse_openai_chunk(data, &mut id_map, &pending);
+        let result = parse_openai_chunk(data, &mut id_map, &pending, &pending_complete);
         assert!(result.is_some());
         match result.unwrap() {
             Ok(StreamEvent::MessageComplete { stop_reason, usage }) => {
@@ -853,15 +1048,16 @@ mod tests {
     fn test_parse_openai_chunk_deepseek_pending_reason() {
         let mut id_map = HashMap::new();
         let pending = make_pending();
+        let pending_complete = make_pending_complete();
 
         // First chunk: finish_reason without usage
         let chunk1 = r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
-        let result1 = parse_openai_chunk(chunk1, &mut id_map, &pending);
+        let result1 = parse_openai_chunk(chunk1, &mut id_map, &pending, &pending_complete);
         assert!(result1.is_none(), "finish-reason-only chunk caches reason");
 
         // Second chunk: usage without finish_reason
         let chunk2 = r#"{"usage":{"prompt_tokens":5,"completion_tokens":10},"choices":[{"index":0,"delta":{}}]}"#;
-        let result2 = parse_openai_chunk(chunk2, &mut id_map, &pending);
+        let result2 = parse_openai_chunk(chunk2, &mut id_map, &pending, &pending_complete);
         assert!(result2.is_some());
         match result2.unwrap() {
             Ok(StreamEvent::MessageComplete { stop_reason, usage }) => {
@@ -877,7 +1073,8 @@ mod tests {
     fn test_parse_openai_chunk_invalid_json() {
         let mut id_map = HashMap::new();
         let pending = make_pending();
-        let result = parse_openai_chunk("not json", &mut id_map, &pending);
+        let pending_complete = make_pending_complete();
+        let result = parse_openai_chunk("not json", &mut id_map, &pending, &pending_complete);
         assert!(result.is_some());
         assert!(result.unwrap().is_err());
     }
@@ -886,8 +1083,9 @@ mod tests {
     fn test_parse_openai_chunk_empty_choices() {
         let mut id_map = HashMap::new();
         let pending = make_pending();
+        let pending_complete = make_pending_complete();
         let data = r#"{"choices":[],"usage":null}"#;
-        let result = parse_openai_chunk(data, &mut id_map, &pending);
+        let result = parse_openai_chunk(data, &mut id_map, &pending, &pending_complete);
         assert!(result.is_none());
     }
 }

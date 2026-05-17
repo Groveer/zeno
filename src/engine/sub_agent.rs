@@ -592,7 +592,10 @@ async fn run_single_sub_agent(
         }
 
         // Empty response
-        if assistant_text.trim().is_empty() && collected_tool_uses.is_empty() {
+        if assistant_text.trim().is_empty()
+            && reasoning_text.trim().is_empty()
+            && collected_tool_uses.is_empty()
+        {
             if auto_continue_count < deps.delegation_config.max_auto_continue {
                 auto_continue_count += 1;
                 let _ = progress_tx.send(SubAgentEvent::Status {
