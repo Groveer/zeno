@@ -22,7 +22,7 @@
 
 use std::path::Path;
 
-use crate::config::settings::RoleConfig;
+use crate::config::settings::{IdentityConfig, RoleConfig};
 use crate::prompts::claudemd;
 use crate::prompts::context::RuntimeContext;
 use crate::skills::registry::SkillRegistry;
@@ -32,16 +32,32 @@ use crate::tools::base::ToolRegistry;
 ///
 /// When `memory_block` is Some, memory guidance + the frozen snapshot are
 /// injected at the end, after project instructions.
+///
+/// When `active_identity` is Some, its fields override the corresponding
+/// `role_config` fields for identity and guidelines.
 pub fn build(
     cwd: &Path,
     tool_registry: &ToolRegistry,
     skill_registry: &SkillRegistry,
     memory_block: Option<&str>,
     role_config: &RoleConfig,
+    active_identity: Option<&IdentityConfig>,
 ) -> String {
+    // Merge: identity fields override role_config when active_identity is set
+    let effective_role = match active_identity {
+        Some(id) => RoleConfig {
+            identity: id.identity.clone().or_else(|| role_config.identity.clone()),
+            guidelines: id
+                .guidelines
+                .clone()
+                .or_else(|| role_config.guidelines.clone()),
+        },
+        None => role_config.clone(),
+    };
+
     let mut parts = vec![
-        core_identity(role_config),
-        guidelines(role_config),
+        core_identity(&effective_role),
+        guidelines(&effective_role),
         tools_block(&tool_registry.names()),
     ];
 
@@ -715,6 +731,7 @@ mod tests {
             &skill_registry,
             None,
             &role,
+            None,
         );
         assert!(
             prompt.contains("Scope searches to the project structure"),
@@ -738,6 +755,7 @@ mod tests {
             &skill_registry,
             None,
             &role,
+            None,
         );
         // /tmp has no build files, so build_system should be absent
         assert!(

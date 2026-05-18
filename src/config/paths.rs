@@ -24,10 +24,15 @@ pub fn memory_dir() -> PathBuf {
     config_dir().join("memory")
 }
 
-/// Returns the path to the user profile file (`~/.config/zeno/USER.md`).
-/// USER.md is stored alongside init.lua in the config directory.
-pub fn user_profile_path() -> PathBuf {
-    config_dir().join("USER.md")
+/// Returns the memory directory for a specific identity.
+/// When `identity` is Some, returns `~/.config/zeno/memory/{identity}/`.
+/// When None, returns the global `~/.config/zeno/memory/` (backward compatible).
+pub fn memory_dir_for_identity(identity: Option<&str>) -> PathBuf {
+    let base = memory_dir();
+    match identity {
+        Some(id) if !id.is_empty() => base.join(id),
+        _ => base,
+    }
 }
 
 /// Returns the data directory for zeno (memory, sessions, etc.).
@@ -95,5 +100,70 @@ pub fn cleanup_old_logs(retention_days: u64) {
                 let _ = std::fs::remove_file(&path);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_memory_dir_for_identity_none() {
+        let result = memory_dir_for_identity(None);
+        let expected = memory_dir();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_memory_dir_for_identity_empty() {
+        let result = memory_dir_for_identity(Some(""));
+        let expected = memory_dir();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_memory_dir_for_identity_some() {
+        let result = memory_dir_for_identity(Some("dev"));
+        let expected = memory_dir().join("dev");
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_memory_dir_for_identity_with_special_chars() {
+        let result = memory_dir_for_identity(Some("my-identity_v2"));
+        let expected = memory_dir().join("my-identity_v2");
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_memory_dir_for_identity_with_spaces() {
+        // Spaces in identity names should be allowed
+        let result = memory_dir_for_identity(Some("my identity"));
+        let expected = memory_dir().join("my identity");
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_config_dir_is_absolute() {
+        let dir = config_dir();
+        assert!(dir.is_absolute(), "config_dir should return an absolute path");
+    }
+
+    #[test]
+    fn test_memory_dir_is_absolute() {
+        let dir = memory_dir();
+        assert!(dir.is_absolute(), "memory_dir should return an absolute path");
+    }
+
+    #[test]
+    fn test_data_dir_is_absolute() {
+        let dir = data_dir();
+        assert!(dir.is_absolute(), "data_dir should return an absolute path");
+    }
+
+    #[test]
+    fn test_log_dir_is_absolute() {
+        let dir = log_dir();
+        assert!(dir.is_absolute(), "log_dir should return an absolute path");
     }
 }

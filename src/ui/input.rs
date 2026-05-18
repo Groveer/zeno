@@ -20,8 +20,22 @@ use super::theme;
 
 /// All slash commands supported by the TUI, with short aliases first.
 const COMMANDS: &[&str] = &[
-    "/clear", "/compact", "/cost", "/exit", "/goal", "/help", "/mcp", "/memory", "/model", "/quit",
-    "/restore", "/search", "/skills", "/tools",
+    "/clear",
+    "/compact",
+    "/cost",
+    "/exit",
+    "/goal",
+    "/help",
+    "/hooks",
+    "/identity",
+    "/mcp",
+    "/memory",
+    "/model",
+    "/quit",
+    "/restore",
+    "/search",
+    "/skills",
+    "/tools",
 ];
 
 /// Maximum number of items shown in the completion popup.
@@ -37,6 +51,10 @@ const MAX_PERSISTED_HISTORY: usize = 2000;
 enum CompletionType {
     /// Slash command completion (e.g., "/he" -> "/help")
     Command,
+    /// Command argument completion (e.g., "/identity de" -> "/identity dev").
+    /// `cmd_len` is the byte length of the command prefix including trailing space
+    /// (e.g., "/identity ".len() = 10). The popup replaces text from `cmd_len` to cursor.
+    CommandArg { cmd_len: usize },
     /// File path completion (e.g., "src/" -> ["src/main.rs", "src/lib.rs"])
     Path {
         /// The token prefix being completed (e.g., "src/")
@@ -74,6 +92,15 @@ impl CompletionPopup {
             selected: 0,
             scroll: 0,
             completion_type: CompletionType::Path { prefix, start },
+        }
+    }
+
+    fn new_command_arg(matches: Vec<String>, cmd_len: usize) -> Self {
+        Self {
+            matches,
+            selected: 0,
+            scroll: 0,
+            completion_type: CompletionType::CommandArg { cmd_len },
         }
     }
 
@@ -141,6 +168,9 @@ pub struct InputState {
     /// corresponding (media_type, base64_data) entry here, in the same order
     /// as they appear in the text buffer.
     pub(crate) images: Vec<(String, String)>,
+    /// Available identity names for `/identity` argument completion.
+    /// Populated by `App` from settings at startup and on config reload.
+    pub(crate) identity_names: Vec<String>,
 }
 
 impl InputState {
@@ -156,6 +186,7 @@ impl InputState {
             history_index: None,
             draft: None,
             images: Vec::new(),
+            identity_names: Vec::new(),
         }
     }
 
@@ -542,23 +573,8 @@ impl InputState {
             }
             return;
         }
-
-        // Command completion first (text starts with /)
-        if self.text.starts_with('/') && self.cursor == self.text.len() {
-            let matches = Self::find_command_matches(&self.text);
-            if !matches.is_empty() {
-                self.popup = Some(CompletionPopup::new_command(matches));
-                return;
-            }
-        }
-
-        // Path completion fallback
-        if let Some((prefix, start)) = self.extract_path_prefix() {
-            let matches = Self::find_path_matches(&prefix);
-            if !matches.is_empty() {
-                self.popup = Some(CompletionPopup::new_path(matches, prefix, start));
-            }
-        }
+        // No popup open — delegate to update_popup to create one
+        self.update_popup();
     }
 
     /// Open the popup or cycle selection backwards if already open.
@@ -570,23 +586,8 @@ impl InputState {
             }
             return;
         }
-
-        // Command completion first (text starts with /)
-        if self.text.starts_with('/') && self.cursor == self.text.len() {
-            let matches = Self::find_command_matches(&self.text);
-            if !matches.is_empty() {
-                self.popup = Some(CompletionPopup::new_command(matches));
-                return;
-            }
-        }
-
-        // Path completion fallback
-        if let Some((prefix, start)) = self.extract_path_prefix() {
-            let matches = Self::find_path_matches(&prefix);
-            if !matches.is_empty() {
-                self.popup = Some(CompletionPopup::new_path(matches, prefix, start));
-            }
-        }
+        // No popup open — delegate to update_popup to create one
+        self.update_popup();
     }
 
     /// Handle keys when popup is open.
@@ -692,6 +693,12 @@ impl InputState {
                     self.text = selected.to_string();
                     self.cursor = self.text.len();
                 }
+                CompletionType::CommandArg { cmd_len } => {
+                    // Argument: replace text from cmd_len to cursor
+                    let cmd_len = *cmd_len;
+                    self.text.replace_range(cmd_len..self.cursor, selected);
+                    self.cursor = cmd_len + selected.len();
+                }
                 CompletionType::Path { prefix: _, start } => {
                     // Path: replace only the path token portion
                     let start = *start;
@@ -706,41 +713,44 @@ impl InputState {
 
     /// Update popup matches based on current text (auto-show/hide).
     fn update_popup(&mut self) {
-        // Command completion first (text starts with /)
-        if self.text.starts_with('/') && self.cursor == self.text.len() {
-            let matches = Self::find_command_matches(&self.text);
-            if matches.is_empty() {
-                self.popup = None;
-            } else if let Some(ref mut popup) = self.popup {
-                let prev = popup.selected_item().map(String::from);
-                popup.matches = matches;
-                popup.scroll = 0;
-                if let Some(ref prev) = prev {
-                    if let Some(idx) = popup.matches.iter().position(|c| c == prev) {
-                        popup.selected = idx;
-                        if popup.selected >= MAX_POPUP_ITEMS {
-                            popup.scroll = popup.selected - MAX_POPUP_ITEMS + 1;
+        if !self.text.starts_with('/') || self.cursor != self.text.len() {
+            // Not a slash command at cursor — try path completion
+            if let Some((prefix, start)) = self.extract_path_prefix() {
+                let matches = Self::find_path_matches(&prefix);
+                if matches.is_empty() {
+                    self.popup = None;
+                } else if let Some(ref mut popup) = self.popup {
+                    let prev = popup.selected_item().map(String::from);
+                    popup.matches = matches;
+                    popup.scroll = 0;
+                    if let Some(ref prev) = prev {
+                        if let Some(idx) = popup.matches.iter().position(|c| c == prev) {
+                            popup.selected = idx;
+                            if popup.selected >= MAX_POPUP_ITEMS {
+                                popup.scroll = popup.selected - MAX_POPUP_ITEMS + 1;
+                            }
+                        } else {
+                            popup.selected = 0;
                         }
                     } else {
                         popup.selected = 0;
                     }
                 } else {
-                    popup.selected = 0;
+                    self.popup = Some(CompletionPopup::new_path(matches, prefix, start));
                 }
             } else {
-                self.popup = Some(CompletionPopup::new_command(matches));
+                self.popup = None;
             }
             return;
         }
 
-        // Path completion
-        if let Some((prefix, start)) = self.extract_path_prefix() {
-            let matches = Self::find_path_matches(&prefix);
-            if matches.is_empty() {
-                self.popup = None;
-            } else if let Some(ref mut popup) = self.popup {
+        // Slash command at cursor — check for argument completion first
+        if let Some(matches) = self.find_command_arg_matches() {
+            let cmd_len = matches.1;
+            let items = matches.0;
+            if let Some(ref mut popup) = self.popup {
                 let prev = popup.selected_item().map(String::from);
-                popup.matches = matches;
+                popup.matches = items;
                 popup.scroll = 0;
                 if let Some(ref prev) = prev {
                     if let Some(idx) = popup.matches.iter().position(|c| c == prev) {
@@ -755,10 +765,33 @@ impl InputState {
                     popup.selected = 0;
                 }
             } else {
-                self.popup = Some(CompletionPopup::new_path(matches, prefix, start));
+                self.popup = Some(CompletionPopup::new_command_arg(items, cmd_len));
+            }
+            return;
+        }
+
+        // Full command completion
+        let matches = Self::find_command_matches(&self.text);
+        if matches.is_empty() {
+            self.popup = None;
+        } else if let Some(ref mut popup) = self.popup {
+            let prev = popup.selected_item().map(String::from);
+            popup.matches = matches;
+            popup.scroll = 0;
+            if let Some(ref prev) = prev {
+                if let Some(idx) = popup.matches.iter().position(|c| c == prev) {
+                    popup.selected = idx;
+                    if popup.selected >= MAX_POPUP_ITEMS {
+                        popup.scroll = popup.selected - MAX_POPUP_ITEMS + 1;
+                    }
+                } else {
+                    popup.selected = 0;
+                }
+            } else {
+                popup.selected = 0;
             }
         } else {
-            self.popup = None;
+            self.popup = Some(CompletionPopup::new_command(matches));
         }
     }
 
@@ -769,6 +802,36 @@ impl InputState {
             .filter(|c| c.starts_with(prefix))
             .map(|c| c.to_string())
             .collect()
+    }
+
+    /// Find argument completions for commands that support them.
+    /// Returns `Some((matches, cmd_len))` if the current text is a command
+    /// with an argument prefix, or `None` if no argument completion applies.
+    ///
+    /// `cmd_len` is the byte length of the command prefix including the
+    /// trailing space (e.g., "/identity ".len() = 10).
+    fn find_command_arg_matches(&self) -> Option<(Vec<String>, usize)> {
+        // Only works when cursor is at end
+        if self.cursor != self.text.len() {
+            return None;
+        }
+        let text = &self.text;
+
+        // /identity [arg]
+        let prefix = "/identity ";
+        if let Some(arg_prefix) = text.strip_prefix(prefix) {
+            let matches: Vec<String> = self
+                .identity_names
+                .iter()
+                .filter(|n| n.starts_with(arg_prefix))
+                .cloned()
+                .collect();
+            if !matches.is_empty() || !arg_prefix.is_empty() {
+                return Some((matches, prefix.len()));
+            }
+        }
+
+        None
     }
 
     /// Extract the path token being typed at the cursor position.
@@ -1095,7 +1158,7 @@ pub fn render(
     };
 
     // Available width for text (excluding prompt)
-    let prompt_display_width: u16 = crate::utils::display_width(&prompt) as u16;
+    let prompt_display_width: u16 = crate::utils::display_width(prompt) as u16;
     let text_area_width = content_area.width.saturating_sub(prompt_display_width);
 
     // Compute horizontal scroll offset for the current line

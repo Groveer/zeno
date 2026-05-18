@@ -15,8 +15,8 @@ use mlua::{Lua, LuaOptions, LuaSerdeExt, StdLib, Value};
 
 use super::paths;
 use super::settings::{
-    AuxiliaryConfig, DelegationConfig, EngineConfig, McpServerConfig, PermissionMode,
-    ProviderConfig, Settings, SkillsConfig, ToolsConfig, WebSearchConfig,
+    AuxiliaryConfig, DelegationConfig, EngineConfig, IdentityConfig, McpServerConfig,
+    PermissionMode, ProviderConfig, Settings, SkillsConfig, ToolsConfig, WebSearchConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -265,7 +265,14 @@ fn load_lua(
     }
 
     // 6. Build Settings from defaults + overrides
-    let settings = build_settings(&lua)?;
+    let mut settings = build_settings(&lua)?;
+
+    // 6b. ZENO_IDENTITY env var overrides active_identity
+    if let Ok(env_id) = std::env::var("ZENO_IDENTITY")
+        && !env_id.is_empty()
+    {
+        settings.active_identity = Some(env_id);
+    }
 
     // 7. Validate
     validate(&settings)?;
@@ -356,6 +363,21 @@ fn build_settings(lua: &Lua) -> anyhow::Result<Settings> {
         {
             settings.role.guidelines = Some(v);
         }
+    }
+
+    // --- identities ---
+    if let Ok(identities_table) = overrides.get::<mlua::Table>("identities") {
+        match lua.from_value::<HashMap<String, IdentityConfig>>(Value::Table(identities_table)) {
+            Ok(val) => settings.identities = val,
+            Err(e) => tracing::warn!(error = %e, "Failed to parse identities from Lua config"),
+        }
+    }
+
+    // --- active_identity ---
+    if let Ok(v) = overrides.get::<String>("active_identity")
+        && !v.is_empty()
+    {
+        settings.active_identity = Some(v);
     }
 
     // --- web_search_config ---
@@ -609,6 +631,31 @@ fn register_zeno_api(lua: &Lua, table: &mlua::Table) -> anyhow::Result<()> {
                 .unwrap_or_else(|_| lua.create_table().unwrap());
             role.set("guidelines", text)?;
             get_overrides(lua)?.set("role", role)?;
+            Ok(())
+        })?,
+    )?;
+
+    // --- Identity ---
+    // zn.def_identity("dev", { identity = "你是 Rust 开发者...", guidelines = "..." })
+    // Defines a named identity that can be activated at runtime or via zn.set_identity().
+    table.set(
+        "def_identity",
+        lua.create_function(move |lua, (name, opts): (String, mlua::Table)| {
+            let identities: mlua::Table = get_overrides(lua)?
+                .get::<mlua::Table>("identities")
+                .unwrap_or_else(|_| lua.create_table().unwrap());
+            identities.set(name, opts)?;
+            get_overrides(lua)?.set("identities", identities)?;
+            Ok(())
+        })?,
+    )?;
+
+    // zn.set_identity("dev")
+    // Sets the active identity (overrides role config at system prompt build time).
+    table.set(
+        "set_identity",
+        lua.create_function(move |lua, name: String| {
+            get_overrides(lua)?.set("active_identity", name)?;
             Ok(())
         })?,
     )?;

@@ -56,6 +56,16 @@ pub struct Settings {
     /// Extra paths that are always allowed (in addition to /tmp and /var/tmp).
     #[serde(default)]
     pub safe_paths: Vec<String>,
+    /// Named identities defined via `zn.identity("name", {...})` in init.lua.
+    /// Each identity provides custom `identity` and `guidelines` that override
+    /// the default `RoleConfig` when activated.
+    #[serde(default)]
+    pub identities: HashMap<String, IdentityConfig>,
+    /// Currently active identity name. When set, the corresponding
+    /// `IdentityConfig` overrides `RoleConfig` for system prompt building.
+    /// Set via `zn.set_identity("name")` or `ZENO_IDENTITY` env var.
+    #[serde(default)]
+    pub active_identity: Option<String>,
 }
 
 impl Default for Settings {
@@ -83,6 +93,8 @@ impl Default for Settings {
             response_format: None,
             engine: EngineConfig::default(),
             safe_paths: Vec::new(),
+            identities: HashMap::new(),
+            active_identity: None,
         }
     }
 }
@@ -236,6 +248,20 @@ impl Default for ToolsConfig {
 // ---------------------------------------------------------------------------
 // Role (identity/persona)
 // ---------------------------------------------------------------------------
+
+/// Configuration for a named identity (persona).
+///
+/// Each identity overrides the default `RoleConfig` fields when activated.
+/// Defined via `zn.identity("name", { identity = "...", guidelines = "..." })` in init.lua.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct IdentityConfig {
+    /// Custom identity text (overrides `RoleConfig.identity`).
+    #[serde(default)]
+    pub identity: Option<String>,
+    /// Custom guidelines text (overrides `RoleConfig.guidelines`).
+    #[serde(default)]
+    pub guidelines: Option<String>,
+}
 
 /// Customizable role sections for the system prompt.
 /// All fields are optional — `None` means use the built-in default text.
@@ -420,6 +446,80 @@ mod tests {
     fn test_resolve_provider_api_key_missing() {
         let provider = ProviderConfig::default();
         assert!(resolve_api_key(&provider).is_err());
+    }
+
+    #[test]
+    fn test_identity_config_deserialization() {
+        // Test IdentityConfig with both fields
+        let json = r#"{"identity": "You are a Rust developer", "guidelines": "Use idiomatic Rust"}"#;
+        let config: IdentityConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.identity.as_deref(), Some("You are a Rust developer"));
+        assert_eq!(config.guidelines.as_deref(), Some("Use idiomatic Rust"));
+
+        // Test IdentityConfig with only identity field
+        let json = r#"{"identity": "You are a Python developer"}"#;
+        let config: IdentityConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.identity.as_deref(), Some("You are a Python developer"));
+        assert_eq!(config.guidelines, None);
+
+        // Test IdentityConfig with only guidelines field
+        let json = r#"{"guidelines": "Follow PEP 8"}"#;
+        let config: IdentityConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.identity, None);
+        assert_eq!(config.guidelines.as_deref(), Some("Follow PEP 8"));
+
+        // Test empty IdentityConfig
+        let json = r#"{}"#;
+        let config: IdentityConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.identity, None);
+        assert_eq!(config.guidelines, None);
+    }
+
+    #[test]
+    fn test_identity_config_default() {
+        let config = IdentityConfig::default();
+        assert_eq!(config.identity, None);
+        assert_eq!(config.guidelines, None);
+    }
+
+    #[test]
+    fn test_settings_with_identities() {
+        let json = r#"{
+            "active_identity": "dev",
+            "identities": {
+                "dev": {
+                    "identity": "You are a Rust developer",
+                    "guidelines": "Use idiomatic Rust"
+                },
+                "reviewer": {
+                    "identity": "You are a code reviewer"
+                }
+            }
+        }"#;
+        let settings: Settings = serde_json::from_str(json).unwrap();
+        
+        assert_eq!(settings.active_identity.as_deref(), Some("dev"));
+        assert_eq!(settings.identities.len(), 2);
+        
+        let dev = settings.identities.get("dev").unwrap();
+        assert_eq!(dev.identity.as_deref(), Some("You are a Rust developer"));
+        assert_eq!(dev.guidelines.as_deref(), Some("Use idiomatic Rust"));
+        
+        let reviewer = settings.identities.get("reviewer").unwrap();
+        assert_eq!(reviewer.identity.as_deref(), Some("You are a code reviewer"));
+        assert_eq!(reviewer.guidelines, None);
+    }
+
+    #[test]
+    fn test_settings_with_empty_identities() {
+        let json = r#"{
+            "active_identity": null,
+            "identities": {}
+        }"#;
+        let settings: Settings = serde_json::from_str(json).unwrap();
+        
+        assert_eq!(settings.active_identity, None);
+        assert!(settings.identities.is_empty());
     }
 }
 // ---------------------------------------------------------------------------

@@ -22,6 +22,8 @@ pub struct StatusInfo {
     pub mode: AppMode,
     /// Number of queued "steer" messages (user input while agent is running).
     pub steer_count: usize,
+    /// Currently active identity name (shown in status bar when set).
+    pub active_identity: Option<String>,
 }
 
 /// Format a number with SI-like abbreviations: 1.2K, 3.4M, etc.
@@ -58,6 +60,14 @@ pub fn render(frame: &mut Frame, area: Rect, info: &StatusInfo) {
         format!(" {}:{} ", info.provider, info.model),
         Style::new().fg(model_color).bg(theme::SURFACE),
     ));
+
+    // Active identity (if set)
+    if let Some(ref id) = info.active_identity {
+        spans.push(Span::styled(
+            format!("[{}] ", id),
+            Style::new().fg(theme::ACCENT).bg(theme::SURFACE),
+        ));
+    }
 
     // Separator
     spans.push(Span::styled(" │ ", Style::new().fg(dim)));

@@ -75,7 +75,7 @@ fn truncate_str(s: &str, max_width: usize) -> String {
 
 /// The main TUI application state.
 pub struct App {
-    input: InputState,
+    pub(crate) input: InputState,
     pub(crate) output: OutputState,
     mode: AppMode,
     pub(crate) status: StatusInfo,
@@ -155,6 +155,7 @@ impl App {
                 skill_count: 0,
                 mode: AppMode::Idle,
                 steer_count: 0,
+                active_identity: None,
             },
             event_rx,
             event_tx,

@@ -21,12 +21,19 @@ use config::settings::ProviderConfig;
 use engine::messages::ConversationHistory;
 use engine::query_engine::QueryEngine;
 use memory::provider::MemoryProvider;
+use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tools::base::ToolRegistry;
 use ui::status_bar::AppMode;
+
+/// Regex for matching image file paths in query text.
+/// Matches paths ending in common image extensions (png, jpg, jpeg, gif, webp, bmp).
+static IMAGE_PATH_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)(?:^|\s)([\w.\-/\\]+\.(?:png|jpe?g|gif|webp|bmp))(?:\s|$)").unwrap()
+});
 
 // ---------------------------------------------------------------------------
 // Slash command dispatch
@@ -78,7 +85,11 @@ fn dispatch_command(input: &str) -> CommandAction {
             let arg = s.strip_prefix("/goal").unwrap_or("").trim().to_string();
             CommandAction::NeedEngine("goal", arg)
         }
-        // Unknown slash command  send to LLM
+        s if s.starts_with("/identity") => {
+            let arg = s.strip_prefix("/identity").unwrap_or("").trim().to_string();
+            CommandAction::NeedEngine("identity", arg)
+        }
+        // Unknown slash command  send to LLM
         _ => CommandAction::Query,
     }
 }
@@ -116,6 +127,12 @@ const HELP_TEXT: &str = "\
 - `/goal pause` — Pause goal
 - `/goal resume` — Resume goal
 
+**Identity**
+- `/identity` — Show current identity
+- `/identity [name]` — Switch to named identity
+- `/identity clear` — Clear identity (use default role)
+- `/identity none` — Same as clear
+
 ## Navigation
 
 - `/` — History (input) or scroll (output)
@@ -140,7 +157,7 @@ fn send_text_response(sender: &engine::tui_events::UiSender, text: &str) {
 fn handle_goal(eng: &mut QueryEngine, arg: &str) -> String {
     if arg.is_empty() || arg == "status" {
         if eng.carryover.has_pending_goal() {
-            format!(" Goal (active): {}", eng.carryover.task_focus.goal)
+            format!(" Goal (active): {}", eng.carryover.task_focus.goal)
         } else {
             "No active goal. Use /goal <text> to set one.".to_string()
         }
@@ -148,7 +165,7 @@ fn handle_goal(eng: &mut QueryEngine, arg: &str) -> String {
         let had = eng.carryover.has_pending_goal();
         eng.carryover.clear_goal();
         if had {
-            " Goal cleared.".to_string()
+            " Goal cleared.".to_string()
         } else {
             "No active goal.".to_string()
         }
@@ -156,7 +173,7 @@ fn handle_goal(eng: &mut QueryEngine, arg: &str) -> String {
         if eng.carryover.has_pending_goal() {
             let goal_text = eng.carryover.task_focus.goal.clone();
             eng.carryover.clear_goal();
-            format!(" Goal paused: {}", goal_text)
+            format!("⏸ Goal paused: {}", goal_text)
         } else {
             "No active goal to pause.".to_string()
         }
@@ -164,16 +181,67 @@ fn handle_goal(eng: &mut QueryEngine, arg: &str) -> String {
         let last_goal = eng.carryover.task_focus.recent_goals.last().cloned();
         if let Some(last) = last_goal {
             eng.carryover.set_goal(&last);
-            format!(" Goal resumed: {}", last)
+            format!("▶ Goal resumed: {}", last)
         } else {
             "No recent goal to resume.".to_string()
         }
     } else {
         eng.carryover.set_goal(arg);
-        format!(" Goal set: {}", arg)
+        format!(" Goal set: {}", arg)
     }
 }
 
+/// Rebuild system prompt and reload memory store after identity change.
+///
+/// This helper extracts the common logic shared between `/identity clear`
+/// and `/identity <name>` commands:
+/// 1. Build memory prompt from memory manager
+/// 2. Rebuild system prompt with optional identity override
+/// 3. Reload memory store from identity-scoped (or global) paths
+async fn rebuild_after_identity_change(
+    eng: &mut QueryEngine,
+    skill_registry: &Arc<tokio::sync::Mutex<skills::registry::SkillRegistry>>,
+    memory_store: &Arc<tokio::sync::Mutex<memory::store::MemoryStore>>,
+    settings: &settings::Settings,
+    identity_config: Option<&settings::IdentityConfig>,
+    identity_name: Option<&str>,
+) {
+    // 1. Build memory prompt
+    let memory_prompt = eng
+        .memory_manager
+        .as_ref()
+        .map(|mm| {
+            let mm_guard = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(mm.lock())
+            });
+            mm_guard.build_system_prompt()
+        })
+        .unwrap_or_default();
+
+    // 2. Rebuild system prompt with optional identity override
+    let skill_reg = skill_registry.lock().await;
+    let new_prompt = crate::prompts::system_prompt::build(
+        &eng.cwd,
+        &eng.tools,
+        &skill_reg,
+        Some(&memory_prompt),
+        &eng.settings.role,
+        identity_config,
+    );
+    drop(skill_reg);
+    eng.system_prompt = new_prompt;
+
+    // 3. Reload memory store from identity-scoped (or global) paths
+    let mem_dir = config::paths::memory_dir_for_identity(identity_name);
+    let mut store = memory_store.lock().await;
+    *store = memory::store::MemoryStore::new(
+        mem_dir.join("MEMORY.md"),
+        mem_dir.join("USER.md"),
+        settings.memory.memory_char_limit,
+        settings.memory.user_char_limit,
+    );
+    store.load_from_disk();
+}
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -311,9 +379,10 @@ async fn main() -> anyhow::Result<()> {
     // Resolve working directory early (needed for memory dir + skills + system prompt)
     let cwd = std::env::current_dir().unwrap_or_default();
 
-    // Initialize memory store — global paths only
-    let memory_dir = config::paths::memory_dir();
-    let user_profile_path = config::paths::user_profile_path();
+    // Initialize memory store — identity-scoped paths when active
+    let active_identity_name = settings.active_identity.as_deref();
+    let memory_dir = config::paths::memory_dir_for_identity(active_identity_name);
+    let user_profile_path = memory_dir.join("USER.md");
     let mut memory_store = memory::store::MemoryStore::new(
         memory_dir.join("MEMORY.md"),
         user_profile_path,
@@ -467,12 +536,17 @@ async fn main() -> anyhow::Result<()> {
     // Build system prompt — use memory manager for built-in + external provider content
     let memory_prompt = memory_manager.lock().await.build_system_prompt();
     let skill_registry_guard = skill_registry.lock().await;
+    let active_identity_config = settings
+        .active_identity
+        .as_deref()
+        .and_then(|name| settings.identities.get(name));
     let system_prompt = crate::prompts::system_prompt::build(
         &cwd,
         &registry,
         &skill_registry_guard,
         Some(&memory_prompt),
         &settings.role,
+        active_identity_config,
     );
     drop(skill_registry_guard);
     drop(memory_prompt);
@@ -496,6 +570,7 @@ async fn main() -> anyhow::Result<()> {
     engine.memory_manager = Some(memory_manager.clone());
     engine.hook_executor = hook_executor;
     engine.client_factory = Some(client_factory.clone());
+    engine.active_identity = settings.active_identity.clone();
 
     // Fire session_start hook
     if let Some(he) = &engine.hook_executor {
@@ -517,6 +592,8 @@ async fn main() -> anyhow::Result<()> {
     let engine = Arc::new(Mutex::new(engine));
 
     let mut app = ui::app::App::new();
+    // Populate identity names for /identity argument completion
+    app.input.identity_names = settings.identities.keys().cloned().collect();
     // Share the todo state so the TUI can render the side panel
     app.set_todo_state(todo_state);
     // Share the sub-agent progress sender with the engine so delegate_task
@@ -547,6 +624,7 @@ async fn main() -> anyhow::Result<()> {
         skill_count,
         mode: ui::status_bar::AppMode::Idle,
         steer_count: 0,
+        active_identity: settings.active_identity.clone(),
     });
 
     // Start config file watcher for hot-reload notification
@@ -837,6 +915,78 @@ async fn main() -> anyhow::Result<()> {
                         drop(eng);
                         send_text_response(&sender, &msg);
                     }
+                    "identity" => {
+                        let mut eng = engine.lock().await;
+                        if arg.is_empty() || arg == "status" {
+                            // Show current identity
+                            let msg = match &eng.active_identity {
+                                Some(name) => format!("Identity: {} (active)", name),
+                                None => "No active identity (using default role).".to_string(),
+                            };
+                            drop(eng);
+                            send_text_response(&sender, &msg);
+                        } else if arg == "none" || arg == "clear" {
+                            // Clear identity — revert to default role
+                            eng.active_identity = None;
+                            // Rebuild system prompt with default role
+                            rebuild_after_identity_change(
+                                &mut eng,
+                                &skill_registry,
+                                &memory_store,
+                                &settings,
+                                None,
+                                None,
+                            )
+                            .await;
+                            drop(eng);
+                            app.status.active_identity = None;
+                            app.mark_dirty();
+                            send_text_response(&sender, "Identity cleared — using default role.");
+                        } else {
+                            // Switch to named identity
+                            let identity_config = settings.identities.get(&arg).cloned();
+                            if let Some(identity_config) = identity_config {
+                                eng.active_identity = Some(arg.clone());
+                                // Rebuild system prompt with identity override
+                                rebuild_after_identity_change(
+                                    &mut eng,
+                                    &skill_registry,
+                                    &memory_store,
+                                    &settings,
+                                    Some(&identity_config),
+                                    Some(&arg),
+                                )
+                                .await;
+                                drop(eng);
+                                app.status.active_identity = Some(arg.clone());
+                                app.mark_dirty();
+                                send_text_response(
+                                    &sender,
+                                    &format!("Switched to identity: {}", arg),
+                                );
+                            } else {
+                                drop(eng);
+                                send_text_response(
+                                    &sender,
+                                    &format!(
+                                        "Unknown identity: '{}'. Available: {}",
+                                        arg,
+                                        if settings.identities.is_empty() {
+                                            "(none defined — use zn.def_identity() in init.lua)"
+                                                .to_string()
+                                        } else {
+                                            settings
+                                                .identities
+                                                .keys()
+                                                .cloned()
+                                                .collect::<Vec<_>>()
+                                                .join(", ")
+                                        }
+                                    ),
+                                );
+                            }
+                        }
+                    }
                     "hooks" => {
                         let eng = engine.lock().await;
                         let msg = if let Some(he) = &eng.hook_executor {
@@ -1074,10 +1224,7 @@ async fn main() -> anyhow::Result<()> {
                     // Auto-detect image file paths in the query text
                     let cleaned_text = {
                         // Use a simple word-boundary scan for paths ending in image extensions
-                        let re = Regex::new(
-                            r"(?i)(?:^|\s)([\w.\-/\\]+\.(?:png|jpe?g|gif|webp|bmp))(?:\s|$)",
-                        )
-                        .unwrap();
+                        let re = &*IMAGE_PATH_REGEX;
                         let mut text = query_text.clone();
                         let mut found_any = false;
                         for cap in re.captures_iter(&query_text) {

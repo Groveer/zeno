@@ -74,6 +74,9 @@ pub struct QueryEngine {
     pub rate_limiter: crate::tools::rate_limiter::SharedRateLimiter,
     /// Tool usage statistics collector.
     pub tool_stats: crate::tools::tool_stats::SharedToolStats,
+    /// Currently active identity name (if any). Used for runtime identity
+    /// switching via `/identity` command. When set, overrides settings.role.
+    pub active_identity: Option<String>,
 }
 
 /// Inject user text into a steer slot without interrupting the agent.
@@ -147,6 +150,7 @@ impl QueryEngine {
             tool_cache: crate::tools::cache::new_shared(),
             rate_limiter: crate::tools::rate_limiter::new_shared(),
             tool_stats: crate::tools::tool_stats::new_shared(),
+            active_identity: None,
         }
     }
 
