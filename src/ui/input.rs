@@ -171,6 +171,10 @@ pub struct InputState {
     /// Available identity names for `/identity` argument completion.
     /// Populated by `App` from settings at startup and on config reload.
     pub(crate) identity_names: Vec<String>,
+    /// Ghost text (inline autosuggestion) from input history.
+    /// Stores only the suffix to append — the part the user hasn't typed yet.
+    /// Displayed as dim shadow text after the cursor. Tab accepts it.
+    ghost_text: Option<String>,
 }
 
 impl InputState {
@@ -187,6 +191,7 @@ impl InputState {
             draft: None,
             images: Vec::new(),
             identity_names: Vec::new(),
+            ghost_text: None,
         }
     }
 
@@ -231,13 +236,25 @@ impl InputState {
                 self.text = "/exit".into();
                 true
             }
-            // Tab: open popup or cycle
+            // Tab: open popup or cycle, or accept ghost text
             KeyEvent {
                 code: KeyCode::Tab,
                 modifiers: KeyModifiers::NONE,
                 ..
             } => {
-                self.open_or_cycle_popup();
+                if self.popup.is_some() {
+                    // Popup is open — cycle selection
+                    if let Some(ref mut popup) = self.popup {
+                        popup.move_down();
+                    }
+                } else {
+                    // No popup — try to open one
+                    self.update_popup();
+                    // If still no popup, accept ghost text
+                    if self.popup.is_none() {
+                        self.accept_ghost_text();
+                    }
+                }
                 true
             }
             // Shift+Tab: open popup or cycle backwards
@@ -461,6 +478,7 @@ impl InputState {
         self.history_index = None;
         self.draft = None;
         self.images.clear();
+        self.ghost_text = None;
 
         // Persist history to disk after each submission
         save_history(&self.input_history);
@@ -476,6 +494,7 @@ impl InputState {
         self.popup = None;
         self.history_index = None;
         self.draft = None;
+        self.ghost_text = None;
     }
 
     // Multi-line cursor helpers
@@ -582,19 +601,6 @@ impl InputState {
 
     // Popup logic
 
-    /// Open the popup or cycle selection if already open.
-    fn open_or_cycle_popup(&mut self) {
-        if self.popup.is_some() {
-            // Cycle: move selection down
-            if let Some(ref mut popup) = self.popup {
-                popup.move_down();
-            }
-            return;
-        }
-        // No popup open — delegate to update_popup to create one
-        self.update_popup();
-    }
-
     /// Open the popup or cycle selection backwards if already open.
     fn open_or_cycle_popup_back(&mut self) {
         if self.popup.is_some() {
@@ -667,6 +673,7 @@ impl InputState {
                 code: KeyCode::Esc, ..
             } => {
                 self.popup = None;
+                self.compute_ghost_text();
                 true
             }
             // Continue typing — dismiss popup and process char
@@ -695,6 +702,7 @@ impl InputState {
             }
             _ => {
                 self.popup = None;
+                self.compute_ghost_text();
                 false
             }
         }
@@ -727,6 +735,52 @@ impl InputState {
             }
         }
         self.popup = None;
+        self.compute_ghost_text();
+    }
+
+    /// Compute ghost text (inline autosuggestion) from input history.
+    ///
+    /// Searches `input_history` for the most recent entry that starts with the
+    /// current text (and is longer). Stores the suffix as `ghost_text`.
+    /// Only works when the cursor is at the end of single-line text.
+    fn compute_ghost_text(&mut self) {
+        // Only show ghost text when:
+        // - text is non-empty (no suggestion for empty input)
+        // - cursor is at end
+        // - no popup is active
+        // - not in history navigation mode
+        if self.text.is_empty()
+            || self.cursor != self.text.len()
+            || self.popup.is_some()
+            || self.history_index.is_some()
+        {
+            self.ghost_text = None;
+            return;
+        }
+
+        // Don't show ghost text for slash commands (they have their own popup)
+        if self.text.starts_with('/') {
+            self.ghost_text = None;
+            return;
+        }
+
+        // Find the most recent history entry that starts with current text
+        for entry in &self.input_history {
+            if entry.len() > self.text.len() && entry.starts_with(&self.text) {
+                self.ghost_text = Some(entry[self.text.len()..].to_string());
+                return;
+            }
+        }
+        self.ghost_text = None;
+    }
+
+    /// Accept the current ghost text (Tab completion).
+    /// Appends the ghost suffix to the text and moves cursor to end.
+    fn accept_ghost_text(&mut self) {
+        if let Some(suffix) = self.ghost_text.take() {
+            self.text.push_str(&suffix);
+            self.cursor = self.text.len();
+        }
     }
 
     /// Update popup matches based on current text (auto-show/hide).
@@ -759,6 +813,7 @@ impl InputState {
             } else {
                 self.popup = None;
             }
+            self.compute_ghost_text();
             return;
         }
 
@@ -785,6 +840,7 @@ impl InputState {
             } else {
                 self.popup = Some(CompletionPopup::new_command_arg(items, cmd_len));
             }
+            self.compute_ghost_text();
             return;
         }
 
@@ -811,6 +867,7 @@ impl InputState {
         } else {
             self.popup = Some(CompletionPopup::new_command(matches));
         }
+        self.compute_ghost_text();
     }
 
     /// Find slash commands matching the given prefix.
@@ -1238,6 +1295,19 @@ pub fn render(
             Line::from(prefix_spans)
         })
         .collect();
+
+    // Append ghost text (inline autosuggestion) to the last line
+    let mut lines = lines;
+    if let Some(ref ghost) = state.ghost_text {
+        if !ghost.is_empty() {
+            if let Some(last_line) = lines.last_mut() {
+                last_line.spans.push(Span::styled(
+                    ghost.clone(),
+                    Style::new().fg(theme::TEXT_DIM),
+                ));
+            }
+        }
+    }
 
     let p = Paragraph::new(Text::from(lines)).style(Style::new().bg(theme::BG).fg(theme::TEXT));
 
@@ -1764,5 +1834,216 @@ mod tests {
         assert_eq!(snap_to_char_boundary(s, 7), 5); // inside '过', snap back
         assert_eq!(snap_to_char_boundary(s, 8), 8); // 'w', on boundary
         assert_eq!(snap_to_char_boundary(s, 100), s.len()); // past end
+    }
+
+    #[test]
+    fn test_ghost_text_basic() {
+        let mut input = InputState::new();
+        input.input_history = vec!["hello world".into(), "hello there".into()];
+        input.text = "hel".into();
+        input.cursor = 3;
+        input.update_popup(); // also computes ghost text
+        assert_eq!(input.ghost_text.as_deref(), Some("lo world"));
+    }
+
+    #[test]
+    fn test_ghost_text_most_recent_first() {
+        let mut input = InputState::new();
+        // History is ordered newest-first
+        input.input_history = vec!["hello there".into(), "hello world".into()];
+        input.text = "hel".into();
+        input.cursor = 3;
+        input.update_popup();
+        // Should match "hello there" (most recent)
+        assert_eq!(input.ghost_text.as_deref(), Some("lo there"));
+    }
+
+    #[test]
+    fn test_ghost_text_no_match() {
+        let mut input = InputState::new();
+        input.input_history = vec!["goodbye world".into()];
+        input.text = "hel".into();
+        input.cursor = 3;
+        input.update_popup();
+        assert!(input.ghost_text.is_none());
+    }
+
+    #[test]
+    fn test_ghost_text_empty_input() {
+        let mut input = InputState::new();
+        input.input_history = vec!["hello".into()];
+        input.text = "".into();
+        input.cursor = 0;
+        input.update_popup();
+        assert!(input.ghost_text.is_none());
+    }
+
+    #[test]
+    fn test_ghost_text_exact_match() {
+        let mut input = InputState::new();
+        input.input_history = vec!["hello".into()];
+        input.text = "hello".into();
+        input.cursor = 5;
+        input.update_popup();
+        // Exact match — no ghost text (no suffix to show)
+        assert!(input.ghost_text.is_none());
+    }
+
+    #[test]
+    fn test_ghost_text_tab_accept() {
+        let mut input = InputState::new();
+        input.input_history = vec!["hello world".into()];
+        input.text = "hel".into();
+        input.cursor = 3;
+        input.update_popup();
+        assert_eq!(input.ghost_text.as_deref(), Some("lo world"));
+
+        // Simulate Tab key
+        let key = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        input.handle_key(key);
+        assert_eq!(input.text, "hello world");
+        assert_eq!(input.cursor, 11);
+        assert!(input.ghost_text.is_none());
+    }
+
+    #[test]
+    fn test_ghost_text_no_slash_commands() {
+        let mut input = InputState::new();
+        input.input_history = vec!["/help me".into()];
+        input.text = "/he".into();
+        input.cursor = 3;
+        input.update_popup();
+        // Slash commands should use popup, not ghost text
+        assert!(input.ghost_text.is_none());
+    }
+
+    #[test]
+    fn test_ghost_text_cursor_not_at_end() {
+        let mut input = InputState::new();
+        input.input_history = vec!["hello world".into()];
+        input.text = "hel".into();
+        input.cursor = 2; // not at end
+        input.update_popup();
+        assert!(input.ghost_text.is_none());
+    }
+
+    #[test]
+    fn test_ghost_text_clears_on_reset() {
+        let mut input = InputState::new();
+        input.input_history = vec!["hello world".into()];
+        input.text = "hel".into();
+        input.cursor = 3;
+        input.update_popup();
+        assert!(input.ghost_text.is_some());
+
+        input.reset();
+        assert!(input.ghost_text.is_none());
+    }
+
+    #[test]
+    fn test_ghost_text_typing_updates() {
+        let mut input = InputState::new();
+        input.input_history = vec!["hello world".into()];
+
+        input.text = "h".into();
+        input.cursor = 1;
+        input.update_popup();
+        assert_eq!(input.ghost_text.as_deref(), Some("ello world"));
+
+        input.text = "he".into();
+        input.cursor = 2;
+        input.update_popup();
+        assert_eq!(input.ghost_text.as_deref(), Some("llo world"));
+
+        input.text = "hel".into();
+        input.cursor = 3;
+        input.update_popup();
+        assert_eq!(input.ghost_text.as_deref(), Some("lo world"));
+
+        input.text = "hello w".into();
+        input.cursor = 7;
+        input.update_popup();
+        assert_eq!(input.ghost_text.as_deref(), Some("orld"));
+    }
+
+    #[test]
+    fn test_ghost_text_full_flow_with_handle_key() {
+        // Simulate the real user flow using handle_key
+        let mut input = InputState::new();
+        input.input_history = vec!["hello world".into()];
+
+        // Type "hel" using handle_key
+        for c in ['h', 'e', 'l'] {
+            let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+            input.handle_key(key);
+        }
+        assert_eq!(input.text, "hel");
+        assert_eq!(input.cursor, 3);
+        assert_eq!(input.ghost_text.as_deref(), Some("lo world"), "ghost text should show after typing 'hel'");
+
+        // Tab to accept ghost text
+        let key = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        input.handle_key(key);
+        assert_eq!(input.text, "hello world");
+        assert_eq!(input.cursor, 11);
+        assert!(input.ghost_text.is_none(), "ghost text should be cleared after Tab");
+    }
+
+    #[test]
+    fn test_up_down_history_with_ghost_text() {
+        let mut input = InputState::new();
+        // Simulate having submitted "hello world" before
+        input.input_history = vec!["hello world".into()];
+
+        // Type "hel"
+        for c in ['h', 'e', 'l'] {
+            let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+            input.handle_key(key);
+        }
+        assert_eq!(input.text, "hel");
+        assert_eq!(input.ghost_text.as_deref(), Some("lo world"));
+
+        // Press Up — should go to history
+        let key = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        input.handle_key(key);
+        assert_eq!(input.text, "hello world", "Up should show history entry");
+        assert_eq!(input.history_index, Some(0));
+        assert!(input.ghost_text.is_none(), "no ghost text during history nav");
+
+        // Press Down — should go back to draft
+        let key = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        input.handle_key(key);
+        assert_eq!(input.text, "hel", "Down should restore draft");
+        assert!(input.history_index.is_none());
+        assert_eq!(input.ghost_text.as_deref(), Some("lo world"), "ghost text should reappear after Down");
+    }
+
+    #[test]
+    fn test_ghost_text_after_submit_and_retype() {
+        // Simulate: submit "hello world", then type "hel" -> ghost text should show
+        let mut input = InputState::new();
+        // Clear history loaded from disk to isolate the test
+        input.input_history.clear();
+
+        // Type and submit "hello world"
+        for c in "hello world".chars() {
+            input.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert_eq!(input.text, "hello world");
+        input.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(input.submitted);
+
+        // Reset (simulating what the app does after submission)
+        input.reset();
+        assert_eq!(input.text, "");
+        assert_eq!(input.input_history, vec!["hello world"]);
+
+        // Type "hel"
+        for c in ['h', 'e', 'l'] {
+            input.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert_eq!(input.text, "hel");
+        assert_eq!(input.ghost_text.as_deref(), Some("lo world"),
+            "ghost text should show after retyping a prefix of history");
     }
 }
