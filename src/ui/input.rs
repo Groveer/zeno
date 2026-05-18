@@ -337,6 +337,24 @@ impl InputState {
                 }
             }
             KeyEvent {
+                code: KeyCode::Char('a'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => {
+                self.move_cursor_to_line_start();
+                self.update_popup();
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Char('e'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => {
+                self.move_cursor_to_line_end();
+                self.update_popup();
+                true
+            }
+            KeyEvent {
                 code: KeyCode::Home,
                 modifiers: KeyModifiers::NONE,
                 ..
