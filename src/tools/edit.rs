@@ -438,18 +438,31 @@ fn find_all_exact(content: &str, pattern: &str) -> Vec<(usize, usize)> {
     matches
 }
 
-/// Apply replacements at byte ranges (start, end), from end to start to preserve positions.
+/// Apply replacements at byte ranges (start, end).
+/// Builds the result in a single forward pass for O(n) performance.
 fn apply_byte_matches(content: &str, matches: &[(usize, usize)], new_string: &str) -> String {
-    let mut result = content.to_string();
-    // Sort by start position descending
-    let mut sorted: Vec<&(usize, usize)> = matches.iter().collect();
-    sorted.sort_by_key(|m| std::cmp::Reverse(m.0));
-    for &(start, end) in sorted {
-        if end > result.len() || start > end {
+    if matches.is_empty() {
+        return content.to_string();
+    }
+    // Sort by start position ascending
+    let mut sorted: Vec<(usize, usize)> = matches.to_vec();
+    sorted.sort_by_key(|m| m.0);
+
+    // Pre-calculate capacity: original size minus removed portions plus added portions
+    let removed: usize = sorted.iter().map(|&(s, e)| e - s).sum();
+    let added = new_string.len() * sorted.len();
+    let mut result = String::with_capacity(content.len() - removed + added);
+
+    let mut cursor = 0usize;
+    for &(start, end) in &sorted {
+        if start < cursor || end > content.len() || start > end {
             continue;
         }
-        result = format!("{}{}{}", &result[..start], new_string, &result[end..]);
+        result.push_str(&content[cursor..start]);
+        result.push_str(new_string);
+        cursor = end;
     }
+    result.push_str(&content[cursor..]);
     result
 }
 
@@ -459,8 +472,9 @@ fn apply_byte_matches(content: &str, matches: &[(usize, usize)], new_string: &st
 
 /// Strip ` 123 | ` style line-number prefixes from read output.
 fn strip_line_number_prefixes(s: &str) -> Option<String> {
-    let re = regex_if_available();
-    if let Some(re) = re {
+    static LINE_NUMBER_RE: std::sync::LazyLock<Option<regex::Regex>> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"(?m)^\s*\d+\s*\|\s?").ok());
+    if let Some(ref re) = *LINE_NUMBER_RE {
         let cleaned = re.replace_all(s, "").to_string();
         if cleaned != s && !cleaned.trim().is_empty() {
             return Some(cleaned);
@@ -468,10 +482,6 @@ fn strip_line_number_prefixes(s: &str) -> Option<String> {
         return None;
     }
     strip_line_numbers_manual(s)
-}
-
-fn regex_if_available() -> Option<regex::Regex> {
-    regex::Regex::new(r"(?m)^\s*\d+\s*\|\s?").ok()
 }
 
 fn strip_line_numbers_manual(s: &str) -> Option<String> {

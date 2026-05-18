@@ -295,6 +295,34 @@ fn build_settings(lua: &Lua) -> anyhow::Result<Settings> {
 
     let overrides: mlua::Table = lua.named_registry_value("_rc_overrides")?;
 
+    // --- Macros for repetitive config loading patterns ---
+    macro_rules! load_field {
+        ($key:expr, $field:expr) => {
+            if let Ok(v) = overrides.get($key) {
+                $field = v;
+            }
+        };
+    }
+    macro_rules! load_non_empty {
+        ($key:expr, $field:expr) => {
+            if let Ok(v) = overrides.get::<String>($key)
+                && !v.is_empty()
+            {
+                $field = v;
+            }
+        };
+    }
+    macro_rules! load_serde {
+        ($key:expr, $field:expr, $type:ty) => {
+            if let Ok(table) = overrides.get::<mlua::Table>($key) {
+                match lua.from_value::<$type>(Value::Table(table)) {
+                    Ok(val) => $field = val,
+                    Err(e) => tracing::warn!(error = %e, concat!("Failed to parse ", $key, " from Lua config")),
+                }
+            }
+        };
+    }
+
     // --- Providers ---
     if let Ok(providers_table) = overrides.get::<mlua::Table>("providers") {
         match lua.from_value::<HashMap<String, ProviderConfig>>(Value::Table(providers_table)) {
@@ -303,23 +331,21 @@ fn build_settings(lua: &Lua) -> anyhow::Result<Settings> {
         }
     }
 
-    // --- active_provider ---
-    if let Ok(v) = overrides.get::<String>("active_provider")
+    // --- active_provider / model / theme (non-empty string fields) ---
+    load_non_empty!("active_provider", settings.active_provider);
+    load_non_empty!("model", settings.model);
+    load_non_empty!("theme", settings.theme);
+    load_non_empty!("memory_provider_active", settings.memory.provider);
+
+    // --- active_identity (Option<String>, needs Some() wrapping) ---
+    if let Ok(v) = overrides.get::<String>("active_identity")
         && !v.is_empty()
     {
-        settings.active_provider = v;
+        settings.active_identity = Some(v);
     }
 
-    // --- model ---
-    if let Ok(v) = overrides.get::<String>("model")
-        && !v.is_empty()
-    {
-        settings.model = v;
-    }
-
-    // --- tools ---
+    // --- tools (merge with defaults) ---
     if let Ok(user_tools) = overrides.get::<mlua::Table>("tools") {
-        // Merge: start from defaults, override user-set keys
         let defaults: mlua::Table = lua.named_registry_value("_rc_tools_defaults")?;
         let merged = lua.create_table()?;
         for result in defaults.pairs::<String, mlua::Value>() {
@@ -336,9 +362,7 @@ fn build_settings(lua: &Lua) -> anyhow::Result<Settings> {
         }
     }
 
-    // --- commands ---
-    // zn.commands({ allow = {...}, ask = {...}, deny = {...} })
-    // Merged into settings.tools.{allowed_commands, ask_commands, denied_commands}
+    // --- commands (nested table into tools fields) ---
     if let Ok(cmd_table) = overrides.get::<mlua::Table>("commands") {
         if let Ok(cmds) = cmd_table.get::<Vec<String>>("allow") {
             settings.tools.allowed_commands = cmds;
@@ -351,7 +375,7 @@ fn build_settings(lua: &Lua) -> anyhow::Result<Settings> {
         }
     }
 
-    // --- role ---
+    // --- role (nested table with non-empty checks) ---
     if let Ok(role_table) = overrides.get::<mlua::Table>("role") {
         if let Ok(v) = role_table.get::<String>("identity")
             && !v.is_empty()
@@ -365,40 +389,7 @@ fn build_settings(lua: &Lua) -> anyhow::Result<Settings> {
         }
     }
 
-    // --- identities ---
-    if let Ok(identities_table) = overrides.get::<mlua::Table>("identities") {
-        match lua.from_value::<HashMap<String, IdentityConfig>>(Value::Table(identities_table)) {
-            Ok(val) => settings.identities = val,
-            Err(e) => tracing::warn!(error = %e, "Failed to parse identities from Lua config"),
-        }
-    }
-
-    // --- active_identity ---
-    if let Ok(v) = overrides.get::<String>("active_identity")
-        && !v.is_empty()
-    {
-        settings.active_identity = Some(v);
-    }
-
-    // --- web_search_config ---
-    if let Ok(ws) = overrides.get::<mlua::Table>("web_search_config") {
-        match lua.from_value::<WebSearchConfig>(Value::Table(ws)) {
-            Ok(val) => settings.web_search_config = val,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to parse web_search_config from Lua config")
-            }
-        }
-    }
-
-    // --- mcp ---
-    if let Ok(mcp_servers) = overrides.get::<mlua::Table>("mcp_servers") {
-        match lua.from_value::<HashMap<String, McpServerConfig>>(Value::Table(mcp_servers)) {
-            Ok(val) => settings.mcp.servers = val,
-            Err(e) => tracing::warn!(error = %e, "Failed to parse MCP servers from Lua config"),
-        }
-    }
-
-    // --- permissions ---
+    // --- permissions (parse from string) ---
     if let Ok(v) = overrides.get::<String>("permissions") {
         match v.parse::<PermissionMode>() {
             Ok(mode) => settings.permissions = mode,
@@ -406,53 +397,13 @@ fn build_settings(lua: &Lua) -> anyhow::Result<Settings> {
         }
     }
 
-    // --- trusted paths ---
-    if let Ok(paths) = overrides.get::<Vec<String>>("trusted_paths") {
-        settings.trusted_paths = paths;
+    // --- compact_threshold (with clamp) ---
+    if let Ok(v) = overrides.get::<f64>("compact_threshold") {
+        settings.llm.compact_threshold = v.clamp(0.0, 1.0);
     }
 
-    // --- numeric fields ---
-    if let Ok(v) = overrides.get::<u32>("max_turns") {
-        settings.max_turns = v;
-    }
-    if let Ok(v) = overrides.get::<u32>("max_tokens") {
-        settings.max_tokens = v;
-    }
-
-    // --- model context table ---
-    if let Ok(model_contexts) = overrides.get::<mlua::Table>("model_contexts") {
-        match lua.from_value::<HashMap<String, u32>>(Value::Table(model_contexts)) {
-            Ok(val) => settings.model_contexts = val,
-            Err(e) => tracing::warn!(error = %e, "Failed to parse model_contexts from Lua config"),
-        }
-    }
-
-    // --- theme ---
-    if let Ok(v) = overrides.get::<String>("theme")
-        && !v.is_empty()
-    {
-        settings.theme = v;
-    }
-
-    // --- memory char limits ---
-    if let Ok(v) = overrides.get::<usize>("memory_char_limit") {
-        settings.memory.memory_char_limit = v;
-    }
-    if let Ok(v) = overrides.get::<usize>("user_char_limit") {
-        settings.memory.user_char_limit = v;
-    }
-
-    // --- memory provider (active name only — table lives in Lua registry) ---
-    if let Ok(v) = overrides.get::<String>("memory_provider_active")
-        && !v.is_empty()
-    {
-        settings.memory.provider = v;
-    }
-
-    // --- auxiliary ---
+    // --- auxiliary (needs timeout coercion) ---
     if let Ok(aux) = overrides.get::<mlua::Table>("auxiliary") {
-        // Coerce integer timeouts to float before serde deserialization.
-        // Lua stores `timeout = 30` as integer, but AuxiliaryTaskConfig.timeout is f64.
         match coerce_auxiliary_timeouts(lua, &aux) {
             Ok(coerced) => match lua.from_value::<AuxiliaryConfig>(Value::Table(coerced)) {
                 Ok(val) => settings.auxiliary = val,
@@ -462,49 +413,28 @@ fn build_settings(lua: &Lua) -> anyhow::Result<Settings> {
         }
     }
 
-    // --- log_retention_days ---
-    if let Ok(v) = overrides.get::<u64>("log_retention_days") {
-        settings.log_retention_days = v;
-    }
+    // --- Simple value fields ---
+    load_field!("max_turns", settings.max_turns);
+    load_field!("max_tokens", settings.max_tokens);
+    load_field!("trusted_paths", settings.trusted_paths);
+    load_field!("safe_paths", settings.safe_paths);
+    load_field!("memory_char_limit", settings.memory.memory_char_limit);
+    load_field!("user_char_limit", settings.memory.user_char_limit);
+    load_field!("log_retention_days", settings.log_retention_days);
+    load_field!("llm_max_retries", settings.llm.max_retries);
 
-    // --- llm_max_retries ---
-    if let Ok(v) = overrides.get::<u32>("llm_max_retries") {
-        settings.llm.max_retries = v;
-    }
-
-    // --- compact_threshold ---
-    if let Ok(v) = overrides.get::<f64>("compact_threshold") {
-        settings.llm.compact_threshold = v.clamp(0.0, 1.0);
-    }
-
-    // --- skills (background review + curator) ---
-    if let Ok(skills) = overrides.get::<mlua::Table>("skills") {
-        match lua.from_value::<SkillsConfig>(Value::Table(skills)) {
-            Ok(val) => settings.skills = val,
-            Err(e) => tracing::warn!(error = %e, "Failed to parse skills config from Lua"),
-        }
-    }
-
-    // --- engine ---
-    if let Ok(engine) = overrides.get::<mlua::Table>("engine") {
-        match lua.from_value::<EngineConfig>(Value::Table(engine)) {
-            Ok(val) => settings.engine = val,
-            Err(e) => tracing::warn!(error = %e, "Failed to parse engine config from Lua"),
-        }
-    }
-
-    // --- delegation ---
-    if let Ok(delegation) = overrides.get::<mlua::Table>("delegation") {
-        match lua.from_value::<DelegationConfig>(Value::Table(delegation)) {
-            Ok(val) => settings.delegation = val,
-            Err(e) => tracing::warn!(error = %e, "Failed to parse delegation config from Lua"),
-        }
-    }
-
-    // --- safe_paths ---
-    if let Ok(paths) = overrides.get::<Vec<String>>("safe_paths") {
-        settings.safe_paths = paths;
-    }
+    // --- Serde-deserialized table fields ---
+    load_serde!("identities", settings.identities, HashMap<String, IdentityConfig>);
+    load_serde!(
+        "web_search_config",
+        settings.web_search_config,
+        WebSearchConfig
+    );
+    load_serde!("mcp_servers", settings.mcp.servers, HashMap<String, McpServerConfig>);
+    load_serde!("model_contexts", settings.model_contexts, HashMap<String, u32>);
+    load_serde!("skills", settings.skills, SkillsConfig);
+    load_serde!("engine", settings.engine, EngineConfig);
+    load_serde!("delegation", settings.delegation, DelegationConfig);
 
     Ok(settings)
 }

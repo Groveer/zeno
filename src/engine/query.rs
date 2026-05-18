@@ -46,6 +46,19 @@ use tokio_util::sync::CancellationToken;
 // MAX_AUTO_CONTINUE, STREAM_EVENT_TIMEOUT_SECS, TOOL_EXECUTION_TIMEOUT_SECS
 // are now configurable via settings.engine and loaded from init.lua.
 
+/// Check if cancellation was requested. If so, log, handle interrupt, and return `Ok(())`.
+/// Use for simple cancel-and-exit points. For cancel points that need to save
+/// intermediate state (e.g. partial tool results), write the check inline instead.
+macro_rules! bail_if_cancelled {
+    ($cancel:expr, $self:expr, $sender:expr, $phase:expr) => {
+        if $cancel.is_cancelled() {
+            tracing::info!(event = "cancelled", phase = $phase, "query_tui: cancelled");
+            $self.handle_interrupt($sender);
+            return Ok(());
+        }
+    };
+}
+
 /// A collected tool use from the stream.
 #[derive(Debug, Clone)]
 struct CollectedToolUse {
@@ -1120,6 +1133,19 @@ impl QueryEngine {
             // sequential.  Read-only tools and independent-path file tools
             // are safe in parallel; interactive tools (ask_user) and
             // overlapping-path writes fall back to sequential.
+            let tool_config = ToolExecConfig {
+                permission_mode: &self.permission_mode,
+                trusted_paths: &self.settings.trusted_paths,
+                permission_allow_all: &self.permission_allow_all,
+                tools: self.tools.as_ref(),
+                hook_executor: self.hook_executor.as_ref(),
+                tool_cache: Some(&*self.tool_cache),
+                ask_commands: &self.settings.tools.ask_commands,
+                denied_commands: &self.settings.tools.denied_commands,
+                tool_timeout_secs: self.settings.engine.tool_timeout_secs,
+                safe_paths: &self.settings.safe_paths,
+            };
+
             let parallel = should_parallelize(&tool_uses, &self.cwd);
             if !parallel {
                 tracing::info!(
@@ -1138,20 +1164,11 @@ impl QueryEngine {
                     .iter()
                     .map(|tu| {
                         execute_single_tool_tui_catch(
-                            &self.permission_mode,
-                            &self.settings.trusted_paths,
-                            &self.permission_allow_all,
-                            self.tools.as_ref(),
+                            &tool_config,
                             tu,
                             &ctx,
                             sender,
-                            self.hook_executor.as_ref(),
                             &cancel,
-                            Some(&*self.tool_cache),
-                            &self.settings.tools.ask_commands,
-                            &self.settings.tools.denied_commands,
-                            self.settings.engine.tool_timeout_secs,
-                            &self.settings.safe_paths,
                             &last_failed_tool_input,
                         )
                     })
@@ -1192,30 +1209,13 @@ impl QueryEngine {
             } else {
                 // Sequential execution (fallback)
                 for tu in &tool_uses {
-                    if cancel.is_cancelled() {
-                        tracing::info!(
-                            event = "cancelled",
-                            phase = "sequential_tool_execution",
-                            "query_tui: cancelled during sequential tool execution"
-                        );
-                        self.handle_interrupt(sender);
-                        return Ok(());
-                    }
+                    bail_if_cancelled!(cancel, self, sender, "sequential_tool_execution");
                     let result = execute_single_tool_tui_catch(
-                        &self.permission_mode,
-                        &self.settings.trusted_paths,
-                        &self.permission_allow_all,
-                        self.tools.as_ref(),
+                        &tool_config,
                         tu,
                         &ctx,
                         sender,
-                        self.hook_executor.as_ref(),
                         &cancel,
-                        Some(&*self.tool_cache),
-                        &self.settings.tools.ask_commands,
-                        &self.settings.tools.denied_commands,
-                        self.settings.engine.tool_timeout_secs,
-                        &self.settings.safe_paths,
                         &last_failed_tool_input,
                     )
                     .await;
@@ -1285,100 +1285,108 @@ impl QueryEngine {
             }
 
             // Record tool results in carryover (same pattern as query())
-            for tu in &tool_uses {
-                let input = parse_tool_input_or_empty(&tu.input_json);
-                let resolved_path = resolve_file_path(&input);
-                let result_content = self.history.entries_raw().last().and_then(|entry| {
-                    entry.content.iter().find_map(|b| match b {
-                        ContentBlock::ToolResult {
-                            tool_use_id,
-                            content,
-                            is_error,
-                        } if tool_use_id == &tu.id => {
-                            Some((content.clone(), is_error.unwrap_or(false)))
-                        }
-                        _ => None,
-                    })
-                });
-                if let Some((output, is_error)) = result_content {
-                    self.carryover.record_tool_result(
-                        &tu.name,
-                        &input,
-                        &output,
-                        is_error,
-                        resolved_path.as_deref(),
-                    );
-                }
-            }
+            self.record_tool_carryover(&tool_uses);
 
             // Do NOT send QueryDone here — the loop continues to the next LLM call.
             // QueryDone is only sent when the loop exits (no more tool_calls, max turns, or error).
 
             // --- Sync turn to external memory provider ---
-            if let Some(ref mm) = self.memory_manager {
-                // Build a compact summary of this turn for the provider
-                let user_summary = effective_input.clone();
-                let assistant_summary = if !assistant_text.trim().is_empty() {
-                    assistant_text.clone()
-                } else {
-                    tool_uses
-                        .iter()
-                        .map(|tu| format!("[{}]", tu.name))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                };
-                let mm = mm.lock().await;
-                mm.sync_turn(&user_summary, &assistant_summary).await;
-                // Queue background prefetch for the next turn
-                mm.queue_prefetch(&user_summary);
-            }
+            self.sync_memory_turn(&effective_input, &assistant_text, &tool_uses)
+                .await;
         }
 
         // Background skill review
-        // After the conversation turn completes, check if we should spawn
-        // a background review to capture learnings into the skill library.
-        self.turns_since_skill_review += 1;
-        if crate::engine::review::should_run_review(
-            self.turns_since_skill_review,
-            &self.settings.skills,
-        ) {
-            // Build a compact conversation summary for the review agent
-            let conversation_summary = self.build_conversation_summary();
+        self.maybe_spawn_background_review();
 
-            // Check if we have sub-agent deps available
-            if let Some(ref factory) = self.client_factory {
-                let deps = SubAgentDeps::new(
-                    factory.clone(),
-                    self.tools.clone(),
-                    self.settings.clone(),
-                    self.sub_agent_tx.clone().unwrap_or_else(|| {
-                        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
-                        tx
-                    }),
-                    self.settings.delegation.clone(),
-                    self.sub_agent_cost_tracker.clone(),
-                )
-                .with_write_origin(crate::skills::provenance::BACKGROUND_REVIEW);
+        Ok(())
+    }
 
-                crate::engine::review::spawn_background_review(
-                    deps,
-                    self.cwd.clone(),
-                    conversation_summary,
-                    self.background_cancel.clone(),
-                );
-
-                // Reset the counter so the next review triggers after
-                // another `review_interval_turns` turns.
-                self.turns_since_skill_review = 0;
-
-                tracing::info!(
-                    turn = self.turns_since_skill_review,
-                    "Background skill review spawned"
+    /// Record tool results in carryover working memory for context preservation.
+    fn record_tool_carryover(&mut self, tool_uses: &[CollectedToolUse]) {
+        for tu in tool_uses {
+            let input = parse_tool_input_or_empty(&tu.input_json);
+            let resolved_path = resolve_file_path(&input);
+            let result_content = self.history.entries_raw().last().and_then(|entry| {
+                entry.content.iter().find_map(|b| match b {
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } if tool_use_id == &tu.id => {
+                        Some((content.clone(), is_error.unwrap_or(false)))
+                    }
+                    _ => None,
+                })
+            });
+            if let Some((output, is_error)) = result_content {
+                self.carryover.record_tool_result(
+                    &tu.name,
+                    &input,
+                    &output,
+                    is_error,
+                    resolved_path.as_deref(),
                 );
             }
         }
+    }
 
-        Ok(())
+    /// Sync the current turn to the external memory provider (if configured).
+    async fn sync_memory_turn(
+        &self,
+        user_input: &str,
+        assistant_text: &str,
+        tool_uses: &[CollectedToolUse],
+    ) {
+        if let Some(ref mm) = self.memory_manager {
+            let assistant_summary = if !assistant_text.trim().is_empty() {
+                assistant_text.to_string()
+            } else {
+                tool_uses
+                    .iter()
+                    .map(|tu| format!("[{}]", tu.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let mm = mm.lock().await;
+            mm.sync_turn(user_input, &assistant_summary).await;
+            mm.queue_prefetch(user_input);
+        }
+    }
+
+    /// Check if a background skill review should run, and spawn it if so.
+    fn maybe_spawn_background_review(&mut self) {
+        self.turns_since_skill_review += 1;
+        if !crate::engine::review::should_run_review(
+            self.turns_since_skill_review,
+            &self.settings.skills,
+        ) {
+            return;
+        }
+        let Some(ref factory) = self.client_factory else {
+            return;
+        };
+        let conversation_summary = self.build_conversation_summary();
+        let deps = SubAgentDeps::new(
+            factory.clone(),
+            self.tools.clone(),
+            self.settings.clone(),
+            self.sub_agent_tx.clone().unwrap_or_else(|| {
+                let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+                tx
+            }),
+            self.settings.delegation.clone(),
+            self.sub_agent_cost_tracker.clone(),
+        )
+        .with_write_origin(crate::skills::provenance::BACKGROUND_REVIEW);
+
+        crate::engine::review::spawn_background_review(
+            deps,
+            self.cwd.clone(),
+            conversation_summary,
+            self.background_cancel.clone(),
+        );
+        self.turns_since_skill_review = 0;
+        tracing::info!("Background skill review spawned");
     }
 
     /// Called when the query is interrupted (Ctrl+C).
@@ -1554,45 +1562,33 @@ impl QueryEngine {
     }
 }
 
+/// Session-level configuration for tool execution.
+/// Groups fields from `QueryEngine` that are constant across a single `query_tui` call,
+/// reducing parameter lists from 15 to 6.
+struct ToolExecConfig<'a> {
+    permission_mode: &'a crate::config::settings::PermissionMode,
+    trusted_paths: &'a [String],
+    permission_allow_all: &'a Arc<Mutex<bool>>,
+    tools: &'a crate::tools::base::ToolRegistry,
+    hook_executor: Option<&'a HookExecutor>,
+    tool_cache: Option<&'a std::sync::Mutex<crate::tools::cache::ToolCache>>,
+    ask_commands: &'a [String],
+    denied_commands: &'a [String],
+    tool_timeout_secs: u64,
+    safe_paths: &'a [String],
+}
+
 /// Error-tolerant wrapper for TUI tool execution.
 /// Always returns a ContentBlock, converting None to an error ToolResult.
-#[allow(clippy::too_many_arguments)]
 async fn execute_single_tool_tui_catch(
-    permission_mode: &crate::config::settings::PermissionMode,
-    trusted_paths: &[String],
-    permission_allow_all: &Arc<Mutex<bool>>,
-    tools: &crate::tools::base::ToolRegistry,
+    config: &ToolExecConfig<'_>,
     tu: &CollectedToolUse,
     ctx: &ToolContext,
     sender: &tokio::sync::mpsc::UnboundedSender<crate::engine::tui_events::UiEvent>,
-    hook_executor: Option<&HookExecutor>,
     cancel: &CancellationToken,
-    tool_cache: Option<&std::sync::Mutex<crate::tools::cache::ToolCache>>,
-    ask_commands: &[String],
-    denied_commands: &[String],
-    tool_timeout_secs: u64,
-    safe_paths: &[String],
     last_failed_tool_input: &Arc<Mutex<Option<String>>>,
 ) -> ContentBlock {
-    match execute_single_tool_tui(
-        permission_mode,
-        trusted_paths,
-        permission_allow_all,
-        tools,
-        tu,
-        ctx,
-        sender,
-        hook_executor,
-        cancel,
-        tool_cache,
-        ask_commands,
-        denied_commands,
-        tool_timeout_secs,
-        safe_paths,
-        last_failed_tool_input,
-    )
-    .await
-    {
+    match execute_single_tool_tui(config, tu, ctx, sender, cancel, last_failed_tool_input).await {
         Some(block) => block,
         None => {
             let _ = sender.send(UiEvent::ToolError {
@@ -1608,22 +1604,12 @@ async fn execute_single_tool_tui_catch(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn execute_single_tool_tui(
-    permission_mode: &crate::config::settings::PermissionMode,
-    trusted_paths: &[String],
-    permission_allow_all: &Arc<Mutex<bool>>,
-    tools: &crate::tools::base::ToolRegistry,
+    config: &ToolExecConfig<'_>,
     tu: &CollectedToolUse,
     ctx: &ToolContext,
     sender: &tokio::sync::mpsc::UnboundedSender<crate::engine::tui_events::UiEvent>,
-    hook_executor: Option<&HookExecutor>,
     cancel: &CancellationToken,
-    tool_cache: Option<&std::sync::Mutex<crate::tools::cache::ToolCache>>,
-    ask_commands: &[String],
-    denied_commands: &[String],
-    tool_timeout_secs: u64,
-    safe_paths: &[String],
     last_failed_tool_input: &Arc<Mutex<Option<String>>>,
 ) -> Option<ContentBlock> {
     let input = match parse_tool_input(&tu.input_json) {
@@ -1647,7 +1633,7 @@ async fn execute_single_tool_tui(
     };
 
     // --- Pre-tool-use hook ---
-    if let Some(he) = hook_executor {
+    if let Some(he) = config.hook_executor {
         if he.has_hooks_for(HookEvent::PreToolUse) {
             if let Ok(hook_ctx) = he.build_context() {
                 let _ = hook_ctx.set("tool_name", tu.name.as_str());
@@ -1676,13 +1662,14 @@ async fn execute_single_tool_tui(
 
     // --- Fine-grained permission check ---
     // Resolve the tool to check is_read_only status
-    let is_read_only = tools
+    let is_read_only = config
+        .tools
         .get(&tu.name)
         .map(|t| t.as_ref().is_read_only(&input))
         .unwrap_or(false);
 
     // Validate input schema before permission check
-    if let Some(t) = tools.get(&tu.name) {
+    if let Some(t) = config.tools.get(&tu.name) {
         let validation: Result<(), crate::tools::base::ToolError> =
             t.as_ref().validate_input(&input);
         if let Err(e) = validation {
@@ -1705,7 +1692,7 @@ async fn execute_single_tool_tui(
 
     // Check if user has already approved "allow all" for this session
     let already_allowed = {
-        let guard = permission_allow_all.lock().unwrap();
+        let guard = config.permission_allow_all.lock().unwrap();
         *guard
     };
 
@@ -1722,23 +1709,23 @@ async fn execute_single_tool_tui(
         let cwd = ctx.get_cwd();
         let resolved = checker::resolve_paths(&tu.name, &input, &cwd);
         let decision = checker::evaluate_permission(
-            permission_mode,
-            trusted_paths,
+            config.permission_mode,
+            config.trusted_paths,
             &tu.name,
             is_read_only,
             resolved.file_path.as_deref(),
             resolved.command.as_deref(),
             &cwd,
-            ask_commands,
-            safe_paths,
-            denied_commands,
+            config.ask_commands,
+            config.safe_paths,
+            config.denied_commands,
         );
 
         if decision.allowed {
             tracing::info!(
                 tool_name = %tu.name,
                 permission_decision = "allowed",
-                mode = %format!("{:?}", permission_mode),
+                mode = %format!("{:?}", config.permission_mode),
                 is_read_only = is_read_only,
                 tool_id = %tu.id,
                 "Tool execution permitted"
@@ -1775,7 +1762,7 @@ async fn execute_single_tool_tui(
                     );
                     // If user said "allow all", set the session-wide flag
                     if allowed && matches!(r.as_str(), "a" | "all" | "always") {
-                        let mut guard = permission_allow_all.lock().unwrap();
+                        let mut guard = config.permission_allow_all.lock().unwrap();
                         *guard = true;
                         let _ = sender.send(UiEvent::Status(
                             "All permissions granted for this session.".into(),
@@ -1791,7 +1778,7 @@ async fn execute_single_tool_tui(
             tracing::warn!(
                 tool_name = %tu.name,
                 permission_decision = "denied",
-                mode = %format!("{:?}", permission_mode),
+                mode = %format!("{:?}", config.permission_mode),
                 reason = %denied_reason,
                 tool_id = %tu.id,
                 "Tool execution denied by policy"
@@ -1830,7 +1817,7 @@ async fn execute_single_tool_tui(
     // --- Tool result cache lookup (read-only tools only) ---
     let cacheable_tools = ["read", "glob", "grep"];
     if cacheable_tools.contains(&tu.name.as_str()) {
-        if let Some(cache) = tool_cache {
+        if let Some(cache) = config.tool_cache {
             if let Ok(mut cache) = cache.lock() {
                 if let Some(cached) = cache.get(&tu.name, &input) {
                     tracing::debug!(
@@ -1852,8 +1839,8 @@ async fn execute_single_tool_tui(
     }
 
     match tokio::time::timeout(
-        std::time::Duration::from_secs(tool_timeout_secs),
-        tools.execute(&tu.name, input.clone(), ctx),
+        std::time::Duration::from_secs(config.tool_timeout_secs),
+        config.tools.execute(&tu.name, input.clone(), ctx),
     )
     .await
     {
@@ -1861,7 +1848,7 @@ async fn execute_single_tool_tui(
             // Cache result for read-only tools
             // Cache result for read-only tools
             if cacheable_tools.contains(&tu.name.as_str()) {
-                if let Some(cache) = tool_cache {
+                if let Some(cache) = config.tool_cache {
                     if let Ok(mut cache) = cache.lock() {
                         cache.insert(&tu.name, &input, result.clone());
                     }
@@ -1871,7 +1858,7 @@ async fn execute_single_tool_tui(
             // Invalidate cache on write/edit
             if tu.name == "write" || tu.name == "edit" {
                 if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
-                    if let Some(cache) = tool_cache {
+                    if let Some(cache) = config.tool_cache {
                         if let Ok(mut cache) = cache.lock() {
                             cache.invalidate_path(std::path::Path::new(path));
                         }
@@ -1907,7 +1894,7 @@ async fn execute_single_tool_tui(
             );
 
             // --- Post-tool-use hook ---
-            if let Some(he) = hook_executor {
+            if let Some(he) = config.hook_executor {
                 if he.has_hooks_for(HookEvent::PostToolUse) {
                     if let Ok(hook_ctx) = he.build_context() {
                         let _ = hook_ctx.set("tool_name", tu.name.as_str());
@@ -1943,7 +1930,7 @@ async fn execute_single_tool_tui(
             });
 
             // --- Post-tool-use hook (error case) ---
-            if let Some(he) = hook_executor {
+            if let Some(he) = config.hook_executor {
                 if he.has_hooks_for(HookEvent::PostToolUse) {
                     if let Ok(hook_ctx) = he.build_context() {
                         let _ = hook_ctx.set("tool_name", tu.name.as_str());
@@ -1968,12 +1955,12 @@ async fn execute_single_tool_tui(
         Err(_elapsed) => {
             let timeout_msg = format!(
                 "Tool '{}' timed out after {}s. The command may be stuck or the output may be too large.",
-                tu.name, tool_timeout_secs,
+                tu.name, config.tool_timeout_secs,
             );
             tracing::warn!(
                 tool_name = %tu.name,
                 tool_id = %tu.id,
-                timeout_secs = tool_timeout_secs,
+                timeout_secs = config.tool_timeout_secs,
                 "Tool execution timed out"
             );
             let _ = sender.send(UiEvent::ToolError {
@@ -1981,7 +1968,7 @@ async fn execute_single_tool_tui(
                 error: timeout_msg.clone(),
             });
 
-            if let Some(he) = hook_executor {
+            if let Some(he) = config.hook_executor {
                 if he.has_hooks_for(HookEvent::PostToolUse) {
                     if let Ok(hook_ctx) = he.build_context() {
                         let _ = hook_ctx.set("tool_name", tu.name.as_str());
