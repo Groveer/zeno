@@ -5,13 +5,23 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
 /// Priority ordering for tool schemas/names: MCP first, then delegate_task, then others.
-fn tool_priority(name: &str) -> u8 {
+pub(crate) fn tool_priority(name: &str) -> u8 {
     if name.starts_with("mcp_") {
         0
     } else if name == "delegate_task" {
         1
     } else {
         2
+    }
+}
+
+/// Categorize a tool by its "kind" for visual grouping in the system prompt.
+/// Delegates to `tool_priority` for single source of truth.
+pub(crate) fn tool_kind(name: &str) -> &'static str {
+    match tool_priority(name) {
+        0 => "mcp",
+        1 => "delegate",
+        _ => "other",
     }
 }
 

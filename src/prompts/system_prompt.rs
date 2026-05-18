@@ -26,7 +26,7 @@ use crate::config::settings::{IdentityConfig, RoleConfig};
 use crate::prompts::claudemd;
 use crate::prompts::context::RuntimeContext;
 use crate::skills::registry::SkillRegistry;
-use crate::tools::base::ToolRegistry;
+use crate::tools::base::{ToolRegistry, tool_kind};
 
 /// Build the complete system prompt.
 ///
@@ -201,20 +201,21 @@ fn tools_block(names: &[&str]) -> String {
         return "## Tools\n\n(No tools registered.)".to_string();
     }
 
-    // Group tools by category for visual priority
+    // Group tools by category using tool_kind() for single source of truth
+    // Display order matches tool_priority tiers: MCP → delegate → other
     let mcp: Vec<&str> = names
         .iter()
-        .filter(|n| n.starts_with("mcp_"))
+        .filter(|n| tool_kind(n) == "mcp")
         .copied()
         .collect();
-    let web: Vec<&str> = names
+    let delegate: Vec<&str> = names
         .iter()
-        .filter(|n| **n == "web_search" || **n == "web_fetch")
+        .filter(|n| tool_kind(n) == "delegate")
         .copied()
         .collect();
     let other: Vec<&str> = names
         .iter()
-        .filter(|n| !n.starts_with("mcp_") && **n != "web_search" && **n != "web_fetch")
+        .filter(|n| tool_kind(n) == "other")
         .copied()
         .collect();
 
@@ -229,14 +230,11 @@ fn tools_block(names: &[&str]) -> String {
             mcp.join(", ")
         ));
     }
-    if !web.is_empty() {
-        lines.push(format!(
-            "### Web — Use when MCP cannot handle the task\n{}",
-            web.join(", ")
-        ));
+    if !delegate.is_empty() {
+        lines.push(format!("### Delegation\n{}", delegate.join(", ")));
     }
     if !other.is_empty() {
-        lines.push(format!("### Other\n{}", other.join(", ")));
+        lines.push(format!("### Built-in Tools\n{}", other.join(", ")));
     }
 
     lines.join("\n\n")
@@ -413,7 +411,7 @@ mod tests {
         let names = vec!["bash", "read"];
         let block = tools_block(&names);
         assert!(block.contains("2 available"));
-        assert!(block.contains("### Other"));
+        assert!(block.contains("### Built-in Tools"));
         assert!(block.contains("bash"));
         assert!(block.contains("read"));
         // Descriptions should NOT be in the system prompt block (they're in API schemas)
@@ -426,31 +424,38 @@ mod tests {
         let names = vec![
             "mcp_list_servers",
             "mcp_call_tool",
+            "delegate_task",
             "web_search",
             "web_fetch",
             "bash",
             "read",
         ];
         let block = tools_block(&names);
-        assert!(block.contains("6 available"));
+        assert!(block.contains("7 available"));
         // MCP group
         assert!(block.contains("### MCP (Model Context Protocol)"));
         assert!(block.contains("mcp_list_servers"));
         assert!(block.contains("mcp_call_tool"));
-        // Web group
-        assert!(block.contains("### Web"));
+        // Delegate group
+        assert!(block.contains("### Delegation"));
+        assert!(block.contains("delegate_task"));
+        // Built-in group
+        assert!(block.contains("### Built-in Tools"));
         assert!(block.contains("web_search"));
         assert!(block.contains("web_fetch"));
-        // Other group
-        assert!(block.contains("### Other"));
         assert!(block.contains("bash"));
         assert!(block.contains("read"));
-        // Priority order: MCP comes before Web
-        let mcp_pos = block.find("MCP").unwrap();
-        let web_pos = block.find("### Web").unwrap();
+        // Priority order: MCP < Delegate < Built-in
+        let mcp_pos = block.find("### MCP").unwrap();
+        let delegate_pos = block.find("### Delegation").unwrap();
+        let builtin_pos = block.find("### Built-in").unwrap();
         assert!(
-            mcp_pos < web_pos,
-            "MCP group should appear before Web group"
+            mcp_pos < delegate_pos,
+            "MCP group should appear before Delegation group"
+        );
+        assert!(
+            delegate_pos < builtin_pos,
+            "Delegation group should appear before Built-in group"
         );
     }
 
