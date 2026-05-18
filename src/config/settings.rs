@@ -451,7 +451,8 @@ mod tests {
     #[test]
     fn test_identity_config_deserialization() {
         // Test IdentityConfig with both fields
-        let json = r#"{"identity": "You are a Rust developer", "guidelines": "Use idiomatic Rust"}"#;
+        let json =
+            r#"{"identity": "You are a Rust developer", "guidelines": "Use idiomatic Rust"}"#;
         let config: IdentityConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.identity.as_deref(), Some("You are a Rust developer"));
         assert_eq!(config.guidelines.as_deref(), Some("Use idiomatic Rust"));
@@ -459,7 +460,10 @@ mod tests {
         // Test IdentityConfig with only identity field
         let json = r#"{"identity": "You are a Python developer"}"#;
         let config: IdentityConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.identity.as_deref(), Some("You are a Python developer"));
+        assert_eq!(
+            config.identity.as_deref(),
+            Some("You are a Python developer")
+        );
         assert_eq!(config.guidelines, None);
 
         // Test IdentityConfig with only guidelines field
@@ -497,16 +501,19 @@ mod tests {
             }
         }"#;
         let settings: Settings = serde_json::from_str(json).unwrap();
-        
+
         assert_eq!(settings.active_identity.as_deref(), Some("dev"));
         assert_eq!(settings.identities.len(), 2);
-        
+
         let dev = settings.identities.get("dev").unwrap();
         assert_eq!(dev.identity.as_deref(), Some("You are a Rust developer"));
         assert_eq!(dev.guidelines.as_deref(), Some("Use idiomatic Rust"));
-        
+
         let reviewer = settings.identities.get("reviewer").unwrap();
-        assert_eq!(reviewer.identity.as_deref(), Some("You are a code reviewer"));
+        assert_eq!(
+            reviewer.identity.as_deref(),
+            Some("You are a code reviewer")
+        );
         assert_eq!(reviewer.guidelines, None);
     }
 
@@ -517,7 +524,7 @@ mod tests {
             "identities": {}
         }"#;
         let settings: Settings = serde_json::from_str(json).unwrap();
-        
+
         assert_eq!(settings.active_identity, None);
         assert!(settings.identities.is_empty());
     }

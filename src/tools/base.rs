@@ -4,6 +4,17 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
+/// Priority ordering for tool schemas/names: MCP first, then delegate_task, then others.
+fn tool_priority(name: &str) -> u8 {
+    if name.starts_with("mcp_") {
+        0
+    } else if name == "delegate_task" {
+        1
+    } else {
+        2
+    }
+}
+
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -361,9 +372,15 @@ impl ToolRegistry {
         Ok(())
     }
 
-    /// Get all tool schemas for the LLM.
+    /// Get all tool schemas for the LLM — sorted with MCP tools first.
     pub fn schemas(&self) -> Vec<Value> {
-        self.tools.values().map(|t| t.schema()).collect()
+        let mut result: Vec<Value> = self.tools.values().map(|t| t.schema()).collect();
+        result.sort_by(|a, b| {
+            let a_name = a["function"]["name"].as_str().unwrap_or("");
+            let b_name = b["function"]["name"].as_str().unwrap_or("");
+            tool_priority(a_name).cmp(&tool_priority(b_name))
+        });
+        result
     }
 
     /// Get schemas only for the specified tool names.
@@ -410,8 +427,10 @@ impl ToolRegistry {
         self.tools.get(name)
     }
 
-    /// List registered tool names.
+    /// List registered tool names — sorted with MCP tools first.
     pub fn names(&self) -> Vec<&str> {
-        self.tools.keys().map(|s| s.as_str()).collect()
+        let mut result: Vec<&str> = self.tools.keys().map(|s| s.as_str()).collect();
+        result.sort_by(|a, b| tool_priority(a).cmp(&tool_priority(b)));
+        result
     }
 }

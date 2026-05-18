@@ -146,13 +146,19 @@ mod tests {
     #[test]
     fn test_config_dir_is_absolute() {
         let dir = config_dir();
-        assert!(dir.is_absolute(), "config_dir should return an absolute path");
+        assert!(
+            dir.is_absolute(),
+            "config_dir should return an absolute path"
+        );
     }
 
     #[test]
     fn test_memory_dir_is_absolute() {
         let dir = memory_dir();
-        assert!(dir.is_absolute(), "memory_dir should return an absolute path");
+        assert!(
+            dir.is_absolute(),
+            "memory_dir should return an absolute path"
+        );
     }
 
     #[test]

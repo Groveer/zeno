@@ -139,32 +139,15 @@ fn guidelines(role: &RoleConfig) -> String {
 - Use tools proactively to read files, run commands, search information, and verify changes when needed.
 - When the user is just chatting or asking a question — respond with text only, no tool calls.
 - Follow the user's project conventions (CLAUDE.md / AGENTS.md) if present.
-- **Batch independent tool calls**: Issue all independent calls in one response (e.g. `glob` + `grep` together). Only sequence calls with - **Tool Use Enforcement (CRITICAL)**: You MUST use tools to perform actions. Do NOT explain your plan or describe what you would do without actually calling a tool immediately. NEVER end your turn with a promise of future action — execute it now!
+- **Batch independent tool calls**: Issue all independent calls in one response (e.g. `glob` + `grep` together). Only sequence calls that have dependencies.
+- **Tool Use Enforcement (CRITICAL)**: You MUST use tools to perform actions. Do NOT explain your plan or describe what you would do without actually calling a tool immediately. NEVER end your turn with a promise of future action — execute it now!
 - **Act, don't ask**: When a question has an obvious default interpretation, act on it
   immediately instead of asking for clarification. Examples:
   - "Is port 443 open?" → check THIS machine (don't ask "open where?")
   - "What OS am I running?" → check the live system (don't use user profile)
   - "What time is it?" → run `date` (don't guess)
   Only ask for clarification when the ambiguity genuinely changes what tool you would call.
-- **MCP First (IMPORTANT)** — Before calling `web_search` or `web_fetch`, you MUST check
-  if any configured MCP server can handle the task. MCP provides structured, authoritative
-  data (e.g. library documentation) that generic web search cannot match. \
-  \
-  **MCP servers are lazy-connected** — `[stopped]` is the **normal initial state**, it does
-  NOT mean unavailable. \
-  \
-  **Correct workflow — follow these steps precisely:** \
-  **Step 1**: `mcp_list_servers` — see what servers are configured. Each server may show a
-  **description** — read it to decide which server matches your task. Prefer servers whose
-  description is relevant. \
-  **Step 2**: `mcp_list_tools(name)` — **activates** the server AND returns its tools. \
-  **Step 3**: `mcp_call_tool(name, tool, args)` — execute the tool. \
-  \
-  **⚠️ Use descriptions to choose wisely.** If a server description matches your task,
-  activate it first. If no description matches but servers are configured, still consider
-  activating the most likely one to check its tools — descriptions are optional and absent
-  descriptions do not mean the server is irrelevant. \
-  `mcp_describe_tool` is usually unnecessary — Step 2 already returns full schemas.
+- **MCP First**: Check `mcp_list_servers` before using web_search, web_fetch, read, or grep. Servers show [stopped] by default — that's normal, call `mcp_list_tools(name)` to activate them and see their tools. `mcp_describe_tool` is rarely needed — Step 2 already returns full schemas.
 - **Use `delegate_task` only for truly parallel subtasks** (batch mode with `tasks` array). \
   Never delegate a single tool call — call `web_search`, `web_fetch`, `read`, etc. directly. \
   Delegating a single search or read wastes tokens, loses context, and can cause infinite loops.
@@ -190,14 +173,7 @@ fn guidelines(role: &RoleConfig) -> String {
 - **Edit indentation**: When constructing `edit` calls, match the file's actual
   indentation style (spaces vs tabs, depth). Copy the indentation directly from
   `read` output rather than guessing or re-typing it.
-- **Missing context**: If required context is missing, do NOT guess or hallucinate an answer.
-  **MCP First** (same as above): call `mcp_list_servers`, check server descriptions,
-  then activate the matching server via `mcp_list_tools(name)`. If no description matches
-  but servers are configured, still consider activating the most likely one. Only if no
-  MCP server is relevant, fall back to web_search, web_fetch, grep, glob, read, etc.
-  Use the `ask_user` tool to ask the user a question only when the information
-  cannot be retrieved by tools. If you must proceed with incomplete information,
-  label assumptions explicitly.
+- **Missing context**: If required context is missing, do NOT guess or hallucinate. Follow MCP First (above), then fall back to tools. If still stuck, ask the user. Label assumptions explicitly.
 "#
     .trim()
     .to_string();
@@ -242,11 +218,14 @@ fn tools_block(names: &[&str]) -> String {
         .copied()
         .collect();
 
-    let mut lines = vec![format!("## Tools ({} available)\n", names.len())];
+    let mut lines = vec![
+        format!("## Tools ({} available)\n", names.len()),
+        "> **⚠️ MCP First** — Call `mcp_list_servers` before web_search, web_fetch, or any other tool for external data. MCP provides structured, authoritative data that generic tools cannot match.".to_string(),
+    ];
 
     if !mcp.is_empty() {
         lines.push(format!(
-            "### MCP (Model Context Protocol) — Preferred for library docs & structured data\n{}",
+            "### MCP (Model Context Protocol) — Always check first before using built-in tools\n{}",
             mcp.join(", ")
         ));
     }
