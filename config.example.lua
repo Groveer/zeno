@@ -49,6 +49,35 @@ zn.set_model("gpt-5.5")
 -- zn.guidelines("- Validate all inputs.\n- Prefer SQL for data queries.")
 
 -- ═══════════════════════════════════════════════
+-- Named Identities (Multiple Personas)
+-- ═══════════════════════════════════════════════
+-- Define named identities that can be switched at runtime via:
+--   • /identity <name>  (TUI command)
+--   • ZENO_IDENTITY=<name>  (environment variable)
+--
+-- Each identity overrides the base role's `identity` and `guidelines`
+-- when activated.  All fields are optional — unset ones fall back to
+-- the base role config or built-in defaults.
+--
+-- zn.def_identity("dev", {
+--   identity = "You are a senior Rust engineer. You write clean, idiomatic code.",
+--   guidelines = "- Always write tests first.\n- Prefer zero-cost abstractions.\n- Use clippy lints.",
+-- })
+--
+-- zn.def_identity("ops", {
+--   identity = "You are a DevOps engineer specializing in Kubernetes and CI/CD.",
+--   guidelines = "- Always check resource limits.\n- Prefer declarative configs.\n- Never store secrets in plain text.",
+-- })
+--
+-- zn.def_identity("pm", {
+--   identity = "You are a product manager. You focus on user stories and acceptance criteria.",
+--   guidelines = "- Write clear, testable requirements.\n- Prioritize by business impact.",
+-- })
+--
+-- Optionally set a default active identity on startup:
+-- zn.set_identity("dev")
+
+-- ═══════════════════════════════════════════════
 -- Auxiliary models (cheaper models for specific tasks)
 -- ═══════════════════════════════════════════════
 --
