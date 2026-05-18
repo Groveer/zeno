@@ -625,6 +625,7 @@ async fn main() -> anyhow::Result<()> {
         mode: ui::status_bar::AppMode::Idle,
         steer_count: 0,
         active_identity: settings.active_identity.clone(),
+        tick: 0,
     });
 
     // Start config file watcher for hot-reload notification

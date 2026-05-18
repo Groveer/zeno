@@ -24,6 +24,8 @@ pub struct StatusInfo {
     pub steer_count: usize,
     /// Currently active identity name (shown in status bar when set).
     pub active_identity: Option<String>,
+    /// Frame counter for status dot animation (blink timing).
+    pub tick: u64,
 }
 
 /// Format a number with SI-like abbreviations: 1.2K, 3.4M, etc.
@@ -110,19 +112,29 @@ pub fn render(frame: &mut Frame, area: Rect, info: &StatusInfo) {
     };
     let right_width = right_text.len() as u16;
 
-    // Status indicator (before right-aligned tools)
-    let (status_label, status_color) = match info.mode {
-        AppMode::Idle => (" ● ", theme::SUCCESS),
+    // Status indicator — single colored dot, no text.
+    //   Idle          → green, solid
+    //   Running       → blue, blink
+    //   Running+steer → cyan, blink
+    //   WaitingInput  → yellow, blink
+    let (dot_color, blink) = match info.mode {
+        AppMode::Idle => (theme::SUCCESS, false),
         AppMode::Running => {
             if info.steer_count > 0 {
-                (" ⟳ thinking… ", theme::ACCENT)
+                (theme::CYAN, true)
             } else {
-                (" ◌ thinking… ", theme::WARNING)
+                (theme::ACCENT, true) // blue
             }
         }
-        AppMode::WaitingInput => ("  input ", theme::ACCENT),
+        AppMode::WaitingInput => (theme::WARNING, true), // yellow
     };
-    let status_width = status_label.len() as u16;
+    // Blink: toggle every 10 frames between bright and dim.
+    // At 60fps (active) that's ~6 toggles/sec (3 full cycles); at 10fps (idle) it doesn't blink.
+    let show_bright = !blink || (info.tick / 10) % 2 == 0;
+    let actual_color = if show_bright { dot_color } else { theme::TEXT_DIM };
+
+    let status_label = " ● ";
+    let status_width: u16 = 3;
 
     let line = Line::from(spans);
     frame.render_widget(
@@ -159,7 +171,7 @@ pub fn render(frame: &mut Frame, area: Rect, info: &StatusInfo) {
         frame.render_widget(
             ratatui::widgets::Paragraph::new(Span::styled(
                 status_label,
-                Style::new().fg(status_color).bg(theme::SURFACE),
+                Style::new().fg(actual_color).bg(theme::SURFACE),
             )),
             status_area,
         );

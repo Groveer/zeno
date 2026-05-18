@@ -24,6 +24,7 @@ pub const ACCENT: Color = Color::Rgb(100, 180, 255); // blue-ish
 pub const ACCENT_DIM: Color = Color::Rgb(60, 120, 200);
 pub const SUCCESS: Color = Color::Rgb(100, 200, 130); // green
 pub const WARNING: Color = Color::Rgb(240, 200, 80); // yellow
+pub const CYAN: Color = Color::Rgb(80, 210, 230);
 pub const ERROR: Color = Color::Rgb(240, 100, 100); // red
 
 // Code highlighting

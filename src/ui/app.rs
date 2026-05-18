@@ -156,6 +156,7 @@ impl App {
                 mode: AppMode::Idle,
                 steer_count: 0,
                 active_identity: None,
+                tick: 0,
             },
             event_rx,
             event_tx,
@@ -820,6 +821,7 @@ impl App {
     pub fn render(&mut self, frame: &mut Frame) {
         // Sync mode to status bar before rendering
         self.status.mode = self.mode;
+        self.status.tick += 1;
 
         let full = frame.area();
 
