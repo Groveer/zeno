@@ -353,8 +353,8 @@ impl App {
                         }
                     }
                     _ => {
-                        // Idle mode with empty input: do nothing.
-                        // Use Ctrl+D to quit instead.
+                        // Idle mode with empty input: exit the app.
+                        self.should_quit = true;
                     }
                 }
                 return;
