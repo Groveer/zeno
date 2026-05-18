@@ -594,6 +594,7 @@ impl App {
                                 _ => output.clone(),
                             };
                         *last = OutputSegment::ToolComplete(summary);
+                        self.output.mark_dirty();
                     }
                 }
                 UiEvent::ToolError { name: _, error } => {
@@ -612,6 +613,7 @@ impl App {
                                 _ => error.clone(),
                             };
                         *last = OutputSegment::ToolError(summary);
+                        self.output.mark_dirty();
                     } else {
                         self.output.push(OutputSegment::ToolError(error));
                     }
