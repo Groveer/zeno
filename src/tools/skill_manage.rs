@@ -116,7 +116,7 @@ impl Tool for SkillManageTool {
                         "action": {
                             "type": "string",
                             "enum": ["create", "patch", "edit", "delete", "write_file", "pin", "unpin", "restore", "list-archived", "curator_pause", "curator_resume", "curator_status"],
-                            "description": "The management action to perform."
+                            "description": "Required. The management action to perform."
                         },
                         "name": {
                             "type": "string",

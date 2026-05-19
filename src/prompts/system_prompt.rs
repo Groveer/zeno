@@ -151,9 +151,6 @@ fn guidelines(role: &RoleConfig) -> String {
 - **Use `delegate_task` only for truly parallel subtasks** (batch mode with `tasks` array). \
   Never delegate a single tool call — call `web_search`, `web_fetch`, `read`, etc. directly. \
   Delegating a single search or read wastes tokens, loses context, and can cause infinite loops.
-- **Plan complex tasks with `todo`**: When given a multi-step request, first create a task plan
-  using `todo(action="create", plan="...", tasks=[...])`, then execute each step and mark progress
-  with `todo(action="update", task_id="T1", status="completed")`.
 - **Scope searches to the project structure**: Before using `grep` or `glob`, check
   the Environment section for the detected build system. Target searches at the source
   tree (e.g. `path="src"`) rather than the project root. Start shallow (`glob("*")`)

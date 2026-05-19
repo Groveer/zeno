@@ -48,7 +48,7 @@ impl Tool for MemoryTool {
                         "action": {
                             "type": "string",
                             "enum": ["add", "replace", "remove", "read"],
-                            "description": "The action to perform."
+                            "description": "Required. The action to perform: add, replace, remove, or read."
                         },
                         "target": {
                             "type": "string",

@@ -112,21 +112,18 @@ impl Tool for TodoTool {
             "type": "function",
             "function": {
                 "name": "todo",
-                "description": "Manage a task list for planning and tracking your progress. \
-                    Create a plan with tasks, mark tasks as in_progress or completed, \
-                    add new tasks, or delete tasks. The tool always returns the current \
-                    state of the task list so you can see what's done and what remains.\n\n\
+                "description": "Manage a task list for planning and tracking progress. \
+                    Create, add, update, delete, or list tasks. \
+                    The tool always returns the full task list so you can see what's done.\n\n\
                     USAGE PATTERN:\n\
-                    1. When given a complex request, first call `todo` with `action=create` \
-                       to break it down into steps.\n\
-                    2. Before each major phase, call `todo` with `action=update` to mark \
-                       the current task as `in_progress`.\n\
-                    3. After completing a task, mark it `completed`.\n\
-                    4. If new work emerges, use `action=add` to extend the plan.\n\n\
+                    1. Call with `action=create` to break a complex request into steps.\n\
+                    2. Call with `action=update, task_id=T1, status=in_progress` to mark progress.\n\
+                    3. After completing a task, call with `action=update, status=completed`.\n\
+                    4. Use `action=add` to extend the plan with more tasks.\n\n\
                     ACTIONS:\n\
-                    - create: Start a new plan. Provide `plan` (overall description) and `tasks` (list of {description}).\n\
-                    - add: Append one or more tasks to the existing plan.\n\
-                    - update: Change a task's status (pending → in_progress → completed) or its description.\n\
+                    - create: Start a new plan. Provide `plan` and `tasks` (list of {description}).\n\
+                    - add: Append tasks to the existing plan.\n\
+                    - update: Change a task's status or description.\n\
                     - delete: Remove a task from the plan.\n\
                     - list: Show all tasks and their current status.",
                 "parameters": {
@@ -135,7 +132,7 @@ impl Tool for TodoTool {
                         "action": {
                             "type": "string",
                             "enum": ["create", "add", "update", "delete", "list"],
-                            "description": "The operation to perform."
+                            "description": "Required. The operation to perform: create, add, update, delete, or list."
                         },
                         "plan": {
                             "type": "string",
