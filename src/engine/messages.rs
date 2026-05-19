@@ -328,8 +328,14 @@ impl ConversationHistory {
     // Compact helpers
     // -----------------------------------------------------------------------
 
-    /// Truncate tool_result content in older entries.
+    /// Compact (replace) tool_result content in older entries.
     /// Uses `find_safe_split_point` to avoid cutting through a tool_use/result pair.
+    ///
+    /// For **read** tool results that exceed `max_chars`, replaces the content with
+    /// a compact hint telling the LLM to grep for keywords and then read specific
+    /// sections — preserving the file path and total line count.
+    ///
+    /// For all other tool results, truncates to `max_chars` with a marker suffix.
     pub fn truncate_old_tool_results(&mut self, keep_recent: usize, max_chars: usize) -> bool {
         let total = self.entries.len();
         if total <= keep_recent {
@@ -337,23 +343,56 @@ impl ConversationHistory {
         }
 
         let cutoff = find_safe_split_point(&self.entries, keep_recent);
+        if cutoff == 0 {
+            return false;
+        }
+
+        // Build tool_use_id → (tool_name, tool_input) mapping from ToolUse blocks
+        // in entries before the cutoff, so we can detect "read" results.
+        let mut tool_info: std::collections::HashMap<String, (String, serde_json::Value)> =
+            std::collections::HashMap::new();
+        for entry in &self.entries[..cutoff] {
+            for block in &entry.content {
+                if let ContentBlock::ToolUse { id, name, input } = block {
+                    tool_info.insert(id.clone(), (name.clone(), input.clone()));
+                }
+            }
+        }
+
         let mut modified = false;
 
         for i in 0..cutoff {
             for block in &mut self.entries[i].content {
-                if let ContentBlock::ToolResult { content, .. } = block
-                    && content.len() > max_chars
+                if let ContentBlock::ToolResult {
+                    content,
+                    tool_use_id,
+                    ..
+                } = block
                 {
-                    // Find a safe char-boundary at or before `max_chars` bytes.
-                    // `max_chars` semantically means "character count", but the
-                    // original code used it as a byte length, which panics on
-                    // multi-byte UTF-8.  We now truncate at a proper boundary.
-                    let end = content
-                        .char_indices()
-                        .nth(max_chars)
-                        .map_or(content.len(), |(i, _)| i);
-                    content.truncate(end);
-                    content.push_str("...");
+                    if content.len() <= max_chars {
+                        continue;
+                    }
+
+                    let id = tool_use_id.clone();
+                    let is_read = tool_info.get(&id).is_some_and(|(name, _)| name == "read");
+
+                    if is_read {
+                        let (path, total_lines) = extract_read_meta(content, &tool_info, &id);
+                        *content = format!(
+                            "[Previously read: {path} ({total_lines} lines) — content compacted. \
+                             Use grep to search keywords, then read specific sections with offset+limit.]"
+                        );
+                    } else {
+                        let end = content
+                            .char_indices()
+                            .nth(max_chars)
+                            .map_or(content.len(), |(i, _)| i);
+                        let original_len = content.len();
+                        content.truncate(end);
+                        content.push_str(&format!(
+                            "\n[... output truncated by compact — was {original_len} chars ...]"
+                        ));
+                    }
                     modified = true;
                 }
             }
@@ -451,4 +490,48 @@ fn boundary_crosses_tool_pair(entries: &[ConversationEntry], idx: usize) -> bool
         .collect();
 
     !pending_ids.is_disjoint(&result_ids)
+}
+
+// ---------------------------------------------------------------------------
+// Read-result metadata extraction
+// ---------------------------------------------------------------------------
+
+/// Extract file path and total line count from a read tool's result content
+/// and its associated ToolUse input.
+///
+/// The read tool footer format is `"\n(lines X-Y of N)\n"`.  We parse `N` from
+/// the last such footer.  The file path comes from the ToolUse input JSON.
+fn extract_read_meta(
+    content: &str,
+    tool_info: &std::collections::HashMap<String, (String, serde_json::Value)>,
+    tool_use_id: &str,
+) -> (String, usize) {
+    // Extract file path from ToolUse input
+    let path = tool_info
+        .get(tool_use_id)
+        .and_then(|(_, input)| input.get("path"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("?")
+        .to_string();
+
+    // Extract total lines from the read footer "(lines X-Y of N)"
+    let total_lines = extract_read_total_lines(content);
+
+    (path, total_lines)
+}
+
+/// Parse the total line count from a read tool result's footer.
+///
+/// The footer is `"\n(lines X-Y of N)\n"`.  We find the last ` of ` and
+/// take the number that follows (before `)` or newline).
+fn extract_read_total_lines(content: &str) -> usize {
+    if let Some(idx) = content.rfind(" of ") {
+        let after = &content[idx + 4..];
+        let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(n) = digits.parse::<usize>() {
+            return n;
+        }
+    }
+    // Fallback: count actual lines in the content
+    content.lines().count()
 }

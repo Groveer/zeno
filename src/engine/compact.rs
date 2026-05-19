@@ -176,9 +176,10 @@ fn is_cjk(ch: char) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Truncate old tool_result content. Keep recent entries intact.
-/// For entries beyond `keep_recent` from the end, truncate ToolResult content to `max_chars`.
+/// For entries beyond `keep_recent` from the end, compact (replace) ToolResult content.
+/// Read tool results are replaced with a grep+read hint; others are truncated to `max_chars`.
 pub fn micro_compact(history: &mut ConversationHistory, keep_recent: usize) -> bool {
-    history.truncate_old_tool_results(keep_recent, 200)
+    history.truncate_old_tool_results(keep_recent, 800)
 }
 
 // ---------------------------------------------------------------------------
