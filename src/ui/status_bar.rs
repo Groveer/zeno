@@ -131,7 +131,11 @@ pub fn render(frame: &mut Frame, area: Rect, info: &StatusInfo) {
     // Blink: toggle every 10 frames between bright and dim.
     // At 60fps (active) that's ~6 toggles/sec (3 full cycles); at 10fps (idle) it doesn't blink.
     let show_bright = !blink || (info.tick / 10) % 2 == 0;
-    let actual_color = if show_bright { dot_color } else { theme::TEXT_DIM };
+    let actual_color = if show_bright {
+        dot_color
+    } else {
+        theme::TEXT_DIM
+    };
 
     let status_label = " ● ";
     let status_width: u16 = 3;

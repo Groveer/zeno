@@ -1979,14 +1979,21 @@ mod tests {
         }
         assert_eq!(input.text, "hel");
         assert_eq!(input.cursor, 3);
-        assert_eq!(input.ghost_text.as_deref(), Some("lo world"), "ghost text should show after typing 'hel'");
+        assert_eq!(
+            input.ghost_text.as_deref(),
+            Some("lo world"),
+            "ghost text should show after typing 'hel'"
+        );
 
         // Tab to accept ghost text
         let key = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
         input.handle_key(key);
         assert_eq!(input.text, "hello world");
         assert_eq!(input.cursor, 11);
-        assert!(input.ghost_text.is_none(), "ghost text should be cleared after Tab");
+        assert!(
+            input.ghost_text.is_none(),
+            "ghost text should be cleared after Tab"
+        );
     }
 
     #[test]
@@ -2008,14 +2015,21 @@ mod tests {
         input.handle_key(key);
         assert_eq!(input.text, "hello world", "Up should show history entry");
         assert_eq!(input.history_index, Some(0));
-        assert!(input.ghost_text.is_none(), "no ghost text during history nav");
+        assert!(
+            input.ghost_text.is_none(),
+            "no ghost text during history nav"
+        );
 
         // Press Down — should go back to draft
         let key = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
         input.handle_key(key);
         assert_eq!(input.text, "hel", "Down should restore draft");
         assert!(input.history_index.is_none());
-        assert_eq!(input.ghost_text.as_deref(), Some("lo world"), "ghost text should reappear after Down");
+        assert_eq!(
+            input.ghost_text.as_deref(),
+            Some("lo world"),
+            "ghost text should reappear after Down"
+        );
     }
 
     #[test]
@@ -2043,7 +2057,10 @@ mod tests {
             input.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         }
         assert_eq!(input.text, "hel");
-        assert_eq!(input.ghost_text.as_deref(), Some("lo world"),
-            "ghost text should show after retyping a prefix of history");
+        assert_eq!(
+            input.ghost_text.as_deref(),
+            Some("lo world"),
+            "ghost text should show after retyping a prefix of history"
+        );
     }
 }
