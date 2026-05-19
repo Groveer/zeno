@@ -464,11 +464,12 @@ impl InputState {
         // Strip image markers since the corresponding image data won't persist.
         let trimmed: String = self.text.chars().filter(|&c| c != IMAGE_MARKER).collect();
         let trimmed = trimmed.trim().to_string();
-        if !trimmed.is_empty()
-            && !trimmed.starts_with('/')
-            && self.input_history.first().map(|s| s.as_str()) != Some(&trimmed)
-        {
-            self.input_history.insert(0, trimmed);
+
+        let is_history_entry = !trimmed.is_empty() && !trimmed.starts_with('/');
+
+        // Update in-memory history (for this session's Up/Down navigation)
+        if is_history_entry && self.input_history.first().map(|s| s.as_str()) != Some(&trimmed) {
+            self.input_history.insert(0, trimmed.clone());
         }
 
         self.text.clear();
@@ -480,8 +481,15 @@ impl InputState {
         self.images.clear();
         self.ghost_text = None;
 
-        // Persist history to disk after each submission
-        save_history(&self.input_history);
+        // Persist: re-read latest disk state, merge new entry, save.
+        // This prevents overwriting entries from other concurrent Zeno instances.
+        if is_history_entry {
+            let mut on_disk = load_history();
+            if on_disk.first().map(|s| s.as_str()) != Some(&trimmed) {
+                on_disk.insert(0, trimmed);
+            }
+            save_history(&on_disk);
+        }
     }
 
     /// Reset input state without saving to history.
@@ -1464,6 +1472,8 @@ fn load_history() -> Vec<String> {
 }
 
 /// Save input history to disk. Truncates to MAX_PERSISTED_HISTORY entries.
+/// Uses atomic write (temp file + rename) to prevent partial reads by
+/// other concurrent Zeno instances.
 fn save_history(history: &[String]) {
     let path = paths::session_history_path();
     let truncated: Vec<&str> = history
@@ -1473,8 +1483,15 @@ fn save_history(history: &[String]) {
         .collect();
     match serde_json::to_string(&truncated) {
         Ok(json) => {
-            if let Err(e) = std::fs::write(&path, &json) {
-                tracing::warn!(error = %e, path = %path.display(), "Failed to save session history");
+            // Atomic write: write to temp file, then rename to final path.
+            // This prevents other instances from reading a partially-written file.
+            let tmp_path = path.with_extension("json.tmp");
+            if let Err(e) = std::fs::write(&tmp_path, &json) {
+                tracing::warn!(error = %e, path = %tmp_path.display(), "Failed to save session history");
+                return;
+            }
+            if let Err(e) = std::fs::rename(&tmp_path, &path) {
+                tracing::warn!(error = %e, path = %path.display(), "Failed to atomically save session history");
             }
         }
         Err(e) => {
