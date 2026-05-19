@@ -61,16 +61,16 @@ pub fn build(
         tools_block(&tool_registry.names()),
     ];
 
-    // 4. Skills Tier 0: category index + loading workflow
+    // 3. Skills Tier 0: category index + loading workflow
     if !skill_registry.is_empty() {
         parts.push(skills_block(skill_registry));
     }
 
-    // 5. Runtime context
+    // 4. Runtime context
     let ctx = RuntimeContext::collect(cwd);
     parts.push(format!("## Environment\n\n{}", ctx.to_prompt_block()));
 
-    // 6. Project instructions (CLAUDE.md / AGENTS.md)
+    // 5. Project instructions (CLAUDE.md / AGENTS.md)
     if let Some((path, content)) = claudemd::load_instruction_file(cwd) {
         parts.push(format!(
             "## Project Instructions\n\nLoaded from: {}\n\n{}",
@@ -79,7 +79,7 @@ pub fn build(
         ));
     }
 
-    // 7. Memory guidance + frozen snapshot
+    // 6. Memory guidance + frozen snapshot
     if let Some(block) = memory_block
         && !block.is_empty()
     {
@@ -126,12 +126,9 @@ Do NOT save task progress, session outcomes, or anything that will be stale in a
 Write declarative facts, not instructions — 'User prefers concise responses' ✓, \
 'Always respond concisely' ✗.";
 
-/// Guidelines — always present.
-/// Custom guidelines from the user are appended after the built-in rules,
-/// never replacing them. This ensures operational rules (tool efficiency,
-/// batch calls, etc.) are always in effect.
-fn guidelines(role: &RoleConfig) -> String {
-    let builtin = r#"
+/// Built-in guidelines — always present in the system prompt body.
+fn builtin_guidelines() -> String {
+    r#"
 ## Guidelines
 
 - Be concise and direct. Prefer showing results over lengthy explanations.
@@ -173,11 +170,28 @@ fn guidelines(role: &RoleConfig) -> String {
 - **Missing context**: If required context is missing, do NOT guess or hallucinate. Follow MCP First (above), then fall back to tools. If still stuck, ask the user. Label assumptions explicitly.
 "#
     .trim()
-    .to_string();
+    .to_string()
+}
 
+/// User-defined guidelines — appended right after the built-in guidelines.
+/// Uses `##` heading and a priority declaration so the LLM assigns them
+/// equal or higher weight than the default rules.
+fn user_guidelines_block(custom: &str) -> String {
+    format!(
+        "## User Guidelines (MUST FOLLOW)\n\n\
+**These user-defined rules take PRIORITY over the default Guidelines above.** \
+When there is a conflict, always follow the user's rules below.\n\n\
+{}",
+        custom.trim()
+    )
+}
+
+/// Guidelines — combines built-in and optional user guidelines into one block.
+fn guidelines(role: &RoleConfig) -> String {
+    let builtin = builtin_guidelines();
     match role.guidelines {
         Some(ref custom) if !custom.trim().is_empty() => {
-            format!("{}\n\n### Custom Rules\n\n{}", builtin, custom.trim())
+            format!("{}\n\n{}", builtin, user_guidelines_block(custom))
         }
         _ => builtin,
     }
@@ -582,8 +596,9 @@ mod tests {
         assert!(p.contains("Be concise"));
         assert!(p.contains("Batch independent tool calls"));
         assert!(p.contains("Prefer grep before read"));
-        // Custom rules are appended under "### Custom Rules"
-        assert!(p.contains("### Custom Rules"));
+        // Custom rules are appended under "## User Guidelines (MUST FOLLOW)"
+        assert!(p.contains("## User Guidelines (MUST FOLLOW)"));
+        assert!(p.contains("PRIORITY"));
         assert!(p.contains("Always think step by step"));
         assert!(p.contains("Never guess"));
     }
