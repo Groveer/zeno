@@ -6,6 +6,7 @@ pub mod bash;
 pub mod cache;
 pub mod delegate_task;
 pub mod edit;
+pub mod file_content_pool;
 pub mod file_state;
 pub mod gitignore;
 pub mod glob;

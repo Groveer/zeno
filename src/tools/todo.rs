@@ -341,6 +341,7 @@ mod tests {
             cancel_token: None,
             rate_limiter: None,
             tool_stats: None,
+            file_content_pool: None,
         }
     }
 

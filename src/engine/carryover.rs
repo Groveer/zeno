@@ -17,16 +17,39 @@ const MAX_ACTIVE_ARTIFACTS: usize = 8;
 const MAX_WORK_LOG: usize = 10;
 const MAX_USER_GOALS: usize = 5;
 
+/// Files with fewer lines than this have their full content preserved
+/// in carryover, so the LLM doesn't need to re-read after context compression.
+const FULL_CONTENT_LINE_THRESHOLD: usize = 200;
+
+/// Maximum characters for a single full-content carryover entry.
+const MAX_FULL_CONTENT_CHARS: usize = 4096;
+
+/// Total character budget for all full-content entries combined.
+/// Prevents carryover from ballooning when many small files are read.
+/// ~12,000 chars ≈ 3,000 tokens — a reasonable cap for post-compaction context.
+const FULL_CONTENT_TOTAL_BUDGET: usize = 12_000;
+
 // ---------------------------------------------------------------------------
 // Bucket types
 // ---------------------------------------------------------------------------
+
+/// Content mode for a read-file entry in carryover.
+#[derive(Debug, Clone)]
+pub enum ReadContent {
+    /// Summary only — first few lines, truncated. Used for large files.
+    Preview(String),
+    /// Full file content preserved. Used for small files so the LLM
+    /// doesn't need to re-read after context compression.
+    Full(String),
+}
 
 /// A snapshot of a file that was read.
 #[derive(Debug, Clone)]
 pub struct ReadFileEntry {
     pub path: String,
-    pub span: String,    // e.g. "lines 1-50"
-    pub preview: String, // first few lines, truncated to 320 chars
+    pub span: String, // e.g. "lines 1-50"
+    /// Content: either a short preview or the full file content.
+    pub content: ReadContent,
 }
 
 /// A single work-log entry (max 320 chars).
@@ -73,20 +96,96 @@ pub struct Carryover {
 }
 
 impl Carryover {
+    /// Strip line numbers from formatted tool output.
+    ///
+    /// The read tool output format is: "{line_num:>6} | {line}\n"
+    /// This function extracts just the line content, stripping the
+    /// line-number prefix and metadata/footer lines.
+    fn strip_line_numbers(output: &str) -> String {
+        let mut lines = Vec::new();
+        for line in output.lines() {
+            // Skip metadata lines (lines X-Y of Z) and overlap hints
+            if line.starts_with("(lines ") || line.starts_with("[Note:") {
+                continue;
+            }
+            // The read tool outputs: format!("{:>6} | {}", line_num, line)
+            // So " | " always appears at column 6 (0-indexed) when the line
+            // follows the expected format. Check for this exact position to
+            // avoid false positives on content like "2024 | some data".
+            if line.len() > 9 && line.as_bytes().get(6) == Some(&b' ') && &line[6..9] == " | " {
+                let num_part = &line[..6];
+                if num_part.trim().parse::<usize>().is_ok() {
+                    let content = &line[9..]; // skip " | " (positions 6-8)
+                    lines.push(content);
+                } else {
+                    lines.push(line);
+                }
+            } else if line.trim().is_empty() {
+                lines.push("");
+            } else {
+                lines.push(line);
+            }
+        }
+        lines.join("\n")
+    }
+
     /// Record that a file was read.
+    /// For small files (≤200 lines), preserves the full content in carryover
+    /// so the LLM doesn't need to re-read after context compression.
+    /// Respects `FULL_CONTENT_TOTAL_BUDGET` to prevent carryover from ballooning
+    /// when many small files are read — once the budget is exhausted, subsequent
+    /// entries fall back to preview mode.
     pub fn remember_read_file(&mut self, path: &str, offset: usize, limit: usize, output: &str) {
-        let preview_lines: Vec<&str> = output
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .take(6)
-            .collect();
-        let preview = preview_lines.join(" | ");
-        let preview = truncate_str(&preview, 320);
+        // Strip line numbers to store raw content
+        let raw_content = Self::strip_line_numbers(output);
+
+        let line_count = raw_content.lines().count();
+
+        let content = if line_count <= FULL_CONTENT_LINE_THRESHOLD {
+            // Small file — check budget before preserving full content.
+            let truncated = truncate_str(&raw_content, MAX_FULL_CONTENT_CHARS);
+            let new_chars = truncated.len();
+
+            // Sum chars of existing Full entries (excluding the entry we're about to replace).
+            let existing_full_chars: usize = self
+                .read_files
+                .iter()
+                .filter(|e| e.path != path)
+                .map(|e| match &e.content {
+                    ReadContent::Full(s) => s.len(),
+                    ReadContent::Preview(_) => 0,
+                })
+                .sum();
+
+            if existing_full_chars + new_chars <= FULL_CONTENT_TOTAL_BUDGET {
+                ReadContent::Full(truncated.to_string())
+            } else {
+                // Budget exhausted — fall back to preview.
+                let preview_lines: Vec<&str> = raw_content
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .take(6)
+                    .collect();
+                let preview = preview_lines.join(" | ");
+                let preview = truncate_str(&preview, 320);
+                ReadContent::Preview(preview.to_string())
+            }
+        } else {
+            // Large file — summary only
+            let preview_lines: Vec<&str> = raw_content
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .take(6)
+                .collect();
+            let preview = preview_lines.join(" | ");
+            let preview = truncate_str(&preview, 320);
+            ReadContent::Preview(preview.to_string())
+        };
 
         let entry = ReadFileEntry {
             path: path.to_string(),
             span: format!("lines {}-{}", offset + 1, offset + limit),
-            preview: preview.to_string(),
+            content,
         };
 
         // Remove previous entry for the same path
@@ -273,10 +372,18 @@ impl Carryover {
         if !self.read_files.is_empty() {
             parts.push("## Files Read".to_string());
             for entry in &self.read_files {
-                parts.push(format!(
-                    "- {} ({}) — {}",
-                    entry.path, entry.span, entry.preview
-                ));
+                match &entry.content {
+                    ReadContent::Full(content) => {
+                        parts.push(format!(
+                            "- {} ({}, full content preserved):",
+                            entry.path, entry.span
+                        ));
+                        parts.push(format!("  ````text\n{}\n  ````", content));
+                    }
+                    ReadContent::Preview(preview) => {
+                        parts.push(format!("- {} ({}) — {}", entry.path, entry.span, preview));
+                    }
+                }
             }
         }
 
@@ -518,5 +625,68 @@ mod tests {
         c.clear_goal();
         assert!(c.task_focus.goal.is_empty());
         assert!(c.task_focus.next_step.is_empty());
+    }
+
+    // --- full-content budget ---
+
+    #[test]
+    fn test_full_content_within_budget() {
+        // A small file well within budget should be stored as Full.
+        let mut c = Carryover::default();
+        // 20 lines of ~40 chars each ≈ 800 chars — well under 12,000 budget.
+        let output: String = (0..20)
+            .map(|i| format!("{:>6} | line {}", i + 1, i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        c.remember_read_file("/small.rs", 0, 20, &output);
+        assert!(matches!(c.read_files[0].content, ReadContent::Full(_)));
+    }
+
+    #[test]
+    fn test_full_content_budget_exhausted() {
+        // Read multiple small files until budget is exhausted.
+        // Each line: ~70 chars of content after stripping line numbers.
+        // 80 lines × ~70 chars = ~5,600 chars per file.
+        // Budget is 12,000: files 0 & 1 fit (~11,200), file 2 exceeds.
+        let mut c = Carryover::default();
+
+        for i in 0..3 {
+            let content: String = (0..80)
+                .map(|j| {
+                    format!(
+                        "{:>6} | {} line {:04} padding_padding_padding_padding_padding",
+                        j + 1,
+                        i,
+                        j
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            c.remember_read_file(&format!("/file_{}.rs", i), 0, 80, &content);
+        }
+
+        // First two files should be Full (within budget)
+        assert!(matches!(c.read_files[0].content, ReadContent::Full(_)));
+        assert!(matches!(c.read_files[1].content, ReadContent::Full(_)));
+        // Third file should fall back to Preview (budget exhausted)
+        assert!(matches!(c.read_files[2].content, ReadContent::Preview(_)));
+    }
+
+    #[test]
+    fn test_full_content_re_read_same_file() {
+        // Re-reading the same file should not double-count budget.
+        let mut c = Carryover::default();
+        let content: String = (0..100)
+            .map(|j| format!("{:>6} | line {:04} padding_padding_padding", j + 1, j))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Read same file twice
+        c.remember_read_file("/file.rs", 0, 100, &content);
+        c.remember_read_file("/file.rs", 0, 100, &content);
+
+        assert_eq!(c.read_files.len(), 1);
+        // Should still be Full — old entry was removed before budget check
+        assert!(matches!(c.read_files[0].content, ReadContent::Full(_)));
     }
 }

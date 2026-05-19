@@ -153,6 +153,8 @@ pub struct ToolContext {
     pub rate_limiter: Option<crate::tools::rate_limiter::SharedRateLimiter>,
     /// Tool usage statistics collector (shared across the session).
     pub tool_stats: Option<crate::tools::tool_stats::SharedToolStats>,
+    /// Shared file content pool for avoiding redundant disk reads.
+    pub file_content_pool: Option<crate::tools::file_content_pool::SharedFileContentPool>,
 }
 
 impl ToolContext {
@@ -171,6 +173,7 @@ impl ToolContext {
             cancel_token: None,
             rate_limiter: None,
             tool_stats: None,
+            file_content_pool: None,
         }
     }
 
@@ -198,6 +201,15 @@ impl ToolContext {
     /// Attach a tool stats collector to this context.
     pub fn with_tool_stats(mut self, stats: crate::tools::tool_stats::SharedToolStats) -> Self {
         self.tool_stats = Some(stats);
+        self
+    }
+
+    /// Attach a file content pool to this context.
+    pub fn with_file_content_pool(
+        mut self,
+        pool: crate::tools::file_content_pool::SharedFileContentPool,
+    ) -> Self {
+        self.file_content_pool = Some(pool);
         self
     }
 

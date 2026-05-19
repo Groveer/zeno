@@ -70,6 +70,10 @@ pub struct QueryEngine {
     /// Reduces redundant execution when the LLM calls the same tool
     /// with the same arguments within a short window.
     pub tool_cache: crate::tools::cache::SharedToolCache,
+    /// Shared file content pool for avoiding redundant disk reads.
+    /// Caches file contents in memory and tracks which line ranges
+    /// have been returned to the LLM.
+    pub file_content_pool: crate::tools::file_content_pool::SharedFileContentPool,
     /// Shared rate limiter for bash tool execution.
     pub rate_limiter: crate::tools::rate_limiter::SharedRateLimiter,
     /// Tool usage statistics collector.
@@ -148,6 +152,7 @@ impl QueryEngine {
             turns_since_skill_review: 0,
             background_cancel: None,
             tool_cache: crate::tools::cache::new_shared(),
+            file_content_pool: crate::tools::file_content_pool::new_shared(),
             rate_limiter: crate::tools::rate_limiter::new_shared(),
             tool_stats: crate::tools::tool_stats::new_shared(),
             active_identity: None,

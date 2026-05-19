@@ -1100,7 +1100,8 @@ impl QueryEngine {
             )
             .with_cancel_token(cancel.clone())
             .with_rate_limiter(self.rate_limiter.clone())
-            .with_tool_stats(self.tool_stats.clone());
+            .with_tool_stats(self.tool_stats.clone())
+            .with_file_content_pool(self.file_content_pool.clone());
 
             // Attach sub-agent dependencies if available
             if let Some(ref factory) = self.client_factory {
@@ -1819,7 +1820,8 @@ async fn execute_single_tool_tui(
     if cacheable_tools.contains(&tu.name.as_str()) {
         if let Some(cache) = config.tool_cache {
             if let Ok(mut cache) = cache.lock() {
-                if let Some(cached) = cache.get(&tu.name, &input) {
+                let normalized = crate::tools::cache::normalize_for_cache(&tu.name, &input);
+                if let Some(cached) = cache.get(&tu.name, &normalized) {
                     tracing::debug!(
                         tool_name = %tu.name,
                         "Tool result cache hit"
@@ -1845,12 +1847,12 @@ async fn execute_single_tool_tui(
     .await
     {
         Ok(Ok(result)) => {
-            // Cache result for read-only tools
-            // Cache result for read-only tools
+            // Cache result for read-only tools (use normalized args for consistent keys)
             if cacheable_tools.contains(&tu.name.as_str()) {
                 if let Some(cache) = config.tool_cache {
                     if let Ok(mut cache) = cache.lock() {
-                        cache.insert(&tu.name, &input, result.clone());
+                        let normalized = crate::tools::cache::normalize_for_cache(&tu.name, &input);
+                        cache.insert(&tu.name, &normalized, result.clone());
                     }
                 }
             }
@@ -1862,6 +1864,13 @@ async fn execute_single_tool_tui(
                         if let Ok(mut cache) = cache.lock() {
                             cache.invalidate_path(std::path::Path::new(path));
                         }
+                    }
+                    // Also invalidate the file content pool
+                    if let Some(ref pool_arc) = ctx.file_content_pool {
+                        let resolved = ctx.resolve_path(path);
+                        let resolved_str = resolved.to_string_lossy().to_string();
+                        let mut pool = pool_arc.lock().await;
+                        pool.remove(&resolved_str);
                     }
                 }
             }

@@ -395,6 +395,7 @@ async fn run_single_sub_agent(
         cancel_token: None,
         rate_limiter: None,
         tool_stats: None,
+        file_content_pool: None,
     };
 
     // Create sub-agent's API client

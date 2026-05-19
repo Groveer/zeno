@@ -96,12 +96,40 @@ impl ToolCache {
 
     /// Invalidate all cache entries whose arguments reference the given file path.
     /// Called after write/edit tools modify a file.
+    ///
+    /// Parses the JSON portion of each cache key and checks the "path" field
+    /// for exact match (not substring), avoiding false positives like
+    /// `src/main.rs` matching `src/main.rs.bak`.
     pub fn invalidate_path(&mut self, path: &Path) {
         let path_str = path.to_string_lossy();
+        let normalized = normalize_path_for_key(&path_str);
         let keys_to_remove: Vec<String> = self
             .entries
             .keys()
-            .filter(|key| key.contains(path_str.as_ref()))
+            .filter(|key| {
+                // Key format: "{tool_name}:{json}" — split on first ':'
+                let json_str = match key.find(':') {
+                    Some(pos) => &key[pos + 1..],
+                    None => return false,
+                };
+                let args: Value = match serde_json::from_str(json_str) {
+                    Ok(v) => v,
+                    Err(_) => return false,
+                };
+                // Check "path" field (used by read, write, edit, grep, glob)
+                if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
+                    if normalize_path_for_key(p) == normalized {
+                        return true;
+                    }
+                }
+                // Check "include" field for glob-style tools
+                if let Some(p) = args.get("include").and_then(|v| v.as_str()) {
+                    if normalize_path_for_key(p) == normalized {
+                        return true;
+                    }
+                }
+                false
+            })
             .cloned()
             .collect();
 
@@ -162,6 +190,87 @@ fn normalize_json(value: &Value) -> String {
         Value::Number(n) => n.to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Null => "null".into(),
+    }
+}
+
+/// Normalize tool arguments for cache key construction.
+///
+/// Only used for cacheable tools (`read`, `glob`, `grep`). Calling with
+/// other tool names returns args unchanged (harmless but unnecessary).
+///
+/// For the `read` tool, normalizes path only (`./src/main.rs` → `src/main.rs`).
+/// Offset/limit are NOT stripped to their defaults, because `parse_read_range`
+/// treats bare reads differently from explicit-default reads for small files
+/// (bare read returns full file content; explicit offset=1, limit=500 returns
+/// at most 500 lines). Keeping them distinct prevents incorrect cache hits.
+///
+/// For `glob` and `grep`, normalizes the `path` field only.
+/// For other tools, returns args unchanged.
+pub fn normalize_for_cache(tool_name: &str, args: &Value) -> Value {
+    match tool_name {
+        "read" => {
+            // Only normalize the path; preserve offset/limit/context as-is
+            // to avoid semantic collisions between bare reads and explicit reads.
+            if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
+                let normalized_path = normalize_path_for_key(p);
+                if normalized_path == p {
+                    return args.clone();
+                }
+                let mut out = args.clone();
+                if let Some(obj) = out.as_object_mut() {
+                    obj.insert("path".into(), Value::String(normalized_path));
+                }
+                out
+            } else {
+                args.clone()
+            }
+        }
+        "glob" | "grep" => {
+            // Normalize path if present
+            if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
+                let mut out = args.clone();
+                if let Some(obj) = out.as_object_mut() {
+                    obj.insert("path".into(), Value::String(normalize_path_for_key(p)));
+                }
+                out
+            } else {
+                args.clone()
+            }
+        }
+        _ => args.clone(),
+    }
+}
+
+/// Normalize a file path for cache key use.
+/// Strips leading `./` to avoid `./src/main.rs` != `src/main.rs` misses.
+fn normalize_path_for_key(path: &str) -> String {
+    let trimmed = path.trim();
+    // Remove leading "./"
+    let trimmed = trimmed.strip_prefix("./").unwrap_or(trimmed);
+
+    // Split path into components, filtering out empty components
+    let mut components = Vec::new();
+    for component in trimmed.split('/').filter(|c| !c.is_empty()) {
+        match component {
+            "." => continue,
+            ".." => {
+                // Pop previous component if exists and not at root
+                if !components.is_empty() {
+                    components.pop();
+                } else {
+                    // No previous component, keep ".."
+                    components.push("..");
+                }
+            }
+            _ => components.push(component),
+        }
+    }
+
+    // Rejoin components
+    if components.is_empty() {
+        ".".to_string() // Return current directory for empty path
+    } else {
+        components.join("/")
     }
 }
 
@@ -265,5 +374,87 @@ mod tests {
         let a = json!({"path": "src/main.rs", "options": {"limit": 10, "offset": 0}});
         let b = json!({"options": {"offset": 0, "limit": 10}, "path": "src/main.rs"});
         assert_eq!(normalize_json(&a), normalize_json(&b));
+    }
+
+    #[test]
+    fn test_normalize_for_cache_read_defaults_differ() {
+        // Bare read and explicit-default read should NOT match —
+        // parse_read_range treats them differently for small files.
+        let a = normalize_for_cache("read", &json!({"path": "src/main.rs"}));
+        let b = normalize_for_cache(
+            "read",
+            &json!({"path": "src/main.rs", "offset": 1, "limit": 500}),
+        );
+        assert_ne!(normalize_json(&a), normalize_json(&b));
+    }
+
+    #[test]
+    fn test_normalize_for_cache_read_dot_slash() {
+        // ./src/main.rs should match src/main.rs
+        let a = normalize_for_cache("read", &json!({"path": "./src/main.rs"}));
+        let b = normalize_for_cache("read", &json!({"path": "src/main.rs"}));
+        assert_eq!(normalize_json(&a), normalize_json(&b));
+    }
+
+    #[test]
+    fn test_normalize_for_cache_read_non_default() {
+        // Non-default offset/limit should be preserved
+        let a = normalize_for_cache(
+            "read",
+            &json!({"path": "src/main.rs", "offset": 100, "limit": 200}),
+        );
+        let b = normalize_for_cache("read", &json!({"path": "src/main.rs"}));
+        assert_ne!(normalize_json(&a), normalize_json(&b));
+    }
+
+    #[test]
+    fn test_normalize_for_cache_read_context_mode() {
+        // context mode should differ from offset/limit mode
+        let a = normalize_for_cache(
+            "read",
+            &json!({"path": "src/main.rs", "offset": 50, "context": 10}),
+        );
+        let b = normalize_for_cache("read", &json!({"path": "src/main.rs"}));
+        assert_ne!(normalize_json(&a), normalize_json(&b));
+    }
+
+    #[test]
+    fn test_normalize_for_cache_context_vs_offset_only() {
+        // context mode and offset-only mode must not collide
+        let a = normalize_for_cache(
+            "read",
+            &json!({"path": "src/main.rs", "offset": 50, "context": 10}),
+        );
+        let b = normalize_for_cache("read", &json!({"path": "src/main.rs", "offset": 50}));
+        assert_ne!(normalize_json(&a), normalize_json(&b));
+    }
+
+    #[test]
+    fn test_normalize_for_cache_end_to_end() {
+        // Full end-to-end: normalized key should hit the cache.
+        // Both calls use consistent args (bare read with ./ prefix).
+        let mut cache = ToolCache::new();
+        let args_a = json!({"path": "./src/main.rs"});
+        let args_b = json!({"path": "src/main.rs"});
+        let normalized_insert = normalize_for_cache("read", &args_a);
+        cache.insert("read", &normalized_insert, "file content".into());
+        let normalized_lookup = normalize_for_cache("read", &args_b);
+        assert_eq!(cache.get("read", &normalized_lookup), Some("file content"));
+    }
+
+    #[test]
+    fn test_normalize_path_for_key_dot_dot() {
+        // src/../src/main.rs should normalize to src/main.rs
+        assert_eq!(normalize_path_for_key("src/../src/main.rs"), "src/main.rs");
+        // ../src/main.rs should stay as ../src/main.rs (can't go above root)
+        assert_eq!(normalize_path_for_key("../src/main.rs"), "../src/main.rs");
+        // ./src/../main.rs should normalize to main.rs
+        assert_eq!(normalize_path_for_key("./src/../main.rs"), "main.rs");
+        // a/b/../c should normalize to a/c
+        assert_eq!(normalize_path_for_key("a/b/../c"), "a/c");
+        // a/./b should normalize to a/b
+        assert_eq!(normalize_path_for_key("a/./b"), "a/b");
+        // Empty path should become "."
+        assert_eq!(normalize_path_for_key(""), ".");
     }
 }
