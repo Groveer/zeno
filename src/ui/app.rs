@@ -39,38 +39,84 @@ fn truncate_preview(s: &str, max_chars: usize) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Truncate a string to fit within `max_width` terminal columns, respecting
-/// multi-byte UTF-8 and emoji width. Returns an owned `String`.
-fn truncate_str(s: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
+/// Word-wrap text to fit within `max_width` terminal columns, respecting
+/// multi-byte UTF-8 and emoji width. Breaks at word boundaries when possible.
+/// Returns a list of wrapped line strings.
+fn word_wrap(s: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 || s.is_empty() {
+        return if s.is_empty() { vec![] } else { vec![String::new()] };
     }
-    let total_width = crate::utils::display_width(s);
-    if total_width <= max_width {
-        return s.to_string();
+    let mut lines: Vec<String> = Vec::new();
+    for line in s.lines() {
+        wrap_single_line(line, max_width, &mut lines);
     }
-    let mut out = String::new();
-    let mut w = 0usize;
-    let chars: Vec<char> = s.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        let next = chars.get(i + 1).copied();
-        let cw = crate::utils::char_width(c, next);
-        if w + cw > max_width.saturating_sub(1) {
-            out.push('…');
-            break;
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+/// Wrap a single logical line (no embedded newlines) into multiple physical lines.
+fn wrap_single_line(line: &str, max_width: usize, out: &mut Vec<String>) {
+    let mut current = String::new();
+    let mut current_width: usize = 0;
+
+    for word in line.split_whitespace() {
+        let word_w = crate::utils::display_width(word);
+
+        // If the word itself exceeds max_width, break it character-by-character
+        if word_w > max_width {
+            // Flush what we have so far
+            if !current.is_empty() {
+                out.push(std::mem::take(&mut current));
+                current_width = 0;
+            }
+            // Break the long word character by character
+            let mut chars = word.chars().peekable();
+            while let Some(ch) = chars.next() {
+                let next = chars.peek().copied();
+                let cw = crate::utils::char_width(ch, next);
+                if current_width + cw > max_width {
+                    if !current.is_empty() {
+                        out.push(std::mem::take(&mut current));
+                        current_width = 0;
+                    }
+                }
+                current.push(ch);
+                current_width += cw;
+                // Skip VS16 if consumed as part of emoji sequence
+                if next == Some('\u{FE0F}') {
+                    if let Some(vs16) = chars.next() {
+                        current.push(vs16);
+                    }
+                }
+            }
+            continue;
         }
-        out.push(c);
-        w += cw;
-        // Skip VS16 if consumed as part of emoji sequence
-        if next == Some('\u{FE0F}') {
-            i += 2;
+
+        // Factor in the space separator between words
+        let sep_w = if current.is_empty() { 0usize } else { 1 };
+        let new_width = current_width + sep_w + word_w;
+
+        if new_width <= max_width {
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(word);
+            current_width = new_width;
         } else {
-            i += 1;
+            // Word doesn't fit on current line — start a new line
+            if !current.is_empty() {
+                out.push(std::mem::take(&mut current));
+            }
+            current.push_str(word);
+            current_width = word_w;
         }
     }
-    out
+
+    if !current.is_empty() {
+        out.push(current);
+    }
 }
 
 /// The main TUI application state.
@@ -119,6 +165,12 @@ pub struct App {
     sub_agent_tx: tokio::sync::mpsc::UnboundedSender<SubAgentEvent>,
     /// Shared todo state for the side panel.
     todo_state: Option<std::sync::Arc<tokio::sync::Mutex<TodoState>>>,
+    /// Width of the side panel (todo list) in terminal columns.
+    side_panel_width: u16,
+    /// Whether the user is currently dragging the side panel divider.
+    side_panel_dragging: bool,
+    /// X coordinate of the side panel divider (set during render, used for hit-testing).
+    divider_x: u16,
     /// Images extracted from input markers on submit, waiting for the main loop.
     pending_image_blocks: Vec<(String, String)>,
 }
@@ -174,6 +226,9 @@ impl App {
             sub_agent_rx,
             sub_agent_tx,
             todo_state: None,
+            side_panel_width: 40,
+            side_panel_dragging: false,
+            divider_x: 0,
             _watcher_guard: None,
             pending_image_blocks: Vec::new(),
         }
@@ -300,6 +355,42 @@ impl App {
             }
         });
         self.render_dirty = true;
+    }
+
+    /// Minimum / maximum side panel width (terminal columns).
+    const SIDE_PANEL_MIN: u16 = 20;
+    const SIDE_PANEL_MAX: u16 = 80;
+
+    /// Process a mouse event for side panel drag resizing.
+    pub fn handle_mouse(
+        &mut self,
+        mouse: crossterm::event::MouseEvent,
+        terminal_width: u16,
+    ) {
+        use crossterm::event::MouseEventKind;
+
+        match mouse.kind {
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                if self.side_panel_dragging {
+                    // Resize: side panel width = total - mouse column position
+                    let new_width = terminal_width.saturating_sub(mouse.column);
+                    self.side_panel_width = new_width.clamp(Self::SIDE_PANEL_MIN, Self::SIDE_PANEL_MAX);
+                    self.render_dirty = true;
+                }
+            }
+            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                // Start drag if clicking near the divider (within 2 columns)
+                if mouse.column >= self.divider_x.saturating_sub(2)
+                    && mouse.column <= self.divider_x + 1
+                {
+                    self.side_panel_dragging = true;
+                }
+            }
+            MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                self.side_panel_dragging = false;
+            }
+            _ => {}
+        }
     }
 
     /// Process keyboard events.
@@ -848,7 +939,7 @@ impl App {
 
         // Decide layout: if todo_state is present, split output area horizontally
         // with the side panel on the right. Input and status bar span full width.
-        let side_panel_width: u16 = 40;
+        let side_panel_width = self.side_panel_width;
         let has_side_panel = self
             .todo_state
             .as_ref()
@@ -860,8 +951,11 @@ impl App {
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Min(1), Constraint::Length(side_panel_width)])
                 .split(vert_output_area);
+            // Store divider x position for mouse drag hit-testing
+            self.divider_x = areas[1].x;
             (areas[0], areas[1])
         } else {
+            self.divider_x = 0;
             (vert_output_area, Rect::default())
         };
 
@@ -994,6 +1088,12 @@ impl App {
             .filter(|t| t.status == "completed")
             .count();
 
+        // Create block early so we can measure the actual content width (accounting for Borders::LEFT)
+        let block = Block::default()
+            .borders(Borders::LEFT)
+            .border_style(Style::new().fg(theme::BORDER));
+        let inner_width = block.inner(area).width as usize;
+
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         // Title line
@@ -1010,16 +1110,21 @@ impl App {
 
         // Plan name
         if !state.plan.is_empty() {
-            lines.push(Line::from(Span::styled(
-                truncate_str(&state.plan, area.width.saturating_sub(4) as usize),
-                Style::new().fg(theme::ACCENT),
-            )));
+            let plan_width = inner_width.saturating_sub(4);
+            for wrapped_line in word_wrap(&state.plan, plan_width) {
+                lines.push(Line::from(Span::styled(
+                    wrapped_line,
+                    Style::new().fg(theme::ACCENT),
+                )));
+            }
             lines.push(Line::from(""));
         }
 
         // Text-based progress bar
         if total > 0 {
-            let bar_width = area.width.saturating_sub(6) as usize;
+            let fraction = format!("{}/{}", completed, total);
+            // fixed overhead: ' ', '[', ']', ' ' = 4 chars
+            let bar_width = inner_width.saturating_sub(4 + fraction.len());
             let filled = if bar_width > 0 && total > 0 {
                 (completed * bar_width) / total
             } else {
@@ -1027,11 +1132,10 @@ impl App {
             };
             let empty = bar_width.saturating_sub(filled);
             let bar = format!(
-                " [{}{}] {}/{}",
+                " [{}{}] {}",
                 "█".repeat(filled),
                 "░".repeat(empty),
-                completed,
-                total
+                fraction
             );
             lines.push(Line::from(vec![Span::styled(
                 bar,
@@ -1041,23 +1145,32 @@ impl App {
         }
 
         // Task items
-        let content_width = area.width.saturating_sub(4) as usize;
+        let desc_width = inner_width.saturating_sub(8); // checkbox icon + spaces
         for task in &state.tasks {
             let (checkbox, color) = match task.status.as_str() {
                 "completed" => ("", theme::TEXT_DIM),
                 "in_progress" => ("", theme::ACCENT),
                 _ => ("", theme::TEXT),
             };
-            let desc = truncate_str(&task.description, content_width.saturating_sub(4));
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!(" {} ", checkbox),
-                    Style::new().fg(color).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(desc, Style::new().fg(color)),
-            ]));
+            let wrapped = word_wrap(&task.description, desc_width);
+            for (i, line) in wrapped.iter().enumerate() {
+                if i == 0 {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!(" {} ", checkbox),
+                            Style::new().fg(color).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(line.clone(), Style::new().fg(color)),
+                    ]));
+                } else {
+                    // Continuation line — indent to align with description
+                    lines.push(Line::from(vec![
+                        Span::styled("   ", Style::new().fg(color)),
+                        Span::styled(line.clone(), Style::new().fg(color)),
+                    ]));
+                }
+            }
         }
-
         if total == 0 {
             lines.push(Line::from(Span::styled(
                 " (no tasks)",
@@ -1066,10 +1179,6 @@ impl App {
         }
 
         // Render with left border
-        let block = Block::default()
-            .borders(Borders::LEFT)
-            .border_style(Style::new().fg(theme::BORDER));
-
         frame.render_widget(
             Paragraph::new(Text::from(lines))
                 .block(block)

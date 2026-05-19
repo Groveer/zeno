@@ -1355,7 +1355,13 @@ async fn main() -> anyhow::Result<()> {
                     match mouse.kind {
                         MouseEventKind::ScrollUp => app.scroll_up(3),
                         MouseEventKind::ScrollDown => app.scroll_down(3),
-                        _ => {}
+                        _ => {
+                            // Forward other mouse events (drag, press, release)
+                            // for side panel resize handling.
+                            if let Ok((w, _)) = crossterm::terminal::size() {
+                                app.handle_mouse(mouse, w);
+                            }
+                        }
                     }
                 }
                 // Bracketed paste: insert the entire pasted text at once,
