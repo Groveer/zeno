@@ -6,10 +6,20 @@
 //!
 //! Uses atomic write (temp file + rename) to prevent partial reads by concurrent instances.
 
+use std::path::Path;
+
 use crate::config::paths;
 
 /// Maximum number of history entries to persist to disk.
 pub const MAX_PERSISTED_HISTORY: usize = 2000;
+
+/// Ensure the parent directory of `path` exists.
+/// Uses `create_dir_all` which is a no-op if the directory already exists.
+fn ensure_parent(path: &Path) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+}
 
 /// Load input history from disk for an optional identity.
 ///
@@ -64,6 +74,11 @@ pub fn save_history(history: &[String], identity: Option<&str>) {
         .collect();
     match serde_json::to_string(&truncated) {
         Ok(json) => {
+            // Ensure the parent directory exists (e.g. `input_history/` for per-identity files).
+            // This is critical — without it, `std::fs::write` silently fails on first use
+            // of a per-identity history, and the old history is lost when switching back.
+            ensure_parent(&path);
+
             // Atomic write: write to temp file, then rename to final path.
             // This prevents other instances from reading a partially-written file.
             let tmp_path = path.with_extension("json.tmp");
