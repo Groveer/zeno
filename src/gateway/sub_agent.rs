@@ -47,8 +47,7 @@ impl Gateway {
                 } else {
                     vec![UiCommand::SubAgentThought(format!(
                         "#{}: {}",
-                        task_index,
-                        short.to_string(),
+                        task_index, short,
                     ))]
                 }
             }

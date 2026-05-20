@@ -124,8 +124,6 @@ impl OpenAIClient {
 
                 if !text_parts.is_empty() {
                     msg["content"] = json!(text_parts.join(""));
-                } else if !tool_uses.is_empty() {
-                    msg["content"] = json!(null);
                 } else {
                     msg["content"] = json!(null);
                 }
@@ -356,10 +354,10 @@ fn parse_openai_sse_stream(
 
             if event.data == "[DONE]" {
                 let mut flush = Vec::new();
-                if let Ok(mut pc) = pending_complete.lock() {
-                    if let Some(event) = pc.take() {
-                        flush.push(Ok(event));
-                    }
+                if let Ok(mut pc) = pending_complete.lock()
+                    && let Some(event) = pc.take()
+                {
+                    flush.push(Ok(event));
                 }
                 if let Ok(mut m) = id_map.lock() {
                     m.clear();
@@ -388,7 +386,7 @@ fn parse_openai_sse_stream(
                 Err(e) => vec![Err(ApiError::Stream(format!("lock error: {}", e)))],
             }
         };
-        stream::once(evs).map(|v| stream::iter(v)).flatten()
+        stream::once(evs).map(stream::iter).flatten()
     });
 
     // After the SSE stream ends (without [DONE]), drain any pending events.
@@ -399,10 +397,10 @@ fn parse_openai_sse_stream(
     let drain_id_map = id_map.clone();
     let drain = stream::once(async move {
         // Check pending_complete first (higher priority — has usage info)
-        if let Ok(mut pc) = drain_complete.lock() {
-            if let Some(event) = pc.take() {
-                return Some(Ok(event));
-            }
+        if let Ok(mut pc) = drain_complete.lock()
+            && let Some(event) = pc.take()
+        {
+            return Some(Ok(event));
         }
         // Then check pending_reason (no usage chunk was ever sent)
         if let Ok(mut pr) = drain_reason.lock()

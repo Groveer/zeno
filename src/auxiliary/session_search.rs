@@ -48,9 +48,14 @@ fn format_index_for_search(index: &[SessionIndexEntry]) -> String {
         .map(|(i, entry)| {
             // Convert UTC to local time for display
             let local_time = utc_to_local_display(&entry.saved_at);
+            let identity_tag = match &entry.identity {
+                Some(id) => format!(" [identity: {}]", id),
+                None => String::new(),
+            };
             format!(
-                "[{}] {} — {} ({}, {} tokens)",
+                "[{}]{} {} — {} ({}, {} tokens)",
                 i + 1,
+                identity_tag,
                 local_time,
                 entry.one_liner,
                 entry.model,

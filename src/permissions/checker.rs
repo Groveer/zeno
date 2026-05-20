@@ -379,49 +379,48 @@ pub fn evaluate_permission(
     denied_commands: &[String],
 ) -> PermissionDecision {
     // 0. Trusted path check — bypasses all other checks
-    if let Some(path) = file_path {
-        if trusted_paths
+    if let Some(path) = file_path
+        && trusted_paths
             .iter()
             .any(|trusted| path.starts_with(trusted))
-        {
-            tracing::debug!(
-                tool_name = %tool_name,
-                permission_decision = "allowed",
-                reason = "trusted_path",
-                file_path = %path.display(),
-                "Permission allowed by trusted path"
-            );
-            return PermissionDecision {
-                allowed: true,
-                requires_confirmation: false,
-                reason: "Path is under trusted path".to_string(),
-            };
-        }
+    {
+        tracing::debug!(
+            tool_name = %tool_name,
+            permission_decision = "allowed",
+            reason = "trusted_path",
+            file_path = %path.display(),
+            "Permission allowed by trusted path"
+        );
+        return PermissionDecision {
+            allowed: true,
+            requires_confirmation: false,
+            reason: "Path is under trusted path".to_string(),
+        };
     }
 
     // Denied commands: blocked unconditionally, before mode check
-    if tool_name == "bash" {
-        if let Some(cmd) = command {
-            let trimmed = cmd.trim();
-            for denied in denied_commands {
-                if trimmed.contains(denied) {
-                    tracing::warn!(
-                        tool_name = "bash",
-                        permission_decision = "denied",
-                        reason = "denied_command",
-                        command = %cmd,
-                        denied_pattern = %denied,
-                        "Command blocked by denied_commands"
-                    );
-                    return PermissionDecision {
-                        allowed: false,
-                        requires_confirmation: false,
-                        reason: format!(
-                            "Command '{}' is blocked by policy",
-                            cmd.chars().take(80).collect::<String>()
-                        ),
-                    };
-                }
+    if tool_name == "bash"
+        && let Some(cmd) = command
+    {
+        let trimmed = cmd.trim();
+        for denied in denied_commands {
+            if trimmed.contains(denied) {
+                tracing::warn!(
+                    tool_name = "bash",
+                    permission_decision = "denied",
+                    reason = "denied_command",
+                    command = %cmd,
+                    denied_pattern = %denied,
+                    "Command blocked by denied_commands"
+                );
+                return PermissionDecision {
+                    allowed: false,
+                    requires_confirmation: false,
+                    reason: format!(
+                        "Command '{}' is blocked by policy",
+                        cmd.chars().take(80).collect::<String>()
+                    ),
+                };
             }
         }
     }
@@ -488,213 +487,212 @@ pub fn evaluate_permission(
             }
 
             // --- Bash commands: relaxed check ---
-            if tool_name == "bash" {
-                if let Some(cmd) = command {
-                    // Check for shell injection / expansion that could bypass checks nested sub-commands
-                    let has_shell_expansion = cmd.contains('$') || cmd.contains('`');
-                    let has_path_traversal = cmd.contains("../")
-                        || cmd.contains("/..")
-                        || cmd.ends_with("..")
-                        || cmd.contains("..\\");
+            if tool_name == "bash"
+                && let Some(cmd) = command
+            {
+                // Check for shell injection / expansion that could bypass checks nested sub-commands
+                let has_shell_expansion = cmd.contains('$') || cmd.contains('`');
+                let has_path_traversal = cmd.contains("../")
+                    || cmd.contains("/..")
+                    || cmd.ends_with("..")
+                    || cmd.contains("..\\");
 
-                    // Destructive commands always require confirmation
-                    if is_destructive_command(cmd, extra_destructive_commands) {
-                        tracing::info!(
-                            tool_name = "bash",
-                            permission_decision = "requires_confirmation",
-                            mode = "ask",
-                            reason = "destructive_command",
-                            command = %cmd,
-                            "Destructive bash command requires confirmation"
-                        );
-                        return PermissionDecision {
-                            allowed: false,
-                            requires_confirmation: true,
-                            reason: format!(
-                                "Destructive command requires confirmation: {}",
-                                cmd.chars().take(80).collect::<String>()
-                            ),
-                        };
-                    }
-
-                    // Path traversal: requires confirmation (can't safely resolve statically)
-                    if has_path_traversal {
-                        tracing::info!(
-                            tool_name = "bash",
-                            permission_decision = "requires_confirmation",
-                            mode = "ask",
-                            has_path_traversal = has_path_traversal,
-                            command = %cmd,
-                            "Command with path traversal requires confirmation"
-                        );
-                        return PermissionDecision {
-                            allowed: false,
-                            requires_confirmation: true,
-                            reason: "Command contains path traversal".to_string(),
-                        };
-                    }
-
-                    // Shell expansion: parse and check $(...) / `...` sub-commands
-                    if has_shell_expansion {
-                        let subcommands = extract_subshell_commands(cmd);
-                        // Check each subshell sub-command for destructive/sensitive operations
-                        for sub in &subcommands {
-                            let sub_trimmed = sub.trim();
-                            if sub_trimmed.is_empty() {
-                                continue;
-                            }
-                            // Run the same destructive check on the sub-command
-                            if is_destructive_command(sub_trimmed, extra_destructive_commands) {
-                                tracing::info!(
-                                    tool_name = "bash",
-                                    permission_decision = "requires_confirmation",
-                                    mode = "ask",
-                                    reason = "destructive_in_subshell",
-                                    command = %cmd,
-                                    subshell_cmd = %sub_trimmed,
-                                    "Subshell sub-command is destructive"
-                                );
-                                return PermissionDecision {
-                                    allowed: false,
-                                    requires_confirmation: true,
-                                    reason: format!(
-                                        "Subshell sub-command '{}' is destructive",
-                                        sub_trimmed.chars().take(60).collect::<String>()
-                                    ),
-                                };
-                            }
-                            // Check sensitive paths in the sub-command
-                            let sensitive_prefixes = [
-                                "/etc/",
-                                "/root/",
-                                "/var/",
-                                "/proc/",
-                                "/sys/",
-                                "/boot/",
-                                "/usr/local/etc/",
-                                "/opt/",
-                            ];
-                            let has_sensitive_path = sensitive_prefixes
-                                .iter()
-                                .any(|prefix| sub_trimmed.contains(prefix));
-                            let home_prefix = if cfg!(target_os = "macos") {
-                                "/Users"
-                            } else {
-                                "/home"
-                            };
-                            let contains_other_home = sub_trimmed.contains(home_prefix)
-                                && !sub_trimmed.contains(&cwd.to_string_lossy().to_string());
-
-                            if has_sensitive_path || contains_other_home {
-                                tracing::info!(
-                                    tool_name = "bash",
-                                    permission_decision = "requires_confirmation",
-                                    mode = "ask",
-                                    reason = "sensitive_path_in_subshell",
-                                    command = %cmd,
-                                    subshell_cmd = %sub_trimmed,
-                                    "Subshell sub-command accesses sensitive paths"
-                                );
-                                return PermissionDecision {
-                                    allowed: false,
-                                    requires_confirmation: true,
-                                    reason: format!(
-                                        "Subshell sub-command accesses sensitive paths: {}",
-                                        sub_trimmed.chars().take(60).collect::<String>()
-                                    ),
-                                };
-                            }
-
-                            // Check path traversal in the sub-command
-                            if sub_trimmed.contains("../")
-                                || sub_trimmed.contains("/..")
-                                || sub_trimmed.ends_with("..")
-                                || sub_trimmed.contains("..\\")
-                            {
-                                tracing::info!(
-                                    tool_name = "bash",
-                                    permission_decision = "requires_confirmation",
-                                    mode = "ask",
-                                    reason = "path_traversal_in_subshell",
-                                    command = %cmd,
-                                    subshell_cmd = %sub_trimmed,
-                                    "Subshell sub-command has path traversal"
-                                );
-                                return PermissionDecision {
-                                    allowed: false,
-                                    requires_confirmation: true,
-                                    reason: format!(
-                                        "Subshell sub-command contains path traversal: {}",
-                                        sub_trimmed.chars().take(60).collect::<String>()
-                                    ),
-                                };
-                            }
-                        }
-
-                        // All sub-commands are safe — log and continue to check the main command
-                        tracing::debug!(
-                            tool_name = "bash",
-                            permission_decision = "allowed_after_subshell_check",
-                            mode = "ask",
-                            command = %cmd,
-                            subcommands = ?subcommands,
-                            "All subshell sub-commands are safe, continuing to check main command"
-                        );
-                    }
-
-                    // Check if command accesses sensitive paths outside safe zone
-                    let sensitive_prefixes = [
-                        "/etc/",
-                        "/root/",
-                        "/var/",
-                        "/proc/",
-                        "/sys/",
-                        "/boot/",
-                        "/usr/local/etc/",
-                        "/opt/",
-                    ];
-                    let has_sensitive_path =
-                        sensitive_prefixes.iter().any(|prefix| cmd.contains(prefix));
-                    let home_prefix = if cfg!(target_os = "macos") {
-                        "/Users"
-                    } else {
-                        "/home"
-                    };
-                    let contains_other_home = cmd.contains(home_prefix)
-                        && !cmd.contains(&cwd.to_string_lossy().to_string());
-
-                    if has_sensitive_path || contains_other_home {
-                        tracing::info!(
-                            tool_name = "bash",
-                            permission_decision = "requires_confirmation",
-                            mode = "ask",
-                            has_sensitive_path = has_sensitive_path,
-                            contains_other_home = contains_other_home,
-                            command = %cmd,
-                            "Command accessing sensitive/external paths requires confirmation"
-                        );
-                        return PermissionDecision {
-                            allowed: false,
-                            requires_confirmation: true,
-                            reason: "Command may access system-sensitive or external paths"
-                                .to_string(),
-                        };
-                    }
-
-                    // Non-destructive command, no expansion, no sensitive paths → auto-allow
-                    tracing::debug!(
+                // Destructive commands always require confirmation
+                if is_destructive_command(cmd, extra_destructive_commands) {
+                    tracing::info!(
                         tool_name = "bash",
-                        permission_decision = "allowed",
+                        permission_decision = "requires_confirmation",
                         mode = "ask",
+                        reason = "destructive_command",
                         command = %cmd,
-                        "Non-destructive bash command auto-allowed in relaxed mode"
+                        "Destructive bash command requires confirmation"
                     );
                     return PermissionDecision {
-                        allowed: true,
-                        requires_confirmation: false,
-                        reason: "Non-destructive command in relaxed mode".to_string(),
+                        allowed: false,
+                        requires_confirmation: true,
+                        reason: format!(
+                            "Destructive command requires confirmation: {}",
+                            cmd.chars().take(80).collect::<String>()
+                        ),
                     };
                 }
+
+                // Path traversal: requires confirmation (can't safely resolve statically)
+                if has_path_traversal {
+                    tracing::info!(
+                        tool_name = "bash",
+                        permission_decision = "requires_confirmation",
+                        mode = "ask",
+                        has_path_traversal = has_path_traversal,
+                        command = %cmd,
+                        "Command with path traversal requires confirmation"
+                    );
+                    return PermissionDecision {
+                        allowed: false,
+                        requires_confirmation: true,
+                        reason: "Command contains path traversal".to_string(),
+                    };
+                }
+
+                // Shell expansion: parse and check $(...) / `...` sub-commands
+                if has_shell_expansion {
+                    let subcommands = extract_subshell_commands(cmd);
+                    // Check each subshell sub-command for destructive/sensitive operations
+                    for sub in &subcommands {
+                        let sub_trimmed = sub.trim();
+                        if sub_trimmed.is_empty() {
+                            continue;
+                        }
+                        // Run the same destructive check on the sub-command
+                        if is_destructive_command(sub_trimmed, extra_destructive_commands) {
+                            tracing::info!(
+                                tool_name = "bash",
+                                permission_decision = "requires_confirmation",
+                                mode = "ask",
+                                reason = "destructive_in_subshell",
+                                command = %cmd,
+                                subshell_cmd = %sub_trimmed,
+                                "Subshell sub-command is destructive"
+                            );
+                            return PermissionDecision {
+                                allowed: false,
+                                requires_confirmation: true,
+                                reason: format!(
+                                    "Subshell sub-command '{}' is destructive",
+                                    sub_trimmed.chars().take(60).collect::<String>()
+                                ),
+                            };
+                        }
+                        // Check sensitive paths in the sub-command
+                        let sensitive_prefixes = [
+                            "/etc/",
+                            "/root/",
+                            "/var/",
+                            "/proc/",
+                            "/sys/",
+                            "/boot/",
+                            "/usr/local/etc/",
+                            "/opt/",
+                        ];
+                        let has_sensitive_path = sensitive_prefixes
+                            .iter()
+                            .any(|prefix| sub_trimmed.contains(prefix));
+                        let home_prefix = if cfg!(target_os = "macos") {
+                            "/Users"
+                        } else {
+                            "/home"
+                        };
+                        let contains_other_home = sub_trimmed.contains(home_prefix)
+                            && !sub_trimmed.contains(&cwd.to_string_lossy().to_string());
+
+                        if has_sensitive_path || contains_other_home {
+                            tracing::info!(
+                                tool_name = "bash",
+                                permission_decision = "requires_confirmation",
+                                mode = "ask",
+                                reason = "sensitive_path_in_subshell",
+                                command = %cmd,
+                                subshell_cmd = %sub_trimmed,
+                                "Subshell sub-command accesses sensitive paths"
+                            );
+                            return PermissionDecision {
+                                allowed: false,
+                                requires_confirmation: true,
+                                reason: format!(
+                                    "Subshell sub-command accesses sensitive paths: {}",
+                                    sub_trimmed.chars().take(60).collect::<String>()
+                                ),
+                            };
+                        }
+
+                        // Check path traversal in the sub-command
+                        if sub_trimmed.contains("../")
+                            || sub_trimmed.contains("/..")
+                            || sub_trimmed.ends_with("..")
+                            || sub_trimmed.contains("..\\")
+                        {
+                            tracing::info!(
+                                tool_name = "bash",
+                                permission_decision = "requires_confirmation",
+                                mode = "ask",
+                                reason = "path_traversal_in_subshell",
+                                command = %cmd,
+                                subshell_cmd = %sub_trimmed,
+                                "Subshell sub-command has path traversal"
+                            );
+                            return PermissionDecision {
+                                allowed: false,
+                                requires_confirmation: true,
+                                reason: format!(
+                                    "Subshell sub-command contains path traversal: {}",
+                                    sub_trimmed.chars().take(60).collect::<String>()
+                                ),
+                            };
+                        }
+                    }
+
+                    // All sub-commands are safe — log and continue to check the main command
+                    tracing::debug!(
+                        tool_name = "bash",
+                        permission_decision = "allowed_after_subshell_check",
+                        mode = "ask",
+                        command = %cmd,
+                        subcommands = ?subcommands,
+                        "All subshell sub-commands are safe, continuing to check main command"
+                    );
+                }
+
+                // Check if command accesses sensitive paths outside safe zone
+                let sensitive_prefixes = [
+                    "/etc/",
+                    "/root/",
+                    "/var/",
+                    "/proc/",
+                    "/sys/",
+                    "/boot/",
+                    "/usr/local/etc/",
+                    "/opt/",
+                ];
+                let has_sensitive_path =
+                    sensitive_prefixes.iter().any(|prefix| cmd.contains(prefix));
+                let home_prefix = if cfg!(target_os = "macos") {
+                    "/Users"
+                } else {
+                    "/home"
+                };
+                let contains_other_home =
+                    cmd.contains(home_prefix) && !cmd.contains(&cwd.to_string_lossy().to_string());
+
+                if has_sensitive_path || contains_other_home {
+                    tracing::info!(
+                        tool_name = "bash",
+                        permission_decision = "requires_confirmation",
+                        mode = "ask",
+                        has_sensitive_path = has_sensitive_path,
+                        contains_other_home = contains_other_home,
+                        command = %cmd,
+                        "Command accessing sensitive/external paths requires confirmation"
+                    );
+                    return PermissionDecision {
+                        allowed: false,
+                        requires_confirmation: true,
+                        reason: "Command may access system-sensitive or external paths".to_string(),
+                    };
+                }
+
+                // Non-destructive command, no expansion, no sensitive paths → auto-allow
+                tracing::debug!(
+                    tool_name = "bash",
+                    permission_decision = "allowed",
+                    mode = "ask",
+                    command = %cmd,
+                    "Non-destructive bash command auto-allowed in relaxed mode"
+                );
+                return PermissionDecision {
+                    allowed: true,
+                    requires_confirmation: false,
+                    reason: "Non-destructive command in relaxed mode".to_string(),
+                };
             }
 
             // --- File-based tools (write, edit, glob, grep, read): ---

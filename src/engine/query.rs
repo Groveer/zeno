@@ -543,19 +543,18 @@ impl QueryEngine {
                 if !vision_context.is_empty() {
                     effective_system_prompt.push_str(&vision_context);
                 }
-                if let Some(he) = &self.hook_executor {
-                    if he.has_hooks_for(HookEvent::PreLlmCall) {
-                        if let Ok(ctx) = he.build_context() {
-                            let _ = ctx.set("model", self.model.as_str());
-                            let _ = ctx.set("turn", turn as i64);
-                            let _ = ctx.set("cwd", self.cwd.to_string_lossy().to_string());
-                            let _ = ctx.set("message_count", messages.len() as i64);
-                            let injected = he.execute_pre_llm(&ctx).await;
-                            for text in injected {
-                                effective_system_prompt.push_str("\n\n");
-                                effective_system_prompt.push_str(&text);
-                            }
-                        }
+                if let Some(he) = &self.hook_executor
+                    && he.has_hooks_for(HookEvent::PreLlmCall)
+                    && let Ok(ctx) = he.build_context()
+                {
+                    let _ = ctx.set("model", self.model.as_str());
+                    let _ = ctx.set("turn", turn as i64);
+                    let _ = ctx.set("cwd", self.cwd.to_string_lossy().to_string());
+                    let _ = ctx.set("message_count", messages.len() as i64);
+                    let injected = he.execute_pre_llm(&ctx).await;
+                    for text in injected {
+                        effective_system_prompt.push_str("\n\n");
+                        effective_system_prompt.push_str(&text);
                     }
                 }
 
@@ -796,27 +795,21 @@ impl QueryEngine {
                             last_stop_reason = Some(stop_reason);
 
                             // --- PostLlmCall hook ---
-                            if let Some(he) = &self.hook_executor {
-                                if he.has_hooks_for(HookEvent::PostLlmCall) {
-                                    if let Ok(ctx) = he.build_context() {
-                                        let _ = ctx.set("model", self.model.as_str());
-                                        let _ = ctx.set("turn", turn as i64);
-                                        let _ = ctx
-                                            .set("input_tokens", final_usage.input_tokens as i64);
-                                        let _ = ctx
-                                            .set("output_tokens", final_usage.output_tokens as i64);
-                                        let _ = ctx.set(
-                                            "total_tokens",
-                                            (final_usage.input_tokens + final_usage.output_tokens)
-                                                as i64,
-                                        );
-                                        let _ = ctx
-                                            .set("stop_reason", format!("{:?}", last_stop_reason));
-                                        let _ =
-                                            ctx.set("cwd", self.cwd.to_string_lossy().to_string());
-                                        he.execute_post_llm(&ctx).await;
-                                    }
-                                }
+                            if let Some(he) = &self.hook_executor
+                                && he.has_hooks_for(HookEvent::PostLlmCall)
+                                && let Ok(ctx) = he.build_context()
+                            {
+                                let _ = ctx.set("model", self.model.as_str());
+                                let _ = ctx.set("turn", turn as i64);
+                                let _ = ctx.set("input_tokens", final_usage.input_tokens as i64);
+                                let _ = ctx.set("output_tokens", final_usage.output_tokens as i64);
+                                let _ = ctx.set(
+                                    "total_tokens",
+                                    (final_usage.input_tokens + final_usage.output_tokens) as i64,
+                                );
+                                let _ = ctx.set("stop_reason", format!("{:?}", last_stop_reason));
+                                let _ = ctx.set("cwd", self.cwd.to_string_lossy().to_string());
+                                he.execute_post_llm(&ctx).await;
                             }
                         }
                         Err(e) => {
@@ -1239,17 +1232,15 @@ impl QueryEngine {
                             content,
                             is_error,
                         } = block
+                            && (is_error.is_none() || *is_error == Some(false))
+                            && content.starts_with("Replaced")
                         {
-                            if (is_error.is_none() || *is_error == Some(false))
-                                && content.starts_with("Replaced")
+                            // Find the matching tool_use name
+                            if tool_uses
+                                .iter()
+                                .any(|tu| tu.id == *tool_use_id && tu.name == "edit")
                             {
-                                // Find the matching tool_use name
-                                if tool_uses
-                                    .iter()
-                                    .any(|tu| tu.id == *tool_use_id && tu.name == "edit")
-                                {
-                                    successful_edit_ids.insert(tool_use_id.clone());
-                                }
+                                successful_edit_ids.insert(tool_use_id.clone());
                             }
                         }
                     }
@@ -1524,7 +1515,7 @@ impl QueryEngine {
         let entries = self.history.entries_raw();
         let total = entries.len();
         // Take the last 10 entries for the summary
-        let start = if total > 10 { total - 10 } else { 0 };
+        let start = total.saturating_sub(10);
         let mut lines = Vec::new();
         for entry in &entries[start..] {
             for block in &entry.content {
@@ -1635,30 +1626,29 @@ async fn execute_single_tool_tui(
     };
 
     // --- Pre-tool-use hook ---
-    if let Some(he) = config.hook_executor {
-        if he.has_hooks_for(HookEvent::PreToolUse) {
-            if let Ok(hook_ctx) = he.build_context() {
-                let _ = hook_ctx.set("tool_name", tu.name.as_str());
-                let _ = hook_ctx.set(
-                    "tool_input",
-                    crate::hooks::executor::json_to_lua_value(&*he.lua(), &input),
-                );
-                let _ = hook_ctx.set("cwd", ctx.get_cwd().to_string_lossy().to_string());
-                if let Some(block_reason) = he
-                    .execute_first_block(HookEvent::PreToolUse, &hook_ctx)
-                    .await
-                {
-                    let _ = sender.send(EngineEvent::ToolError {
-                        name: tu.name.clone(),
-                        error: block_reason.clone(),
-                    });
-                    return Some(ContentBlock::ToolResult {
-                        tool_use_id: tu.id.clone(),
-                        content: block_reason,
-                        is_error: Some(true),
-                    });
-                }
-            }
+    if let Some(he) = config.hook_executor
+        && he.has_hooks_for(HookEvent::PreToolUse)
+        && let Ok(hook_ctx) = he.build_context()
+    {
+        let _ = hook_ctx.set("tool_name", tu.name.as_str());
+        let _ = hook_ctx.set(
+            "tool_input",
+            crate::hooks::executor::json_to_lua_value(&he.lua(), &input),
+        );
+        let _ = hook_ctx.set("cwd", ctx.get_cwd().to_string_lossy().to_string());
+        if let Some(block_reason) = he
+            .execute_first_block(HookEvent::PreToolUse, &hook_ctx)
+            .await
+        {
+            let _ = sender.send(EngineEvent::ToolError {
+                name: tu.name.clone(),
+                error: block_reason.clone(),
+            });
+            return Some(ContentBlock::ToolResult {
+                tool_use_id: tu.id.clone(),
+                content: block_reason,
+                is_error: Some(true),
+            });
         }
     }
 
@@ -1818,26 +1808,25 @@ async fn execute_single_tool_tui(
 
     // --- Tool result cache lookup (read-only tools only) ---
     let cacheable_tools = ["read", "glob", "grep"];
-    if cacheable_tools.contains(&tu.name.as_str()) {
-        if let Some(cache) = config.tool_cache {
-            if let Ok(mut cache) = cache.lock() {
-                let normalized = crate::tools::cache::normalize_for_cache(&tu.name, &input);
-                if let Some(cached) = cache.get(&tu.name, &normalized) {
-                    tracing::debug!(
-                        tool_name = %tu.name,
-                        "Tool result cache hit"
-                    );
-                    let _ = sender.send(EngineEvent::ToolOutput {
-                        name: tu.name.clone(),
-                        output: format!("(cached) {} chars", cached.len()),
-                    });
-                    return Some(ContentBlock::ToolResult {
-                        tool_use_id: tu.id.clone(),
-                        content: cached.to_string(),
-                        is_error: None,
-                    });
-                }
-            }
+    if cacheable_tools.contains(&tu.name.as_str())
+        && let Some(cache) = config.tool_cache
+        && let Ok(mut cache) = cache.lock()
+    {
+        let normalized = crate::tools::cache::normalize_for_cache(&tu.name, &input);
+        if let Some(cached) = cache.get(&tu.name, &normalized) {
+            tracing::debug!(
+                tool_name = %tu.name,
+                "Tool result cache hit"
+            );
+            let _ = sender.send(EngineEvent::ToolOutput {
+                name: tu.name.clone(),
+                output: format!("(cached) {} chars", cached.len()),
+            });
+            return Some(ContentBlock::ToolResult {
+                tool_use_id: tu.id.clone(),
+                content: cached.to_string(),
+                is_error: None,
+            });
         }
     }
 
@@ -1849,30 +1838,29 @@ async fn execute_single_tool_tui(
     {
         Ok(Ok(result)) => {
             // Cache result for read-only tools (use normalized args for consistent keys)
-            if cacheable_tools.contains(&tu.name.as_str()) {
-                if let Some(cache) = config.tool_cache {
-                    if let Ok(mut cache) = cache.lock() {
-                        let normalized = crate::tools::cache::normalize_for_cache(&tu.name, &input);
-                        cache.insert(&tu.name, &normalized, result.clone());
-                    }
-                }
+            if cacheable_tools.contains(&tu.name.as_str())
+                && let Some(cache) = config.tool_cache
+                && let Ok(mut cache) = cache.lock()
+            {
+                let normalized = crate::tools::cache::normalize_for_cache(&tu.name, &input);
+                cache.insert(&tu.name, &normalized, result.clone());
             }
 
             // Invalidate cache on write/edit
-            if tu.name == "write" || tu.name == "edit" {
-                if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
-                    if let Some(cache) = config.tool_cache {
-                        if let Ok(mut cache) = cache.lock() {
-                            cache.invalidate_path(std::path::Path::new(path));
-                        }
-                    }
-                    // Also invalidate the file content pool
-                    if let Some(ref pool_arc) = ctx.file_content_pool {
-                        let resolved = ctx.resolve_path(path);
-                        let resolved_str = resolved.to_string_lossy().to_string();
-                        let mut pool = pool_arc.lock().await;
-                        pool.remove(&resolved_str);
-                    }
+            if (tu.name == "write" || tu.name == "edit")
+                && let Some(path) = input.get("path").and_then(|v| v.as_str())
+            {
+                if let Some(cache) = config.tool_cache
+                    && let Ok(mut cache) = cache.lock()
+                {
+                    cache.invalidate_path(std::path::Path::new(path));
+                }
+                // Also invalidate the file content pool
+                if let Some(ref pool_arc) = ctx.file_content_pool {
+                    let resolved = ctx.resolve_path(path);
+                    let resolved_str = resolved.to_string_lossy().to_string();
+                    let mut pool = pool_arc.lock().await;
+                    pool.remove(&resolved_str);
                 }
             }
             // Show a compact one-line summary in the TUI; full content goes to LLM.
@@ -1883,17 +1871,15 @@ async fn execute_single_tool_tui(
             });
 
             // For edit tool, extract diff from structured JSON result
-            if tu.name == "edit" {
-                if let Ok(parsed) = serde_json::from_str::<Value>(&result) {
-                    if let Some(diff_str) = parsed.get("diff").and_then(|d| d.as_str()) {
-                        if !diff_str.is_empty() {
-                            let _ = sender.send(EngineEvent::ToolDiff {
-                                name: tu.name.clone(),
-                                diff: diff_str.to_string(),
-                            });
-                        }
-                    }
-                }
+            if tu.name == "edit"
+                && let Ok(parsed) = serde_json::from_str::<Value>(&result)
+                && let Some(diff_str) = parsed.get("diff").and_then(|d| d.as_str())
+                && !diff_str.is_empty()
+            {
+                let _ = sender.send(EngineEvent::ToolDiff {
+                    name: tu.name.clone(),
+                    diff: diff_str.to_string(),
+                });
             }
             tracing::info!(
                 tool_name = %tu.name,
@@ -1904,20 +1890,19 @@ async fn execute_single_tool_tui(
             );
 
             // --- Post-tool-use hook ---
-            if let Some(he) = config.hook_executor {
-                if he.has_hooks_for(HookEvent::PostToolUse) {
-                    if let Ok(hook_ctx) = he.build_context() {
-                        let _ = hook_ctx.set("tool_name", tu.name.as_str());
-                        let _ = hook_ctx.set(
-                            "tool_input",
-                            crate::hooks::executor::json_to_lua_value(&*he.lua(), &input),
-                        );
-                        let _ = hook_ctx.set("tool_output", result.clone());
-                        let _ = hook_ctx.set("tool_is_error", false);
-                        let _ = hook_ctx.set("cwd", ctx.get_cwd().to_string_lossy().to_string());
-                        he.execute(HookEvent::PostToolUse, &hook_ctx).await;
-                    }
-                }
+            if let Some(he) = config.hook_executor
+                && he.has_hooks_for(HookEvent::PostToolUse)
+                && let Ok(hook_ctx) = he.build_context()
+            {
+                let _ = hook_ctx.set("tool_name", tu.name.as_str());
+                let _ = hook_ctx.set(
+                    "tool_input",
+                    crate::hooks::executor::json_to_lua_value(&he.lua(), &input),
+                );
+                let _ = hook_ctx.set("tool_output", result.clone());
+                let _ = hook_ctx.set("tool_is_error", false);
+                let _ = hook_ctx.set("cwd", ctx.get_cwd().to_string_lossy().to_string());
+                he.execute(HookEvent::PostToolUse, &hook_ctx).await;
             }
 
             Some(ContentBlock::ToolResult {
@@ -1940,20 +1925,19 @@ async fn execute_single_tool_tui(
             });
 
             // --- Post-tool-use hook (error case) ---
-            if let Some(he) = config.hook_executor {
-                if he.has_hooks_for(HookEvent::PostToolUse) {
-                    if let Ok(hook_ctx) = he.build_context() {
-                        let _ = hook_ctx.set("tool_name", tu.name.as_str());
-                        let _ = hook_ctx.set(
-                            "tool_input",
-                            crate::hooks::executor::json_to_lua_value(&*he.lua(), &input),
-                        );
-                        let _ = hook_ctx.set("tool_output", e.to_string());
-                        let _ = hook_ctx.set("tool_is_error", true);
-                        let _ = hook_ctx.set("cwd", ctx.get_cwd().to_string_lossy().to_string());
-                        he.execute(HookEvent::PostToolUse, &hook_ctx).await;
-                    }
-                }
+            if let Some(he) = config.hook_executor
+                && he.has_hooks_for(HookEvent::PostToolUse)
+                && let Ok(hook_ctx) = he.build_context()
+            {
+                let _ = hook_ctx.set("tool_name", tu.name.as_str());
+                let _ = hook_ctx.set(
+                    "tool_input",
+                    crate::hooks::executor::json_to_lua_value(&he.lua(), &input),
+                );
+                let _ = hook_ctx.set("tool_output", e.to_string());
+                let _ = hook_ctx.set("tool_is_error", true);
+                let _ = hook_ctx.set("cwd", ctx.get_cwd().to_string_lossy().to_string());
+                he.execute(HookEvent::PostToolUse, &hook_ctx).await;
             }
 
             Some(ContentBlock::ToolResult {
@@ -1978,15 +1962,14 @@ async fn execute_single_tool_tui(
                 error: timeout_msg.clone(),
             });
 
-            if let Some(he) = config.hook_executor {
-                if he.has_hooks_for(HookEvent::PostToolUse) {
-                    if let Ok(hook_ctx) = he.build_context() {
-                        let _ = hook_ctx.set("tool_name", tu.name.as_str());
-                        let _ = hook_ctx.set("tool_is_error", true);
-                        let _ = hook_ctx.set("cwd", ctx.get_cwd().to_string_lossy().to_string());
-                        he.execute(HookEvent::PostToolUse, &hook_ctx).await;
-                    }
-                }
+            if let Some(he) = config.hook_executor
+                && he.has_hooks_for(HookEvent::PostToolUse)
+                && let Ok(hook_ctx) = he.build_context()
+            {
+                let _ = hook_ctx.set("tool_name", tu.name.as_str());
+                let _ = hook_ctx.set("tool_is_error", true);
+                let _ = hook_ctx.set("cwd", ctx.get_cwd().to_string_lossy().to_string());
+                he.execute(HookEvent::PostToolUse, &hook_ctx).await;
             }
 
             Some(ContentBlock::ToolResult {
@@ -2130,13 +2113,13 @@ fn summarize_tool_output(tool_name: &str, output: &str, _input_json: &str) -> St
         // edit: compute diff from input for color-coded display
         "edit" => {
             // Structured JSON result from the edit tool
-            if let Ok(parsed) = serde_json::from_str::<Value>(output) {
-                if let Some(summary) = parsed.get("summary").and_then(|s| s.as_str()) {
-                    return summary.to_string();
-                }
+            if let Ok(parsed) = serde_json::from_str::<Value>(output)
+                && let Some(summary) = parsed.get("summary").and_then(|s| s.as_str())
+            {
+                return summary.to_string();
             }
             // Fallback: plain text result
-            return output.to_string();
+            output.to_string()
         }
         // todo: only show the action result line (e.g. " Updated T1 → in_progress").
         // The right-side UI panel already renders the full task list with progress,
@@ -2182,22 +2165,22 @@ fn summarize_tool_output(tool_name: &str, output: &str, _input_json: &str) -> St
                 }
 
                 // Show entries as a compact list
-                if let Some(entries) = val.get("entries").and_then(|v| v.as_array()) {
-                    if !entries.is_empty() {
-                        result.push_str(&format!("\n  {} entries:", entry_count));
-                        for entry in entries.iter().take(5) {
-                            if let Some(text) = entry.as_str() {
-                                let preview: String = text.chars().take(80).collect();
-                                if text.len() > preview.len() {
-                                    result.push_str(&format!("\n  · {}…", preview));
-                                } else {
-                                    result.push_str(&format!("\n  · {}", preview));
-                                }
+                if let Some(entries) = val.get("entries").and_then(|v| v.as_array())
+                    && !entries.is_empty()
+                {
+                    result.push_str(&format!("\n  {} entries:", entry_count));
+                    for entry in entries.iter().take(5) {
+                        if let Some(text) = entry.as_str() {
+                            let preview: String = text.chars().take(80).collect();
+                            if text.len() > preview.len() {
+                                result.push_str(&format!("\n  · {}…", preview));
+                            } else {
+                                result.push_str(&format!("\n  · {}", preview));
                             }
                         }
-                        if entries.len() > 5 {
-                            result.push_str(&format!("\n  … and {} more", entries.len() - 5));
-                        }
+                    }
+                    if entries.len() > 5 {
+                        result.push_str(&format!("\n  … and {} more", entries.len() - 5));
                     }
                 }
 

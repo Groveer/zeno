@@ -77,10 +77,10 @@ impl ToolCache {
         let key = Self::build_key(tool_name, args);
 
         // Remove existing entry if present (for LRU reordering)
-        if self.entries.contains_key(&key) {
-            if let Some(pos) = self.lru.iter().position(|k| *k == key) {
-                self.lru.remove(pos);
-            }
+        if self.entries.contains_key(&key)
+            && let Some(pos) = self.lru.iter().position(|k| *k == key)
+        {
+            self.lru.remove(pos);
         }
 
         // Evict if at capacity
@@ -117,16 +117,16 @@ impl ToolCache {
                     Err(_) => return false,
                 };
                 // Check "path" field (used by read, write, edit, grep, glob)
-                if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
-                    if normalize_path_for_key(p) == normalized {
-                        return true;
-                    }
+                if let Some(p) = args.get("path").and_then(|v| v.as_str())
+                    && normalize_path_for_key(p) == normalized
+                {
+                    return true;
                 }
                 // Check "include" field for glob-style tools
-                if let Some(p) = args.get("include").and_then(|v| v.as_str()) {
-                    if normalize_path_for_key(p) == normalized {
-                        return true;
-                    }
+                if let Some(p) = args.get("include").and_then(|v| v.as_str())
+                    && normalize_path_for_key(p) == normalized
+                {
+                    return true;
                 }
                 false
             })

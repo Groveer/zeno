@@ -436,11 +436,11 @@ impl MemoryStore {
                 mem_count,
                 mem_chars,
                 mem_limit,
-                if mem_limit > 0 {
-                    (mem_chars * 100 / mem_limit).min(100)
-                } else {
-                    0
-                }
+                mem_chars
+                    .checked_mul(100)
+                    .and_then(|v| v.checked_div(mem_limit))
+                    .map(|v| v.min(100))
+                    .unwrap_or(0)
             ),
             format!("════════════════════════════════════════════════"),
         ];
@@ -460,11 +460,11 @@ impl MemoryStore {
             usr_count,
             usr_chars,
             usr_limit,
-            if usr_limit > 0 {
-                (usr_chars * 100 / usr_limit).min(100)
-            } else {
-                0
-            }
+            usr_chars
+                .checked_mul(100)
+                .and_then(|v| v.checked_div(usr_limit))
+                .map(|v| v.min(100))
+                .unwrap_or(0)
         ));
         lines.push("════════════════════════════════════════════════".to_string());
 
@@ -515,7 +515,7 @@ impl MemoryStore {
     /// Re-read entries from disk into in-memory state.
     fn reload_target(&mut self, target: &str) {
         let path = self.path_for(target);
-        let mut fresh = read_entry_file(&path);
+        let mut fresh = read_entry_file(path);
         dedup_in_place(&mut fresh);
         *self.entries_for_mut(target) = fresh;
     }
@@ -583,11 +583,11 @@ impl MemoryStore {
         let entries = self.entries_for(target);
         let current = self.char_count(target);
         let limit = self.char_limit(target);
-        let pct = if limit > 0 {
-            (current * 100 / limit).min(100)
-        } else {
-            0
-        };
+        let pct = current
+            .checked_mul(100)
+            .and_then(|v| v.checked_div(limit))
+            .map(|v| v.min(100))
+            .unwrap_or(0);
 
         let mut resp = serde_json::json!({
             "success": true,

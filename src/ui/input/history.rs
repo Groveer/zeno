@@ -1,6 +1,9 @@
-//! Input history persistence — load/save from disk.
+//! Input history persistence — identity-scoped load/save from disk.
 //!
-//! History entries are persisted as a JSON array to `~/.config/zeno/session_history.json`.
+//! History entries are persisted as a JSON array to:
+//! - `~/.config/zeno/input_history.json` (no identity / default)
+//! - `~/.config/zeno/input_history/{identity}.json` (per-identity)
+//!
 //! Uses atomic write (temp file + rename) to prevent partial reads by concurrent instances.
 
 use crate::config::paths;
@@ -8,10 +11,15 @@ use crate::config::paths;
 /// Maximum number of history entries to persist to disk.
 pub const MAX_PERSISTED_HISTORY: usize = 2000;
 
-/// Load input history from disk. Returns an empty Vec if the file doesn't
-/// exist or is corrupted, so the user never loses the ability to type.
-pub fn load_history() -> Vec<String> {
-    let path = paths::session_history_path();
+/// Load input history from disk for an optional identity.
+///
+/// When `identity` is Some and non-empty, loads per-identity history from
+/// `input_history/{identity}.json`. Otherwise loads the default `input_history.json`.
+///
+/// Returns an empty Vec if the file doesn't exist or is corrupted, so the user
+/// never loses the ability to type.
+pub fn load_history(identity: Option<&str>) -> Vec<String> {
+    let path = paths::input_history_path(identity);
     if !path.exists() {
         return Vec::new();
     }
@@ -22,7 +30,7 @@ pub fn load_history() -> Vec<String> {
                 tracing::warn!(
                     error = %e,
                     path = %path.display(),
-                    "Failed to parse session history, starting fresh"
+                    "Failed to parse input history, starting fresh"
                 );
                 Vec::new()
             }
@@ -31,18 +39,22 @@ pub fn load_history() -> Vec<String> {
             tracing::warn!(
                 error = %e,
                 path = %path.display(),
-                "Failed to read session history, starting fresh"
+                "Failed to read input history, starting fresh"
             );
             Vec::new()
         }
     }
 }
 
-/// Save input history to disk. Truncates to MAX_PERSISTED_HISTORY entries.
-/// Uses atomic write (temp file + rename) to prevent partial reads by
-/// other concurrent Zeno instances.
-pub fn save_history(history: &[String]) {
-    let path = paths::session_history_path();
+/// Save input history to disk for an optional identity.
+///
+/// When `identity` is Some and non-empty, saves to `input_history/{identity}.json`.
+/// Otherwise saves to `input_history.json`.
+///
+/// Truncates to MAX_PERSISTED_HISTORY entries. Uses atomic write (temp file + rename)
+/// to prevent partial reads by other concurrent Zeno instances.
+pub fn save_history(history: &[String], identity: Option<&str>) {
+    let path = paths::input_history_path(identity);
     let truncated: Vec<&str> = history
         .iter()
         .take(MAX_PERSISTED_HISTORY)
@@ -57,7 +69,7 @@ pub fn save_history(history: &[String]) {
                 tracing::warn!(
                     error = %e,
                     path = %tmp_path.display(),
-                    "Failed to save session history"
+                    "Failed to save input history"
                 );
                 return;
             }
@@ -65,12 +77,12 @@ pub fn save_history(history: &[String]) {
                 tracing::warn!(
                     error = %e,
                     path = %path.display(),
-                    "Failed to atomically save session history"
+                    "Failed to atomically save input history"
                 );
             }
         }
         Err(e) => {
-            tracing::warn!(error = %e, "Failed to serialize session history");
+            tracing::warn!(error = %e, "Failed to serialize input history");
         }
     }
 }

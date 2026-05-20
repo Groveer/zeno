@@ -48,7 +48,7 @@ pub fn should_run_review(turn_count: u32, config: &SkillsConfig) -> bool {
     }
     // Run when turn_count is a multiple of review_interval_turns
     // and turn_count > 0 (skip the first turn)
-    turn_count > 0 && turn_count % config.review_interval_turns == 0
+    turn_count > 0 && turn_count.is_multiple_of(config.review_interval_turns)
 }
 
 /// Spawn a background review sub-agent.

@@ -72,15 +72,14 @@ impl Tool for WriteTool {
         }
 
         // Check file staleness
-        if resolved.exists() {
-            if let Some(warning) =
+        if resolved.exists()
+            && let Some(warning) =
                 crate::tools::file_state::check_stale(&ctx.task_id, &resolved).await
-            {
-                return Err(ToolError::Execution(format!(
-                    "Stale file: {}. Re-read the file before writing.",
-                    warning
-                )));
-            }
+        {
+            return Err(ToolError::Execution(format!(
+                "Stale file: {}. Re-read the file before writing.",
+                warning
+            )));
         }
 
         // Acquire per-path lock for read→modify→write serialization

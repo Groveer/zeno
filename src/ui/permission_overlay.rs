@@ -198,10 +198,10 @@ impl PermissionOverlay {
         }
 
         // Send response for active request
-        if let Some(active) = self.active.take() {
-            if let Some(tx) = active.response_tx.lock().unwrap().take() {
-                let _ = tx.send(text.to_string());
-            }
+        if let Some(active) = self.active.take()
+            && let Some(tx) = active.response_tx.lock().unwrap().take()
+        {
+            let _ = tx.send(text.to_string());
         }
 
         // Promote next queued request

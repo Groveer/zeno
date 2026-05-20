@@ -25,13 +25,13 @@ pub fn format_timestamp(time: SystemTime) -> String {
 /// Returns the input unchanged if parsing fails.
 pub fn utc_to_local_display(utc_str: &str) -> String {
     // Try parsing as "YYYY-MM-DD HH:MM:SS" (UTC)
-    if let Some(dt) = chrono::NaiveDateTime::parse_from_str(utc_str, "%Y-%m-%d %H:%M:%S").ok() {
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(utc_str, "%Y-%m-%d %H:%M:%S") {
         let utc_dt = Utc.from_utc_datetime(&dt);
         let local_dt = utc_dt.with_timezone(&Local);
         return local_dt.format("%Y-%m-%d %H:%M:%S").to_string();
     }
     // Try parsing as "YYYY-MM-DDTHH:MM:SS" (ISO format without Z)
-    if let Some(dt) = chrono::NaiveDateTime::parse_from_str(utc_str, "%Y-%m-%dT%H:%M:%S").ok() {
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(utc_str, "%Y-%m-%dT%H:%M:%S") {
         let utc_dt = Utc.from_utc_datetime(&dt);
         let local_dt = utc_dt.with_timezone(&Local);
         return local_dt.format("%Y-%m-%d %H:%M:%S").to_string();
@@ -79,6 +79,10 @@ pub struct SessionData {
     /// AI-generated short title for the session.
     #[serde(default)]
     pub title: String,
+    /// Identity name active when the session was saved.
+    /// None means no active identity (default role).
+    #[serde(default)]
+    pub identity: Option<String>,
 }
 
 /// Lightweight entry for the session index — avoids loading full session data for listing.
@@ -96,6 +100,10 @@ pub struct SessionIndexEntry {
     /// AI-generated short title for the session.
     #[serde(default)]
     pub title: String,
+    /// Identity name active when the session was saved.
+    /// None means no active identity (default role).
+    #[serde(default)]
+    pub identity: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +162,7 @@ fn update_session_index(data: &SessionData) {
         one_liner: build_index_liner(data),
         entry_count: data.entries.len(),
         title: data.title.clone(),
+        identity: data.identity.clone(),
     };
 
     // Remove existing entry with same ID (shouldn't happen, but be safe)
@@ -186,12 +195,12 @@ pub fn load_session_index() -> Vec<SessionIndexEntry> {
     let index_path = crate::config::paths::session_index_path();
 
     // Fast path: index file exists, try to parse it
-    if index_path.exists() {
-        if let Ok(json) = std::fs::read_to_string(&index_path) {
-            let index: Vec<SessionIndexEntry> = serde_json::from_str(&json).unwrap_or_default();
-            if !index.is_empty() {
-                return index;
-            }
+    if index_path.exists()
+        && let Ok(json) = std::fs::read_to_string(&index_path)
+    {
+        let index: Vec<SessionIndexEntry> = serde_json::from_str(&json).unwrap_or_default();
+        if !index.is_empty() {
+            return index;
         }
     }
 
@@ -235,6 +244,7 @@ fn rebuild_session_index() -> Vec<SessionIndexEntry> {
                 one_liner: build_index_liner(&data),
                 entry_count: data.entries.len(),
                 title: data.title.clone(),
+                identity: data.identity.clone(),
             };
             index.push(idx_entry);
         }
@@ -573,13 +583,39 @@ pub fn format_session_list(index: &[SessionIndexEntry]) -> String {
         } else {
             &entry.title
         };
-        lines.push(format!("{}. **{}** — {}", i + 1, date, label));
+        let identity_tag = match &entry.identity {
+            Some(id) => format!(" [{}]", id),
+            None => String::new(),
+        };
+        lines.push(format!(
+            "{}. **{}** — {}{}",
+            i + 1,
+            date,
+            label,
+            identity_tag
+        ));
     }
 
     lines.push(String::new());
     lines.push("Use `/restore N` to load a session.".to_string());
 
     lines.join("\n")
+}
+
+/// Filter session index entries by identity name.
+/// Returns only entries that match the given identity (or all entries when identity is None).
+pub fn filter_index_by_identity(
+    index: &[SessionIndexEntry],
+    identity: Option<&str>,
+) -> Vec<SessionIndexEntry> {
+    match identity {
+        Some(id) if !id.is_empty() => index
+            .iter()
+            .filter(|e| e.identity.as_deref() == Some(id))
+            .cloned()
+            .collect(),
+        _ => index.to_vec(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -684,6 +720,7 @@ mod tests {
             one_liner: "3 msgs, claude — code review".into(),
             entry_count: 5,
             title: String::new(),
+            identity: None,
         }];
         let result = format_session_list(&entries);
         assert!(result.contains("### Saved Sessions (1)"));
@@ -743,6 +780,7 @@ mod tests {
             summary: "test".into(),
             final_response: "world".into(),
             title: String::new(),
+            identity: None,
         };
         let result = build_one_liner(&data);
         assert!(result.contains("2025-07-23 12:00:00"));

@@ -275,19 +275,36 @@ impl Gateway {
 
     /// Handle /restore command.
     async fn handle_restore_cmd(&self, arg: &str, sender: &mpsc::UnboundedSender<EngineEvent>) {
+        // Get active identity for session filtering
+        let eng = self.engine.lock().await;
+        let active_identity = eng.active_identity.as_deref().map(|s| s.to_string());
+        drop(eng);
+
         let session_data = {
             if arg.trim().is_empty() {
-                crate::engine::session::load_latest_session()
+                // Restore latest session matching current identity
+                let index = crate::engine::session::load_session_index();
+                let filtered = crate::engine::session::filter_index_by_identity(
+                    &index,
+                    active_identity.as_deref(),
+                );
+                filtered
+                    .first()
+                    .and_then(|e| crate::engine::session::load_session_by_id(&e.id))
             } else if let Ok(n) = arg.trim().parse::<usize>() {
                 let index = crate::engine::session::load_session_index();
-                if n == 0 || n > index.len() {
-                    let list = crate::engine::session::format_session_list(&index);
+                let filtered = crate::engine::session::filter_index_by_identity(
+                    &index,
+                    active_identity.as_deref(),
+                );
+                if n == 0 || n > filtered.len() {
+                    let list = crate::engine::session::format_session_list(&filtered);
                     emit_text_response(
                         self,
                         &format!(
                             "Invalid session number: {}. {}\n\n{}",
                             n,
-                            if index.is_empty() {
+                            if filtered.is_empty() {
                                 "No sessions available."
                             } else {
                                 ""
@@ -297,11 +314,15 @@ impl Gateway {
                     );
                     None
                 } else {
-                    crate::engine::session::load_session_by_id(&index[n - 1].id)
+                    crate::engine::session::load_session_by_id(&filtered[n - 1].id)
                 }
             } else {
                 let index = crate::engine::session::load_session_index();
-                let list = crate::engine::session::format_session_list(&index);
+                let filtered = crate::engine::session::filter_index_by_identity(
+                    &index,
+                    active_identity.as_deref(),
+                );
+                let list = crate::engine::session::format_session_list(&filtered);
                 emit_text_response(self, &list);
                 None
             }
@@ -379,7 +400,16 @@ impl Gateway {
     /// Handle /search command.
     async fn handle_search_cmd(&self, query: &str, sender: &mpsc::UnboundedSender<EngineEvent>) {
         let query = query.trim();
-        let index = crate::engine::session::load_session_index();
+        let all_index = crate::engine::session::load_session_index();
+        // Filter by active identity
+        let eng = self.engine.lock().await;
+        let active_identity = eng.active_identity.as_deref().map(|s| s.to_string());
+        drop(eng);
+        let index = crate::engine::session::filter_index_by_identity(
+            &all_index,
+            active_identity.as_deref(),
+        );
+
         if index.is_empty() {
             emit_text_response(self, "No saved sessions to search.");
         } else if query.is_empty() {
@@ -389,7 +419,7 @@ impl Gateway {
             let settings = self.settings.clone();
             let sender2 = sender.clone();
             let query_owned = query.to_string();
-            let index_owned = index.clone();
+            let index_owned = index; // already filtered
             tokio::spawn(async move {
                 let _ = sender2.send(EngineEvent::Status("Searching sessions...".into()));
                 match crate::auxiliary::session_search::search_sessions(
@@ -455,6 +485,7 @@ impl Gateway {
                 active_identity: None,
                 ..self.default_status_info()
             }));
+            self.emit(UiCommand::SetInputIdentity(None));
             emit_text_response(self, "Identity cleared — using default role.");
         } else {
             let identity_config = self.settings.identities.get(arg).cloned();
@@ -479,6 +510,7 @@ impl Gateway {
                     active_identity: Some(arg.to_string()),
                     ..self.default_status_info()
                 }));
+                self.emit(UiCommand::SetInputIdentity(Some(arg.to_string())));
                 emit_text_response(self, &format!("Switched to identity: {}", arg));
             } else {
                 emit_text_response(

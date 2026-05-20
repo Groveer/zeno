@@ -42,27 +42,22 @@ pub fn watch_config(config_path: PathBuf, sender: EngineSender) -> Result<Watche
     // Spawn a debounce task on the tokio runtime
     tokio::spawn(async move {
         let sender = sender;
-        loop {
-            match rx.recv().await {
-                Some(_) => {
-                    // Debounce: wait for more events
-                    tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS)).await;
-                    // Drain any queued events during debounce window
-                    while rx.try_recv().is_ok() {}
-                    // Send notification
-                    let s = sender.lock().await;
-                    let _ = s.send(crate::engine::tui_events::EngineEvent::Status(format!(
-                        "Config changed: {} — restart to apply",
-                        path.display()
-                    )));
-                    tracing::info!(
-                        config = %path.display(),
-                        event = "config_changed",
-                        "Config file changed, user notified"
-                    );
-                }
-                None => break,
-            }
+        while rx.recv().await.is_some() {
+            // Debounce: wait for more events
+            tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS)).await;
+            // Drain any queued events during debounce window
+            while rx.try_recv().is_ok() {}
+            // Send notification
+            let s = sender.lock().await;
+            let _ = s.send(crate::engine::tui_events::EngineEvent::Status(format!(
+                "Config changed: {} — restart to apply",
+                path.display()
+            )));
+            tracing::info!(
+                config = %path.display(),
+                event = "config_changed",
+                "Config file changed, user notified"
+            );
         }
     });
 

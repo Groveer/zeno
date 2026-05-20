@@ -435,10 +435,10 @@ impl ToolRegistry {
         // Record tool usage statistics
         let duration = start.elapsed().as_secs_f64();
         let success = result.is_ok();
-        if let Some(ref stats) = ctx.tool_stats {
-            if let Ok(mut stats) = stats.lock() {
-                stats.record(name, duration, success);
-            }
+        if let Some(ref stats) = ctx.tool_stats
+            && let Ok(mut stats) = stats.lock()
+        {
+            stats.record(name, duration, success);
         }
 
         result
@@ -453,7 +453,7 @@ impl ToolRegistry {
     /// List registered tool names — sorted with MCP tools first.
     pub fn names(&self) -> Vec<&str> {
         let mut result: Vec<&str> = self.tools.keys().map(|s| s.as_str()).collect();
-        result.sort_by(|a, b| tool_priority(a).cmp(&tool_priority(b)));
+        result.sort_by_key(|a| tool_priority(a));
         result
     }
 }

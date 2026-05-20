@@ -205,13 +205,13 @@ impl SkillManageTool {
     /// Find a skill's directory by name using the live registry.
     async fn find_skill(&self, name: &str) -> Option<PathBuf> {
         let reg = self.registry.lock().await;
-        if let Some(skill) = reg.get_fuzzy(name) {
-            if let Some(ref path_str) = skill.path {
-                let path = Path::new(path_str);
-                // The registry guarantees the skill exists; path includes SKILL.md filename.
-                if let Some(parent) = path.parent() {
-                    return Some(parent.to_path_buf());
-                }
+        if let Some(skill) = reg.get_fuzzy(name)
+            && let Some(ref path_str) = skill.path
+        {
+            let path = Path::new(path_str);
+            // The registry guarantees the skill exists; path includes SKILL.md filename.
+            if let Some(parent) = path.parent() {
+                return Some(parent.to_path_buf());
             }
         }
         None
@@ -239,13 +239,13 @@ impl SkillManageTool {
         let category = args["category"].as_str().map(|s| s.trim());
 
         // Validate category format if provided
-        if let Some(cat) = category {
-            if !name_regex().is_match(cat) {
-                return Err(ToolError::InvalidArguments(format!(
-                    "Invalid category '{}'. Use lowercase letters, digits, hyphens, dots.",
-                    cat
-                )));
-            }
+        if let Some(cat) = category
+            && !name_regex().is_match(cat)
+        {
+            return Err(ToolError::InvalidArguments(format!(
+                "Invalid category '{}'. Use lowercase letters, digits, hyphens, dots.",
+                cat
+            )));
         }
 
         // Validate frontmatter
@@ -280,10 +280,10 @@ impl SkillManageTool {
         self.reload_skill_registry().await;
 
         // Mark as agent-created if this is a background review fork
-        if let Some(ref deps) = ctx.sub_agent_deps {
-            if deps.write_origin == crate::skills::provenance::BACKGROUND_REVIEW {
-                crate::skills::usage::mark_agent_created(name);
-            }
+        if let Some(ref deps) = ctx.sub_agent_deps
+            && deps.write_origin == crate::skills::provenance::BACKGROUND_REVIEW
+        {
+            crate::skills::usage::mark_agent_created(name);
         }
 
         let mut result = format!("Skill '{}' created at {}", name, skill_md.display());

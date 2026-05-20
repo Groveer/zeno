@@ -34,6 +34,7 @@
 //! displayed individually and factored into cost estimates.
 
 use crate::api::types::Usage;
+use std::cmp::Reverse;
 
 /// Per-model token usage breakdown.
 #[derive(Debug, Default, Clone)]
@@ -130,7 +131,7 @@ impl CostTracker {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        entries.sort_by(|a, b| b.1.calls.cmp(&a.1.calls));
+        entries.sort_by_key(|a| Reverse(a.1.calls));
         entries
     }
 

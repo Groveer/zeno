@@ -107,7 +107,7 @@ impl Default for Settings {
 ///
 /// Determines the request format, authentication method, and endpoint path
 /// used when communicating with the provider's API.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub enum ApiType {
     /// OpenAI Chat Completions API format (default).
     ///
@@ -115,6 +115,7 @@ pub enum ApiType {
     /// - Auth: `Authorization: Bearer <key>`
     /// - Compatible with: OpenAI, DeepSeek, Ollama, Groq, Together, etc.
     #[serde(rename = "openai")]
+    #[default]
     OpenAi,
     /// OpenAI Responses API format (newer OpenAI API).
     ///
@@ -129,12 +130,6 @@ pub enum ApiType {
     /// - Compatible with: Anthropic, Anthropic-compatible proxies
     #[serde(rename = "anthropic")]
     Anthropic,
-}
-
-impl Default for ApiType {
-    fn default() -> Self {
-        Self::OpenAi
-    }
 }
 
 /// Configuration for an LLM provider (e.g. "anthropic", "openai").
@@ -267,20 +262,12 @@ pub struct IdentityConfig {
 /// All fields are optional — `None` means use the built-in default text.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct RoleConfig {
     /// Core identity and role declaration (replaces the default "You are zeno..." block).
     pub identity: Option<String>,
     /// Guidelines section (replaces the default guidelines block).
     pub guidelines: Option<String>,
-}
-
-impl Default for RoleConfig {
-    fn default() -> Self {
-        Self {
-            identity: None,
-            guidelines: None,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -311,10 +311,9 @@ pub(super) async fn call_resolved_with_messages(
                             None,
                         )
                         .await
+                        && !text.is_empty()
                     {
-                        if !text.is_empty() {
-                            return Ok(AuxiliaryResult { content: text });
-                        }
+                        return Ok(AuxiliaryResult { content: text });
                     }
                     // Temperature retry also failed, fall through to connection retry
                 }
@@ -335,10 +334,9 @@ pub(super) async fn call_resolved_with_messages(
                             None,
                         )
                         .await
+                        && !text.is_empty()
                     {
-                        if !text.is_empty() {
-                            return Ok(AuxiliaryResult { content: text });
-                        }
+                        return Ok(AuxiliaryResult { content: text });
                     }
                 }
 
@@ -502,10 +500,10 @@ fn convert_raw_messages(raw: &[serde_json::Value]) -> Vec<Message> {
 /// Extract system prompt from raw JSON messages.
 fn extract_system_prompt(raw: &[serde_json::Value]) -> String {
     for msg in raw {
-        if msg.get("role").and_then(|r| r.as_str()) == Some("system") {
-            if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
-                return content.to_string();
-            }
+        if msg.get("role").and_then(|r| r.as_str()) == Some("system")
+            && let Some(content) = msg.get("content").and_then(|c| c.as_str())
+        {
+            return content.to_string();
         }
     }
     String::new()
@@ -513,12 +511,12 @@ fn extract_system_prompt(raw: &[serde_json::Value]) -> String {
 
 /// Parse a data URL (`data:image/png;base64,...`) into (media_type, base64_data).
 fn parse_data_url(url: &str) -> Option<(String, String)> {
-    if let Some(rest) = url.strip_prefix("data:") {
-        if let Some(idx) = rest.find(";base64,") {
-            let media_type = rest[..idx].to_string();
-            let data = rest[idx + 8..].to_string();
-            return Some((media_type, data));
-        }
+    if let Some(rest) = url.strip_prefix("data:")
+        && let Some(idx) = rest.find(";base64,")
+    {
+        let media_type = rest[..idx].to_string();
+        let data = rest[idx + 8..].to_string();
+        return Some((media_type, data));
     }
     None
 }
@@ -566,10 +564,10 @@ fn classify_api_error(err: &crate::api::types::ApiError, label: &str) -> Auxilia
 fn extract_status_from_error(err: &str) -> Option<u16> {
     // Match patterns like "HTTP 429", "status 500", "HTTP status: 502"
     for word in err.split(|c: char| !c.is_ascii_digit()) {
-        if let Ok(code) = word.parse::<u16>() {
-            if (400..599).contains(&code) {
-                return Some(code);
-            }
+        if let Ok(code) = word.parse::<u16>()
+            && (400..599).contains(&code)
+        {
+            return Some(code);
         }
     }
     None

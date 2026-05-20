@@ -757,12 +757,12 @@ async fn run_single_sub_agent(
             });
 
             // Track modified files for parent re-read consistency
-            if !is_error && (tu.name == "write" || tu.name == "edit") {
-                if let Ok(val) = serde_json::from_str::<Value>(&tu.input_json) {
-                    if let Some(path) = val.get("path").and_then(|p| p.as_str()) {
-                        modified_files.push(path.to_string());
-                    }
-                }
+            if !is_error
+                && (tu.name == "write" || tu.name == "edit")
+                && let Ok(val) = serde_json::from_str::<Value>(&tu.input_json)
+                && let Some(path) = val.get("path").and_then(|p| p.as_str())
+            {
+                modified_files.push(path.to_string());
             }
 
             let _ = progress_tx.send(SubAgentEvent::ToolCompleted {
@@ -788,14 +788,14 @@ async fn run_single_sub_agent(
     });
 
     // Record sub-agent token usage into shared cost tracker
-    if total_input_tokens > 0 || total_output_tokens > 0 {
-        if let Ok(mut ct) = deps.cost_tracker.lock() {
-            ct.absorb_subagent(
-                &deps.settings.model,
-                total_input_tokens,
-                total_output_tokens,
-            );
-        }
+    if (total_input_tokens > 0 || total_output_tokens > 0)
+        && let Ok(mut ct) = deps.cost_tracker.lock()
+    {
+        ct.absorb_subagent(
+            &deps.settings.model,
+            total_input_tokens,
+            total_output_tokens,
+        );
     }
 
     // Emit file-consistency warning if sub-agent wrote files
@@ -846,10 +846,10 @@ fn build_subagent_system_prompt(
         format!("YOUR TASK:\n{}", goal),
     ];
 
-    if let Some(ctx) = context {
-        if !ctx.trim().is_empty() {
-            parts.push(format!("\nCONTEXT:\n{}", ctx));
-        }
+    if let Some(ctx) = context
+        && !ctx.trim().is_empty()
+    {
+        parts.push(format!("\nCONTEXT:\n{}", ctx));
     }
 
     // List available tools so the LLM knows what it can use

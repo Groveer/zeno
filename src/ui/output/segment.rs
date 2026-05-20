@@ -295,7 +295,7 @@ pub fn segment_to_lines(seg: &OutputSegment) -> Vec<Line<'static>> {
             let mut lines: Vec<Line<'static>> = Vec::new();
             for line in msg.lines() {
                 lines.push(Line::from(Span::styled(
-                    format!("{}", line),
+                    line.to_string(),
                     Style::new().fg(theme::TEXT_DIM),
                 )));
             }

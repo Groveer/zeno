@@ -138,10 +138,10 @@ impl ConversationHistory {
                 continue;
             }
             for block in &mut entry.content {
-                if let ContentBlock::ToolUse { id, input, .. } = block {
-                    if successful_edit_ids.contains(id) {
-                        crate::utils::diff::compress_edit_input(input);
-                    }
+                if let ContentBlock::ToolUse { id, input, .. } = block
+                    && successful_edit_ids.contains(id)
+                {
+                    crate::utils::diff::compress_edit_input(input);
                 }
             }
             break; // Only the most recent assistant entry

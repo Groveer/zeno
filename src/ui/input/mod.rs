@@ -6,7 +6,7 @@
 //! ## Sub-modules
 //!
 //! - [`completion`] — `CompletionPopup` state and navigation
-//! - [`history`] — input history persistence (load/save from disk)
+//! - [`history`] — input history persistence (identity-scoped load/save from disk)
 //! - [`clipboard`] — clipboard image reading for Alt+V paste
 
 pub mod clipboard;
@@ -110,6 +110,9 @@ pub struct InputState {
     /// Available identity names for `/identity` argument completion.
     /// Populated by `App` from settings at startup and on config reload.
     pub(crate) identity_names: Vec<String>,
+    /// Active identity for scoped input history.
+    /// When set, history is saved/loaded from `input_history/{identity}.json`.
+    active_identity: Option<String>,
     /// Ghost text (inline autosuggestion) from input history.
     /// Stores only the suffix to append — the part the user hasn't typed yet.
     /// Displayed as dim shadow text after the cursor. Tab accepts it.
@@ -119,8 +122,10 @@ pub struct InputState {
 }
 
 impl InputState {
-    pub fn new() -> Self {
-        let history = history::load_history();
+    /// Create InputState with an optional active identity for scoped history.
+    pub fn with_identity(identity: Option<String>) -> Self {
+        let history = history::load_history(identity.as_deref());
+        let active_identity = identity;
         Self {
             text: String::new(),
             cursor: 0,
@@ -134,6 +139,7 @@ impl InputState {
             identity_names: Vec::new(),
             ghost_text: None,
             app_mode: AppMode::default(),
+            active_identity,
         }
     }
 
@@ -490,11 +496,12 @@ impl InputState {
         // Persist: re-read latest disk state, merge new entry, save.
         // This prevents overwriting entries from other concurrent Zeno instances.
         if is_history_entry {
-            let mut on_disk = history::load_history();
+            let identity = self.active_identity.as_deref();
+            let mut on_disk = history::load_history(identity);
             if on_disk.first().map(|s| s.as_str()) != Some(&trimmed) {
                 on_disk.insert(0, trimmed);
             }
-            history::save_history(&on_disk);
+            history::save_history(&on_disk, identity);
         }
     }
 
@@ -1172,6 +1179,18 @@ impl InputState {
     fn next_char_boundary(&self) -> usize {
         editor::next_char_boundary(&self.text, self.cursor)
     }
+
+    /// Switch identity and reload history scope.
+    /// Saves current history, switches identity, loads that identity's history.
+    pub fn set_identity(&mut self, identity: Option<String>) {
+        // Save current history before switching
+        let old_id = self.active_identity.as_deref();
+        history::save_history(&self.input_history, old_id);
+
+        self.active_identity = identity;
+        self.input_history = history::load_history(self.active_identity.as_deref());
+        self.history_index = None;
+    }
 }
 
 // ── Component trait implementation ─────────────────────────────────────────
@@ -1183,7 +1202,8 @@ impl Component for InputState {
 
     fn unmount(&mut self) {
         // Persist input history to disk on shutdown
-        history::save_history(&self.input_history);
+        let identity = self.active_identity.as_deref();
+        history::save_history(&self.input_history, identity);
     }
 
     fn update(&mut self, cmd: UiCommand) {
@@ -1210,6 +1230,9 @@ impl Component for InputState {
             }
             UiCommand::SetMode(mode) => {
                 self.app_mode = mode;
+            }
+            UiCommand::SetInputIdentity(identity) => {
+                self.set_identity(identity);
             }
             _ => {} // Ignore non-input commands
         }
@@ -1339,15 +1362,14 @@ pub fn render(
 
     // Append ghost text (inline autosuggestion) to the last line
     let mut lines = lines;
-    if let Some(ref ghost) = state.ghost_text {
-        if !ghost.is_empty() {
-            if let Some(last_line) = lines.last_mut() {
-                last_line.spans.push(Span::styled(
-                    ghost.clone(),
-                    Style::new().fg(theme::TEXT_DIM),
-                ));
-            }
-        }
+    if let Some(ref ghost) = state.ghost_text
+        && !ghost.is_empty()
+        && let Some(last_line) = lines.last_mut()
+    {
+        last_line.spans.push(Span::styled(
+            ghost.clone(),
+            Style::new().fg(theme::TEXT_DIM),
+        ));
     }
 
     let p = Paragraph::new(Text::from(lines)).style(Style::new().bg(theme::BG).fg(theme::TEXT));
@@ -1487,7 +1509,7 @@ mod tests {
 
     #[test]
     fn test_popup_opens_on_slash() {
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.text = "/".into();
         input.cursor = 1;
         input.update_popup();
@@ -1498,7 +1520,7 @@ mod tests {
 
     #[test]
     fn test_popup_filters_on_typing() {
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.text = "/he".into();
         input.cursor = 3;
         input.update_popup();
@@ -1509,7 +1531,7 @@ mod tests {
 
     #[test]
     fn test_popup_no_match() {
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.text = "/xyz".into();
         input.cursor = 4;
         input.update_popup();
@@ -1518,7 +1540,7 @@ mod tests {
 
     #[test]
     fn test_popup_not_for_non_slash() {
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.text = "hello".into();
         input.cursor = 5;
         input.update_popup();
@@ -1527,7 +1549,7 @@ mod tests {
 
     #[test]
     fn test_popup_navigation() {
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.text = "/".into();
         input.cursor = 1;
         input.update_popup();
@@ -1544,7 +1566,7 @@ mod tests {
 
     #[test]
     fn test_popup_confirm_command() {
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.text = "/he".into();
         input.cursor = 3;
         input.update_popup();
@@ -1555,7 +1577,7 @@ mod tests {
 
     #[test]
     fn test_popup_dismiss_on_non_slash_edit() {
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.text = "/".into();
         input.cursor = 1;
         input.update_popup();
@@ -1570,7 +1592,7 @@ mod tests {
     #[test]
     fn test_path_completion_basic() {
         // Test path detection: "src/" should be detected as path
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.text = "look at src/".into();
         input.cursor = input.text.len();
         input.update_popup();
@@ -1594,7 +1616,7 @@ mod tests {
     #[test]
     fn test_path_completion_dot_prefix() {
         // "./" should trigger path completion
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.text = "./".into();
         input.cursor = 2;
         input.update_popup();
@@ -1605,7 +1627,7 @@ mod tests {
     #[test]
     fn test_path_completion_confirm_replaces_token() {
         // Confirming a path completion should only replace the path token, not entire text
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.text = "read file src/".into();
         input.cursor = input.text.len(); // cursor at end
         // Simulate a path popup manually
@@ -1624,7 +1646,7 @@ mod tests {
         let input = InputState {
             text: "look at src/main".into(),
             cursor: 16,
-            ..InputState::new()
+            ..InputState::with_identity(None)
         };
         let result = input.extract_path_prefix();
         assert!(result.is_some());
@@ -1638,7 +1660,7 @@ mod tests {
         let input = InputState {
             text: "cat ~/Doc".into(),
             cursor: 9,
-            ..InputState::new()
+            ..InputState::with_identity(None)
         };
         let result = input.extract_path_prefix();
         assert!(result.is_some());
@@ -1651,7 +1673,7 @@ mod tests {
         let input = InputState {
             text: "hello world".into(),
             cursor: 11,
-            ..InputState::new()
+            ..InputState::with_identity(None)
         };
         let result = input.extract_path_prefix();
         assert!(result.is_none());
@@ -1659,7 +1681,7 @@ mod tests {
 
     #[test]
     fn test_multiline_insert_newline() {
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         // Simulate Shift+Enter
         input.text = "hello".into();
         input.cursor = 5;
@@ -1676,7 +1698,7 @@ mod tests {
 
     #[test]
     fn test_cursor_row_col() {
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.text = "hello\nworld\n!".into();
         input.cursor = 0;
         assert_eq!(input.cursor_row_col(), (0, 0));
@@ -1699,7 +1721,7 @@ mod tests {
 
     #[test]
     fn test_move_cursor_up_down() {
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.text = "hello\nworld\n!".into();
 
         // Start at end of line 2 (after "!")
@@ -1726,7 +1748,7 @@ mod tests {
 
     #[test]
     fn test_home_end_multiline() {
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.text = "hello\nworld".into();
         input.cursor = 8; // middle of "world"
 
@@ -1747,7 +1769,7 @@ mod tests {
 
     #[test]
     fn test_delete_word_backwards() {
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
 
         // "hello world" with cursor at end — should delete "world"
         input.text = "hello world".into();
@@ -1785,7 +1807,7 @@ mod tests {
 
     #[test]
     fn test_ctrl_w_key_event() {
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.text = "hello world".into();
         input.cursor = input.text.len();
 
@@ -1801,7 +1823,7 @@ mod tests {
         // character widths (ASCII vs CJK) used to place cursor inside a
         // multi-byte char boundary, causing a panic.
         // 你好世界 = 12 bytes, "hello" = 5 bytes
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.text = "你好世界\nhello".into();
         // Cursor at end of "hello" on line 1
         input.cursor = input.text.len(); // 18
@@ -1836,7 +1858,7 @@ mod tests {
 
     #[test]
     fn test_ghost_text_basic() {
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.input_history = vec!["hello world".into(), "hello there".into()];
         input.text = "hel".into();
         input.cursor = 3;
@@ -1846,7 +1868,7 @@ mod tests {
 
     #[test]
     fn test_ghost_text_most_recent_first() {
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         // History is ordered newest-first
         input.input_history = vec!["hello there".into(), "hello world".into()];
         input.text = "hel".into();
@@ -1858,7 +1880,7 @@ mod tests {
 
     #[test]
     fn test_ghost_text_no_match() {
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.input_history = vec!["goodbye world".into()];
         input.text = "hel".into();
         input.cursor = 3;
@@ -1868,7 +1890,7 @@ mod tests {
 
     #[test]
     fn test_ghost_text_empty_input() {
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.input_history = vec!["hello".into()];
         input.text = "".into();
         input.cursor = 0;
@@ -1878,7 +1900,7 @@ mod tests {
 
     #[test]
     fn test_ghost_text_exact_match() {
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.input_history = vec!["hello".into()];
         input.text = "hello".into();
         input.cursor = 5;
@@ -1889,7 +1911,7 @@ mod tests {
 
     #[test]
     fn test_ghost_text_tab_accept() {
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.input_history = vec!["hello world".into()];
         input.text = "hel".into();
         input.cursor = 3;
@@ -1906,7 +1928,7 @@ mod tests {
 
     #[test]
     fn test_ghost_text_no_slash_commands() {
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.input_history = vec!["/help me".into()];
         input.text = "/he".into();
         input.cursor = 3;
@@ -1917,7 +1939,7 @@ mod tests {
 
     #[test]
     fn test_ghost_text_cursor_not_at_end() {
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.input_history = vec!["hello world".into()];
         input.text = "hel".into();
         input.cursor = 2; // not at end
@@ -1927,7 +1949,7 @@ mod tests {
 
     #[test]
     fn test_ghost_text_clears_on_reset() {
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.input_history = vec!["hello world".into()];
         input.text = "hel".into();
         input.cursor = 3;
@@ -1940,7 +1962,7 @@ mod tests {
 
     #[test]
     fn test_ghost_text_typing_updates() {
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.input_history = vec!["hello world".into()];
 
         input.text = "h".into();
@@ -1967,7 +1989,7 @@ mod tests {
     #[test]
     fn test_ghost_text_full_flow_with_handle_key() {
         // Simulate the real user flow using handle_key
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         input.input_history = vec!["hello world".into()];
 
         // Type "hel" using handle_key
@@ -1996,7 +2018,7 @@ mod tests {
 
     #[test]
     fn test_up_down_history_with_ghost_text() {
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         // Simulate having submitted "hello world" before
         input.input_history = vec!["hello world".into()];
 
@@ -2033,7 +2055,7 @@ mod tests {
     #[test]
     fn test_ghost_text_after_submit_and_retype() {
         // Simulate: submit "hello world", then type "hel" -> ghost text should show
-        let mut input = InputState::new();
+        let mut input = InputState::with_identity(None);
         // Clear history loaded from disk to isolate the test
         input.input_history.clear();
 

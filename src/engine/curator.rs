@@ -62,23 +62,12 @@ impl Drop for BackgroundWorkGuard {
 // Curator state
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct CuratorState {
     last_run_at: Option<String>,
     last_run_summary: Option<String>,
     paused: bool,
     run_count: u64,
-}
-
-impl Default for CuratorState {
-    fn default() -> Self {
-        Self {
-            last_run_at: None,
-            last_run_summary: None,
-            paused: false,
-            run_count: 0,
-        }
-    }
 }
 
 fn state_file_path() -> PathBuf {
@@ -102,10 +91,10 @@ fn save_state(state: &CuratorState) {
         std::fs::create_dir_all(parent).ok();
     }
     let tmp = path.with_extension("curator_state.tmp");
-    if let Ok(json) = serde_json::to_string_pretty(state) {
-        if std::fs::write(&tmp, &json).is_ok() {
-            std::fs::rename(&tmp, &path).ok();
-        }
+    if let Ok(json) = serde_json::to_string_pretty(state)
+        && std::fs::write(&tmp, &json).is_ok()
+    {
+        std::fs::rename(&tmp, &path).ok();
     }
 }
 
@@ -130,9 +119,7 @@ pub fn should_run_now(config: &SkillsConfig) -> bool {
 
     match &state.last_run_at {
         None => true, // Never run → run now
-        Some(ts) => {
-            time::hours_since(ts).map_or(true, |h| h >= config.curator_interval_hours as f64)
-        }
+        Some(ts) => time::hours_since(ts).is_none_or(|h| h >= config.curator_interval_hours as f64),
     }
 }
 

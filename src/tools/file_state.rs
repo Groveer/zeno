@@ -108,37 +108,36 @@ impl FileStateRegistry {
         let current_mtime = mtime_secs(resolved);
 
         // Case 1: sibling sub-agent modified after our last read.
-        if let Some((writer_tid, writer_ts)) = writer_info {
-            if writer_tid != task_id {
-                if let Some((_read_mtime, read_ts)) = stamp {
-                    if writer_ts > read_ts {
-                        return Some(format!(
-                            "'{}' was modified by sibling agent '{}' after this agent last read it. \
-                             Re-read the file before writing to avoid overwriting changes.",
-                            resolved, writer_tid
-                        ));
-                    }
-                } else {
+        if let Some((writer_tid, writer_ts)) = writer_info
+            && writer_tid != task_id
+        {
+            if let Some((_read_mtime, read_ts)) = stamp {
+                if writer_ts > read_ts {
                     return Some(format!(
-                        "'{}' was modified by sibling agent '{}' but this agent never read it. \
-                         Read the file before writing.",
+                        "'{}' was modified by sibling agent '{}' after this agent last read it. \
+                             Re-read the file before writing to avoid overwriting changes.",
                         resolved, writer_tid
                     ));
                 }
+            } else {
+                return Some(format!(
+                    "'{}' was modified by sibling agent '{}' but this agent never read it. \
+                         Read the file before writing.",
+                    resolved, writer_tid
+                ));
             }
         }
 
         // Case 2: external / unknown modification (mtime drifted).
-        if let Some((read_mtime, _read_ts)) = stamp {
-            if let Some(current) = current_mtime {
-                if current != read_mtime {
-                    return Some(format!(
-                        "'{}' was modified on disk since you last read it (external edit \
+        if let Some((read_mtime, _read_ts)) = stamp
+            && let Some(current) = current_mtime
+            && current != read_mtime
+        {
+            return Some(format!(
+                "'{}' was modified on disk since you last read it (external edit \
                          or unrecorded writer). Re-read the file before writing.",
-                        resolved
-                    ));
-                }
-            }
+                resolved
+            ));
         }
 
         // Case 3: agent never read the file.

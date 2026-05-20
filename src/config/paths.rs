@@ -42,12 +42,21 @@ pub fn data_dir() -> PathBuf {
         .join("zeno")
 }
 
-/// Returns the path to the session input history file.
+/// Returns the path to the input history file.
 /// Stores the last N submitted inputs for persistence across sessions.
-pub fn session_history_path() -> PathBuf {
+/// When identity is Some, uses `~/.config/zeno/input_history/{identity}.json`.
+/// When None, uses `~/.config/zeno/input_history.json`.
+pub fn input_history_path(identity: Option<&str>) -> PathBuf {
     let dir = config_dir();
     std::fs::create_dir_all(&dir).ok();
-    dir.join("session_history.json")
+    match identity {
+        Some(id) if !id.is_empty() => {
+            let sub = dir.join("input_history");
+            std::fs::create_dir_all(&sub).ok();
+            sub.join(format!("{}.json", id))
+        }
+        _ => dir.join("input_history.json"),
+    }
 }
 
 /// Returns the sessions directory for multi-session storage.

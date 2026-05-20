@@ -148,7 +148,7 @@ impl Tool for DelegateTaskTool {
                 extra_tools,
                 max_concurrent,
                 child_timeout,
-                parent_cancel.unwrap_or_else(CancellationToken::new),
+                parent_cancel.unwrap_or_default(),
                 progress_tx,
             )
             .await;

@@ -39,16 +39,12 @@ const USAGE_FILE: &str = ".usage.json";
 /// Lifecycle state for a skill.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum SkillState {
+    #[default]
     Active,
     Stale,
     Archived,
-}
-
-impl Default for SkillState {
-    fn default() -> Self {
-        Self::Active
-    }
 }
 
 /// Usage record for a single skill.
@@ -177,7 +173,7 @@ where
         return;
     }
     let mut data = load_all();
-    let mut record = data.remove(skill_name).unwrap_or_else(UsageRecord::new);
+    let mut record = data.remove(skill_name).unwrap_or_default();
     f(&mut record);
     data.insert(skill_name.to_string(), record);
     save_all(&data);
@@ -274,7 +270,7 @@ pub fn should_be_stale(record: &UsageRecord, stale_after_days: u64) -> bool {
     if record.state == SkillState::Stale {
         return false; // already stale
     }
-    days_since_last_activity(record).map_or(false, |days| days >= stale_after_days)
+    days_since_last_activity(record).is_some_and(|days| days >= stale_after_days)
 }
 
 /// Determine if a skill should be transitioned to archived.
@@ -282,7 +278,7 @@ pub fn should_be_archived(record: &UsageRecord, archive_after_days: u64) -> bool
     if record.pinned || record.state == SkillState::Archived {
         return false;
     }
-    days_since_last_activity(record).map_or(false, |days| days >= archive_after_days)
+    days_since_last_activity(record).is_some_and(|days| days >= archive_after_days)
 }
 
 /// Days since the last activity on a skill. Returns None if never active.

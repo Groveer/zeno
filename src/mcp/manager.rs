@@ -168,10 +168,11 @@ impl McpManager {
         name: &str,
     ) -> Result<(), crate::tools::base::ToolError> {
         // Check if already connected (immutable borrow first)
-        if let Some(state) = self.servers.get(name) {
-            if state.status == ServerStatus::Connected && state.connection.is_some() {
-                return Ok(());
-            }
+        if let Some(state) = self.servers.get(name)
+            && state.status == ServerStatus::Connected
+            && state.connection.is_some()
+        {
+            return Ok(());
         }
 
         // Server exists?

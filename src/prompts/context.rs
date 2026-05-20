@@ -51,9 +51,7 @@ impl RuntimeContext {
         // Show ./ as the working directory so the LLM constructs correct
         // relative paths (e.g. config.yaml) rather than ./data/config.yaml
         // when the cwd already ends with the directory name.
-        lines.push(format!(
-            "- Working directory: ./ (use relative paths, e.g. src/file.rs)"
-        ));
+        lines.push("- Working directory: ./ (use relative paths, e.g. src/file.rs)".to_string());
         lines.push(format!("- OS: {}", self.os));
         if let Some(ref shell) = self.shell {
             lines.push(format!("- Shell: {}", shell));

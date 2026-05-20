@@ -96,8 +96,8 @@ pub fn estimate_tokens(history: &ConversationHistory) -> usize {
         for block in &entry.content {
             match block {
                 ContentBlock::Text { text } | ContentBlock::ToolResult { content: text, .. } => {
-                    let mut lines = text.lines().peekable();
-                    while let Some(line) = lines.next() {
+                    let lines = text.lines().peekable();
+                    for line in lines {
                         let trimmed = line.trim();
                         if trimmed.is_empty() {
                             continue;

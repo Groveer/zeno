@@ -103,10 +103,10 @@ impl FileContentPool {
         while (self.files.len() >= MAX_FILES)
             || (self.total_bytes + byte_size > MAX_TOTAL_BYTES && !self.files.is_empty())
         {
-            if let Some(oldest_key) = self.lru.pop_back() {
-                if let Some(removed) = self.files.remove(&oldest_key) {
-                    self.total_bytes -= removed.byte_size;
-                }
+            if let Some(oldest_key) = self.lru.pop_back()
+                && let Some(removed) = self.files.remove(&oldest_key)
+            {
+                self.total_bytes -= removed.byte_size;
             }
         }
 
@@ -142,10 +142,10 @@ impl FileContentPool {
         while (self.files.len() >= MAX_FILES)
             || (self.total_bytes + byte_size > MAX_TOTAL_BYTES && !self.files.is_empty())
         {
-            if let Some(oldest_key) = self.lru.pop_back() {
-                if let Some(removed) = self.files.remove(&oldest_key) {
-                    self.total_bytes -= removed.byte_size;
-                }
+            if let Some(oldest_key) = self.lru.pop_back()
+                && let Some(removed) = self.files.remove(&oldest_key)
+            {
+                self.total_bytes -= removed.byte_size;
             }
         }
 
@@ -301,11 +301,11 @@ impl FileContentPool {
         // Coalesce overlapping/adjacent ranges
         let mut merged: Vec<(usize, usize)> = Vec::new();
         for &(s, e) in &file.read_ranges {
-            if let Some(last) = merged.last_mut() {
-                if s <= last.1 {
-                    last.1 = last.1.max(e);
-                    continue;
-                }
+            if let Some(last) = merged.last_mut()
+                && s <= last.1
+            {
+                last.1 = last.1.max(e);
+                continue;
             }
             merged.push((s, e));
         }

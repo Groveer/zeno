@@ -181,7 +181,7 @@ impl HookExecutor {
 
     /// Check if any hooks are registered for a given event.
     pub fn has_hooks_for(&self, event: HookEvent) -> bool {
-        self.hooks.get(&event).map_or(false, |v| !v.is_empty())
+        self.hooks.get(&event).is_some_and(|v| !v.is_empty())
     }
 
     /// List all registered event names with counts (for `/hooks` command).

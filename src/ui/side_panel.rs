@@ -65,7 +65,7 @@ impl SidePanel {
 
     /// Whether the side panel should be visible (has active todos).
     pub fn is_visible(&self) -> bool {
-        self.todo_state.as_ref().is_some_and(|s| has_active_todo(s))
+        self.todo_state.as_ref().is_some_and(has_active_todo)
     }
 
     /// Render the right side panel showing the todo list.

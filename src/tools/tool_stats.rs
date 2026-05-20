@@ -6,6 +6,7 @@
 //! whether it succeeded, and the duration. The data can be queried by the
 //! engine to display in status bar or diagnostic output.
 
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -87,7 +88,7 @@ impl ToolStats {
             total, failures
         ));
         let mut tools: Vec<(&String, &ToolStatEntry)> = self.tools.iter().collect();
-        tools.sort_by(|a, b| b.1.total_calls.cmp(&a.1.total_calls));
+        tools.sort_by_key(|a| Reverse(a.1.total_calls));
         for (name, stats) in tools.iter().take(10) {
             let avg_duration = if stats.total_calls > 0 {
                 stats.total_duration_secs / stats.total_calls as f64

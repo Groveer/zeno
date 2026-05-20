@@ -136,7 +136,7 @@ impl Tool for AskUserTool {
                 "choices_offered": choices,
                 "user_response": response.trim(),
             });
-            Ok(serde_json::to_string(&result).unwrap_or_else(|_| response))
+            Ok(serde_json::to_string(&result).unwrap_or(response))
         } else {
             // Fallback for non-TUI mode (e.g. headless)
             eprint!("[ask] {} ", question);

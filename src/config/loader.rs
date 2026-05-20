@@ -170,10 +170,8 @@ fn load_lua(
 
             // Add headers
             if let Some(headers_table) = headers {
-                for pair in headers_table.pairs::<String, String>() {
-                    if let Ok((key, value)) = pair {
-                        req = req.header(&key, &value);
-                    }
+                for (key, value) in headers_table.pairs::<String, String>().flatten() {
+                    req = req.header(&key, &value);
                 }
             }
 

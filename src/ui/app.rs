@@ -72,19 +72,17 @@ fn wrap_single_line(line: &str, max_width: usize, out: &mut Vec<String>) {
             while let Some(ch) = chars.next() {
                 let next = chars.peek().copied();
                 let cw = crate::utils::char_width(ch, next);
-                if current_width + cw > max_width {
-                    if !current.is_empty() {
-                        out.push(std::mem::take(&mut current));
-                        current_width = 0;
-                    }
+                if current_width + cw > max_width && !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                    current_width = 0;
                 }
                 current.push(ch);
                 current_width += cw;
                 // Skip VS16 if consumed as part of emoji sequence
-                if next == Some('\u{FE0F}') {
-                    if let Some(vs16) = chars.next() {
-                        current.push(vs16);
-                    }
+                if next == Some('\u{FE0F}')
+                    && let Some(vs16) = chars.next()
+                {
+                    current.push(vs16);
                 }
             }
             continue;
@@ -166,12 +164,14 @@ impl App {
     /// Minimum height for the input area (1 border + 1 content line).
     const MIN_INPUT_HEIGHT: u16 = 3;
 
-    pub fn new(
+    /// Create App with an initial active identity for scoped input history.
+    pub fn with_identity(
         cmd_rx: mpsc::UnboundedReceiver<UiCommand>,
         gateway_event_tx: mpsc::UnboundedSender<crate::engine::tui_events::EngineEvent>,
+        active_identity: Option<String>,
     ) -> Self {
         let mut app = Self {
-            input: InputState::new(),
+            input: InputState::with_identity(active_identity.clone()),
             output: OutputState::new(),
             title_bar: TitleBar,
             side_panel: SidePanel::new(),
@@ -275,18 +275,18 @@ impl App {
     ///
     /// TODO(Phase 4): Replace with tokio::sync::watch channel push notification.
     pub fn poll_engine_status(&mut self) {
-        if let Some(ref state) = self.todo_state {
-            if let Ok(s) = state.try_lock() {
-                let cur_gen = s.generation();
-                if cur_gen != self.todo_gen {
-                    self.todo_gen = cur_gen;
-                    self.render_dirty = true;
-                }
+        if let Some(ref state) = self.todo_state
+            && let Ok(s) = state.try_lock()
+        {
+            let cur_gen = s.generation();
+            if cur_gen != self.todo_gen {
+                self.todo_gen = cur_gen;
+                self.render_dirty = true;
             }
-            // try_lock failure: todo_state held by tool — skip this cycle.
-            // If contention persists across frames, side panel misses updates.
-            // Phase 4 watch channel resolves this entirely.
         }
+        // try_lock failure: todo_state held by tool — skip this cycle.
+        // If contention persists across frames, side panel misses updates.
+        // Phase 4 watch channel resolves this entirely.
     }
 
     pub fn set_status(&mut self, info: StatusInfo) {
@@ -374,23 +374,21 @@ impl App {
         use crossterm::event::MouseEventKind;
 
         match mouse.kind {
-            MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
-                if self.side_panel_dragging {
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left)
+                if self.side_panel_dragging => {
                     // Resize: side panel width = total - mouse column position
                     let new_width = terminal_width.saturating_sub(mouse.column);
                     self.side_panel_width =
                         new_width.clamp(Self::SIDE_PANEL_MIN, Self::SIDE_PANEL_MAX);
                     self.render_dirty = true;
                 }
-            }
-            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+            MouseEventKind::Down(crossterm::event::MouseButton::Left)
                 // Start drag if clicking near the divider (within 2 columns)
                 if mouse.column >= self.divider_x.saturating_sub(2)
                     && mouse.column <= self.divider_x + 1
-                {
+                => {
                     self.side_panel_dragging = true;
                 }
-            }
             MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
                 self.side_panel_dragging = false;
             }
@@ -672,11 +670,15 @@ impl App {
                 self.steer_queue.clear();
                 self.status.steer_count = 0;
             }
+            UiCommand::SteerSlot { steer_count } => {
+                self.status.steer_count = steer_count;
+            }
 
             // ── Input — delegate to Component trait ─────────────────
             UiCommand::PasteImage { .. }
             | UiCommand::SetInputText(_)
             | UiCommand::SetInputPlaceholder(_)
+            | UiCommand::SetInputIdentity(_)
             | UiCommand::FocusInput
             | UiCommand::BlurInput => {
                 self.input.update(cmd);

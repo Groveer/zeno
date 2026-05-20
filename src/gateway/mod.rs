@@ -126,12 +126,20 @@ pub enum UiCommand {
     SubAgentToolEnd {
         label: String,
     },
+    /// Steer slot update.
+    SteerSlot {
+        steer_count: usize,
+    },
     SubAgentStatus {
         message: String,
     },
     SubAgentCompleted {
         summary: String,
     },
+
+    // ── InputPanel ───────────────────────────────────────
+    /// Switch identity scope for input history.
+    SetInputIdentity(Option<String>),
 
     // ── Image paste ──────────────────────────────────────
     PasteImage {
@@ -276,10 +284,10 @@ impl Gateway {
     /// This is expected during shutdown — the main loop sets should_quit=true
     /// and breaks, dropping the receiver. Engine tasks may still be sending.
     pub fn emit(&self, cmd: UiCommand) {
-        if let Ok(t) = self.transport.lock() {
-            if !t.send(&cmd) {
-                tracing::info!("gateway emit failed (transport closed)");
-            }
+        if let Ok(t) = self.transport.lock()
+            && !t.send(&cmd)
+        {
+            tracing::info!("gateway emit failed (transport closed)");
         }
     }
 

@@ -50,27 +50,22 @@ fn extract_image_paths(query_text: &str) -> (String, Vec<(String, String)>) {
     for cap in re.captures_iter(query_text) {
         let path_str = cap.get(1).unwrap().as_str();
         let path = std::path::Path::new(path_str);
-        if path.exists() {
-            match std::fs::read(path) {
-                Ok(bytes) => {
-                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("png");
-                    let media_type = match ext.to_lowercase().as_str() {
-                        "png" => "image/png",
-                        "jpg" | "jpeg" => "image/jpeg",
-                        "gif" => "image/gif",
-                        "webp" => "image/webp",
-                        "bmp" => "image/bmp",
-                        _ => "image/png",
-                    };
-                    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                    let size_kb = bytes.len() / 1024;
-                    if size_kb <= 10240 {
-                        image_blocks.push((media_type.to_string(), b64));
-                        found_any = true;
-                        text = text.replace(path_str, "");
-                    }
-                }
-                Err(_) => {}
+        if let Ok(bytes) = std::fs::read(path) {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("png");
+            let media_type = match ext.to_lowercase().as_str() {
+                "png" => "image/png",
+                "jpg" | "jpeg" => "image/jpeg",
+                "gif" => "image/gif",
+                "webp" => "image/webp",
+                "bmp" => "image/bmp",
+                _ => "image/png",
+            };
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            let size_kb = bytes.len() / 1024;
+            if size_kb <= 10240 {
+                image_blocks.push((media_type.to_string(), b64));
+                found_any = true;
+                text = text.replace(path_str, "");
             }
         }
     }
@@ -413,16 +408,15 @@ async fn main() -> anyhow::Result<()> {
     engine.active_identity = settings.active_identity.clone();
 
     // Fire session_start hook
-    if let Some(he) = &engine.hook_executor {
-        if he.has_hooks_for(crate::hooks::types::HookEvent::SessionStart) {
-            if let Ok(ctx) = he.build_context() {
-                let _ = ctx.set("cwd", cwd.to_string_lossy().to_string());
-                let _ = ctx.set("model", model.as_str());
-                let _ = ctx.set("provider", provider_name.as_str());
-                he.execute_session_event(crate::hooks::types::HookEvent::SessionStart, &ctx)
-                    .await;
-            }
-        }
+    if let Some(he) = &engine.hook_executor
+        && he.has_hooks_for(crate::hooks::types::HookEvent::SessionStart)
+        && let Ok(ctx) = he.build_context()
+    {
+        let _ = ctx.set("cwd", cwd.to_string_lossy().to_string());
+        let _ = ctx.set("model", model.as_str());
+        let _ = ctx.set("provider", provider_name.as_str());
+        he.execute_session_event(crate::hooks::types::HookEvent::SessionStart, &ctx)
+            .await;
     }
 
     // TUI setup
@@ -474,7 +468,11 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Create App — pass Gateway's engine event sender for image paste, etc.
-    let mut app = ui::app::App::new(cmd_rx, gateway.engine_event_sender());
+    let mut app = ui::app::App::with_identity(
+        cmd_rx,
+        gateway.engine_event_sender(),
+        settings.active_identity.clone(),
+    );
     // Populate identity names for /identity argument completion
     app.input.identity_names = settings.identities.keys().cloned().collect();
     // Share the todo state so the TUI can render the side panel
@@ -603,49 +601,51 @@ async fn main() -> anyhow::Result<()> {
 
             // Detect transition from Running → Idle: fire background title
             // generation on the first completed query.
-            if was_running && !app.is_running() && title_tx.is_some() {
-                if let Ok(eng) = engine.try_lock() {
-                    // Extract the first user message for title generation
-                    let first_msg = eng
-                        .history
-                        .entries_raw()
-                        .iter()
-                        .find(|e| {
-                            e.role == crate::api::types::Role::User
-                                && e.content
-                                    .iter()
-                                    .any(|b| matches!(b, ContentBlock::Text { .. }))
-                                && !e
-                                    .content
-                                    .iter()
-                                    .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            if was_running
+                && !app.is_running()
+                && title_tx.is_some()
+                && let Ok(eng) = engine.try_lock()
+            {
+                // Extract the first user message for title generation
+                let first_msg = eng
+                    .history
+                    .entries_raw()
+                    .iter()
+                    .find(|e| {
+                        e.role == crate::api::types::Role::User
+                            && e.content
+                                .iter()
+                                .any(|b| matches!(b, ContentBlock::Text { .. }))
+                            && !e
+                                .content
+                                .iter()
+                                .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                    })
+                    .and_then(|e| {
+                        e.content.iter().find_map(|b| {
+                            if let ContentBlock::Text { text } = b {
+                                Some(text.clone())
+                            } else {
+                                None
+                            }
                         })
-                        .and_then(|e| {
-                            e.content.iter().find_map(|b| {
-                                if let ContentBlock::Text { text } = b {
-                                    Some(text.clone())
-                                } else {
-                                    None
-                                }
-                            })
-                        })
-                        .unwrap_or_default();
-                    if !first_msg.is_empty() {
-                        let settings = settings.clone();
-                        let tx = title_tx.take().unwrap();
-                        tokio::spawn(async move {
-                            let title = match tokio::time::timeout(
-                                std::time::Duration::from_secs(8),
-                                auxiliary::compressor::generate_title(&settings, &first_msg),
-                            )
-                            .await
-                            {
-                                Ok(t) => t.unwrap_or_default(),
-                                Err(_) => String::new(),
-                            };
-                            let _ = tx.send(title);
-                        });
-                    }
+                    })
+                    .unwrap_or_default();
+                if !first_msg.is_empty() {
+                    let settings = settings.clone();
+                    let tx = title_tx.take().unwrap();
+                    tokio::spawn(async move {
+                        let title = match tokio::time::timeout(
+                            std::time::Duration::from_secs(8),
+                            auxiliary::compressor::generate_title(&settings, &first_msg),
+                        )
+                        .await
+                        {
+                            Ok(t) => t.unwrap_or_default(),
+                            Err(_) => String::new(),
+                        };
+                        let _ = tx.send(title);
+                    });
                 }
             }
             was_running = app.is_running();
@@ -704,7 +704,7 @@ async fn main() -> anyhow::Result<()> {
             let cwd_option = deps.as_ref().map(|_| cwd.clone());
             let registry = skill_registry.lock().await;
             let summary = crate::engine::curator::run_curator_pass(
-                &*registry,
+                &registry,
                 deps,
                 cwd_option,
                 &settings.skills,
@@ -828,6 +828,7 @@ async fn main() -> anyhow::Result<()> {
             summary,
             final_response,
             title,
+            identity: settings.active_identity.clone(),
         };
         engine::session::save_session(&data);
     } else {
@@ -839,16 +840,15 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Fire session_end hook
-    if let Some(he) = &engine.lock().await.hook_executor {
-        if he.has_hooks_for(crate::hooks::types::HookEvent::SessionEnd) {
-            if let Ok(ctx) = he.build_context() {
-                let _ = ctx.set("cwd", cwd.to_string_lossy().to_string());
-                let _ = ctx.set("model", model.as_str());
-                let _ = ctx.set("provider", provider_name.as_str());
-                he.execute_session_event(crate::hooks::types::HookEvent::SessionEnd, &ctx)
-                    .await;
-            }
-        }
+    if let Some(he) = &engine.lock().await.hook_executor
+        && he.has_hooks_for(crate::hooks::types::HookEvent::SessionEnd)
+        && let Ok(ctx) = he.build_context()
+    {
+        let _ = ctx.set("cwd", cwd.to_string_lossy().to_string());
+        let _ = ctx.set("model", model.as_str());
+        let _ = ctx.set("provider", provider_name.as_str());
+        he.execute_session_event(crate::hooks::types::HookEvent::SessionEnd, &ctx)
+            .await;
     }
 
     // Shut down memory manager (flush external provider)

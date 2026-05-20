@@ -142,15 +142,14 @@ impl Tool for SkillViewTool {
         };
 
         // Append linked files hint (Tier 2 → linked files progressive disclosure)
-        if let Some(ref path_str) = skill.path {
-            if let Some(dir) = Path::new(path_str).parent() {
-                if let Some(linked) = list_linked_files(dir) {
-                    return Ok(format!(
-                        "{}\n\n---\nLinked files (use skill_view with file_path to access):\n{}",
-                        content, linked
-                    ));
-                }
-            }
+        if let Some(ref path_str) = skill.path
+            && let Some(dir) = Path::new(path_str).parent()
+            && let Some(linked) = list_linked_files(dir)
+        {
+            return Ok(format!(
+                "{}\n\n---\nLinked files (use skill_view with file_path to access):\n{}",
+                content, linked
+            ));
         }
 
         Ok(content)
