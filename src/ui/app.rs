@@ -153,6 +153,8 @@ pub struct App {
     side_panel_dragging: bool,
     /// X coordinate of the side panel divider (set during render, used for hit-testing).
     divider_x: u16,
+    /// Cached side panel area (set during render, used for mouse hit-testing).
+    side_panel_area: Rect,
     /// Images extracted from input markers on submit, waiting for the main loop.
     pending_image_blocks: Vec<(String, String)>,
 }
@@ -204,6 +206,7 @@ impl App {
             side_panel_width: 40,
             side_panel_dragging: false,
             divider_x: 0,
+            side_panel_area: Rect::new(0, 0, 0, 0),
             _watcher_guard: None,
             pending_image_blocks: Vec::new(),
         };
@@ -282,6 +285,9 @@ impl App {
             if cur_gen != self.todo_gen {
                 self.todo_gen = cur_gen;
                 self.render_dirty = true;
+                // Reset side panel scroll when task list changes so the user
+                // always sees the top of the new task list.
+                self.side_panel.reset_scroll();
             }
         }
         // try_lock failure: todo_state held by tool — skip this cycle.
@@ -328,15 +334,29 @@ impl App {
         self.should_quit
     }
 
-    /// Scroll up (mouse wheel / PageUp).
-    pub fn scroll_up(&mut self, lines: usize) {
-        self.output.scroll_up(lines);
+    /// Scroll up — routes to output panel or side panel based on mouse position.
+    pub fn scroll_up(&mut self, lines: usize, mouse_x: u16, mouse_y: u16) {
+        if self
+            .side_panel_area
+            .contains(ratatui::layout::Position::new(mouse_x, mouse_y))
+        {
+            self.side_panel.scroll_up(lines);
+        } else {
+            self.output.scroll_up(lines);
+        }
         self.render_dirty = true;
     }
 
-    /// Scroll down (mouse wheel / PageDown).
-    pub fn scroll_down(&mut self, lines: usize) {
-        self.output.scroll_down(lines);
+    /// Scroll down — routes to output panel or side panel based on mouse position.
+    pub fn scroll_down(&mut self, lines: usize, mouse_x: u16, mouse_y: u16) {
+        if self
+            .side_panel_area
+            .contains(ratatui::layout::Position::new(mouse_x, mouse_y))
+        {
+            self.side_panel.scroll_down(lines);
+        } else {
+            self.output.scroll_down(lines);
+        }
         self.render_dirty = true;
     }
 
@@ -751,9 +771,12 @@ impl App {
                 .split(vert_output_area);
             // Store divider x position for mouse drag hit-testing
             self.divider_x = areas[1].x;
+            // Cache side panel area for mouse scroll hit-testing
+            self.side_panel_area = areas[1];
             (areas[0], areas[1])
         } else {
             self.divider_x = 0;
+            self.side_panel_area = Rect::new(0, 0, 0, 0);
             (vert_output_area, Rect::default())
         };
 

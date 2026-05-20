@@ -47,6 +47,8 @@ pub struct SidePanel {
     todo_state: Option<Arc<Mutex<TodoState>>>,
     /// Whether the side panel needs re-rendering.
     dirty: bool,
+    /// Vertical scroll offset for the task list (number of lines to skip).
+    scroll_offset: usize,
 }
 
 impl SidePanel {
@@ -54,6 +56,7 @@ impl SidePanel {
         Self {
             todo_state: None,
             dirty: true,
+            scroll_offset: 0,
         }
     }
 
@@ -66,6 +69,24 @@ impl SidePanel {
     /// Whether the side panel should be visible (has active todos).
     pub fn is_visible(&self) -> bool {
         self.todo_state.as_ref().is_some_and(has_active_todo)
+    }
+
+    /// Scroll the side panel content up by the given number of lines.
+    pub fn scroll_up(&mut self, lines: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+        self.dirty = true;
+    }
+
+    /// Scroll the side panel content down by the given number of lines.
+    pub fn scroll_down(&mut self, lines: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_add(lines);
+        self.dirty = true;
+    }
+
+    /// Reset scroll offset to the top (called when the task list changes).
+    pub fn reset_scroll(&mut self) {
+        self.scroll_offset = 0;
+        self.dirty = true;
     }
 
     /// Render the right side panel showing the todo list.
@@ -191,10 +212,23 @@ impl SidePanel {
         }
 
         // Render with left border
+        // Clamp scroll offset to prevent scrolling past the content
+        let content_height = lines.len();
+        let visible_height = block.inner(area).height as usize;
+        if content_height > visible_height {
+            let max_scroll = content_height - visible_height;
+            if self.scroll_offset > max_scroll {
+                self.scroll_offset = max_scroll;
+            }
+        } else {
+            self.scroll_offset = 0;
+        }
+
         frame.render_widget(
             Paragraph::new(Text::from(lines))
                 .block(block)
-                .style(Style::new().bg(theme::BG)),
+                .style(Style::new().bg(theme::BG))
+                .scroll((self.scroll_offset as u16, 0)),
             area,
         );
     }

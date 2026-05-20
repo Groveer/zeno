@@ -728,8 +728,12 @@ async fn main() -> anyhow::Result<()> {
                 crossterm::event::Event::Mouse(mouse) => {
                     use crossterm::event::MouseEventKind;
                     match mouse.kind {
-                        MouseEventKind::ScrollUp => app.scroll_up(3),
-                        MouseEventKind::ScrollDown => app.scroll_down(3),
+                        MouseEventKind::ScrollUp => {
+                            app.scroll_up(3, mouse.column, mouse.row);
+                        }
+                        MouseEventKind::ScrollDown => {
+                            app.scroll_down(3, mouse.column, mouse.row);
+                        }
                         _ => {
                             // Forward other mouse events (drag, press, release)
                             // for side panel resize handling.
