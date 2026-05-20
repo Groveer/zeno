@@ -52,7 +52,12 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut OutputState) {
 
     let text = Text::from(visible);
 
-    frame.render_widget(Paragraph::new(text).style(Style::new().bg(theme::BG)), area);
+    frame.render_widget(
+        Paragraph::new(text)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .style(Style::new().bg(theme::BG)),
+        area,
+    );
 
     // Scroll indicator
     if total > visible_height && state.scroll > 0 {

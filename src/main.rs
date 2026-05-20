@@ -113,7 +113,6 @@ async fn main() -> anyhow::Result<()> {
     let settings = Arc::new(settings);
 
     let provider_name = settings.active_provider.clone();
-    let model = settings.model.clone();
     let permission_mode = settings.permissions.clone();
 
     let provider_config = settings.providers.get(&provider_name).ok_or_else(|| {
@@ -127,6 +126,13 @@ async fn main() -> anyhow::Result<()> {
             provider_name
         )
     })?;
+
+    // Use explicitly configured model, or fall back to provider's default_model
+    let model = if !settings.model.is_empty() {
+        settings.model.clone()
+    } else {
+        provider_config.default_model.clone()
+    };
 
     // Build API client
     let api_key = settings::resolve_api_key(provider_config)?;

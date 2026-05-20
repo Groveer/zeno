@@ -73,7 +73,7 @@ impl Default for Settings {
         Self {
             providers: HashMap::new(),
             active_provider: "anthropic".into(),
-            model: "claude-sonnet-4-20250514".into(),
+            model: String::new(),
             tools: ToolsConfig::default(),
             role: RoleConfig::default(),
             web_search_config: WebSearchConfig::default(),
