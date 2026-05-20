@@ -837,7 +837,7 @@ fn register_zeno_api(lua: &Lua, table: &mlua::Table) -> anyhow::Result<()> {
     )?;
 
     // --- Delegation ---
-    // zn.delegation({ max_concurrent_children = 3, child_timeout = 300, ... })
+    // zn.delegation({ max_concurrent_children = 3, max_turns = 30, ... })
     table.set(
         "delegation",
         lua.create_function(move |lua, opts: mlua::Table| {

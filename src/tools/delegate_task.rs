@@ -140,14 +140,12 @@ impl Tool for DelegateTaskTool {
 
             let progress_tx = deps.progress_tx.clone();
             let max_concurrent = deps.delegation_config.max_concurrent_children.max(1) as usize;
-            let child_timeout = deps.delegation_config.child_timeout.max(30.0);
             let results = run_delegated_tasks_batch(
                 deps,
                 ctx.get_cwd(),
                 task_pairs,
                 extra_tools,
                 max_concurrent,
-                child_timeout,
                 parent_cancel.unwrap_or_default(),
                 progress_tx,
             )

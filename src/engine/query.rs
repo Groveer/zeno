@@ -43,7 +43,7 @@ use crate::tools::base::{SubAgentDeps, ToolContext};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
-// MAX_AUTO_CONTINUE, STREAM_EVENT_TIMEOUT_SECS, TOOL_EXECUTION_TIMEOUT_SECS
+// MAX_AUTO_CONTINUE, STREAM_EVENT_TIMEOUT_SECS
 // are now configurable via settings.engine and loaded from init.lua.
 
 /// Check if cancellation was requested. If so, log, handle interrupt, and return `Ok(())`.
@@ -1136,7 +1136,6 @@ impl QueryEngine {
                 tool_cache: Some(&*self.tool_cache),
                 ask_commands: &self.settings.tools.ask_commands,
                 denied_commands: &self.settings.tools.denied_commands,
-                tool_timeout_secs: self.settings.engine.tool_timeout_secs,
                 safe_paths: &self.settings.safe_paths,
             };
 
@@ -1567,7 +1566,6 @@ struct ToolExecConfig<'a> {
     tool_cache: Option<&'a std::sync::Mutex<crate::tools::cache::ToolCache>>,
     ask_commands: &'a [String],
     denied_commands: &'a [String],
-    tool_timeout_secs: u64,
     safe_paths: &'a [String],
 }
 
@@ -1830,13 +1828,10 @@ async fn execute_single_tool_tui(
         }
     }
 
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(config.tool_timeout_secs),
-        config.tools.execute(&tu.name, input.clone(), ctx),
-    )
-    .await
-    {
-        Ok(Ok(result)) => {
+    let result = config.tools.execute(&tu.name, input.clone(), ctx).await;
+
+    match result {
+        Ok(result) => {
             // Cache result for read-only tools (use normalized args for consistent keys)
             if cacheable_tools.contains(&tu.name.as_str())
                 && let Some(cache) = config.tool_cache
@@ -1911,7 +1906,7 @@ async fn execute_single_tool_tui(
                 is_error: None,
             })
         }
-        Ok(Err(e)) => {
+        Err(e) => {
             tracing::warn!(
                 tool_name = %tu.name,
                 tool_id = %tu.id,
@@ -1943,38 +1938,6 @@ async fn execute_single_tool_tui(
             Some(ContentBlock::ToolResult {
                 tool_use_id: tu.id.clone(),
                 content: format!("Error: {}", e),
-                is_error: Some(true),
-            })
-        }
-        Err(_elapsed) => {
-            let timeout_msg = format!(
-                "Tool '{}' timed out after {}s. The command may be stuck or the output may be too large.",
-                tu.name, config.tool_timeout_secs,
-            );
-            tracing::warn!(
-                tool_name = %tu.name,
-                tool_id = %tu.id,
-                timeout_secs = config.tool_timeout_secs,
-                "Tool execution timed out"
-            );
-            let _ = sender.send(EngineEvent::ToolError {
-                name: tu.name.clone(),
-                error: timeout_msg.clone(),
-            });
-
-            if let Some(he) = config.hook_executor
-                && he.has_hooks_for(HookEvent::PostToolUse)
-                && let Ok(hook_ctx) = he.build_context()
-            {
-                let _ = hook_ctx.set("tool_name", tu.name.as_str());
-                let _ = hook_ctx.set("tool_is_error", true);
-                let _ = hook_ctx.set("cwd", ctx.get_cwd().to_string_lossy().to_string());
-                he.execute(HookEvent::PostToolUse, &hook_ctx).await;
-            }
-
-            Some(ContentBlock::ToolResult {
-                tool_use_id: tu.id.clone(),
-                content: timeout_msg,
                 is_error: Some(true),
             })
         }

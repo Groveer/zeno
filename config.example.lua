@@ -311,7 +311,6 @@ zn.compact_threshold(0.5)
 -- zn.engine({
 --   max_auto_continue = 3,       -- max retries when LLM stops without tool use
 --   stream_timeout_secs = 120,   -- abort if no token for this many seconds
---   tool_timeout_secs = 180,     -- per-tool execution timeout (bash, read, etc.)
 --   collapse_char_limit = 2400,  -- text blocks larger than this get head/tail collapsed
 --   collapse_head_chars = 900,   -- chars to keep from the beginning
 --   collapse_tail_chars = 500,   -- chars to keep from the end
@@ -325,7 +324,6 @@ zn.compact_threshold(0.5)
 
 -- zn.delegation({
 --   max_concurrent_children = 3,   -- max parallel sub-agents
---   child_timeout = 300,           -- per-sub-agent timeout in seconds
 --   max_turns = 30,                -- max tool-calling turns per sub-agent
 --   max_auto_continue = 2,         -- auto-continue retries for empty responses
 --   blocked_tools = {},            -- additional tools to block (added to built-in block list)

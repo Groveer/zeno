@@ -166,8 +166,6 @@ pub async fn run_delegated_task(
         &deps.delegation_config.default_tools,
         &deps.delegation_config.blocked_tools,
     );
-    let timeout = deps.delegation_config.child_timeout.max(30.0);
-
     run_single_sub_agent(
         deps,
         cwd,
@@ -175,7 +173,6 @@ pub async fn run_delegated_task(
         &goal,
         context.as_deref(),
         &allowed_tools,
-        timeout,
         &cancel,
         &progress_tx,
     )
@@ -193,7 +190,6 @@ pub async fn run_delegated_tasks_batch(
     tasks: Vec<(String, Option<String>)>, // (goal, context) pairs
     extra_tools: Vec<String>,
     max_concurrent: usize,
-    child_timeout: f64,
     cancel: CancellationToken,
     progress_tx: tokio::sync::mpsc::UnboundedSender<SubAgentEvent>,
 ) -> Vec<SubAgentResult> {
@@ -249,7 +245,6 @@ pub async fn run_delegated_tasks_batch(
                 &goal,
                 context.as_deref(),
                 &allowed_tools,
-                child_timeout,
                 &bc,
                 &pt,
             )
@@ -366,7 +361,6 @@ async fn run_single_sub_agent(
     goal: &str,
     context: Option<&str>,
     allowed_tools: &[String],
-    timeout_secs: f64,
     cancel: &CancellationToken,
     progress_tx: &tokio::sync::mpsc::UnboundedSender<SubAgentEvent>,
 ) -> SubAgentResult {
@@ -440,24 +434,6 @@ async fn run_single_sub_agent(
                 tool_trace,
                 interrupted: true,
                 error: None,
-                duration_seconds: start.elapsed().as_secs_f64(),
-                modified_files: vec![],
-            };
-        }
-
-        // Check timeout
-        if start.elapsed().as_secs_f64() > timeout_secs {
-            return SubAgentResult {
-                summary: String::new(),
-                api_calls: turn,
-                exit_reason: "timeout".into(),
-                tokens: SubAgentTokenUsage {
-                    input_tokens: total_input_tokens,
-                    output_tokens: total_output_tokens,
-                },
-                tool_trace,
-                interrupted: false,
-                error: Some(format!("Sub-agent timed out after {}s", timeout_secs)),
                 duration_seconds: start.elapsed().as_secs_f64(),
                 modified_files: vec![],
             };

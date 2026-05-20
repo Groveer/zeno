@@ -615,9 +615,6 @@ pub struct DelegationConfig {
     /// Maximum number of sub-agents that can run concurrently.
     /// Default: 3. Minimum: 1.
     pub max_concurrent_children: u32,
-    /// Timeout per sub-agent in seconds.
-    /// Default: 300 (5 minutes). Minimum: 30.
-    pub child_timeout: f64,
     /// Maximum number of tool-calling turns for a sub-agent.
     pub max_turns: u32,
     /// Max auto-continuations for sub-agent.
@@ -634,7 +631,6 @@ impl Default for DelegationConfig {
     fn default() -> Self {
         Self {
             max_concurrent_children: 3,
-            child_timeout: 300.0,
             max_turns: 30,
             max_auto_continue: 2,
             blocked_tools: Vec::new(),
@@ -659,8 +655,6 @@ pub struct EngineConfig {
     /// stalled and triggers a retry (up to `llm.max_retries` times).
     /// Set to `0` to disable the timeout (wait indefinitely for stream events).
     pub stream_timeout_secs: u64,
-    /// Per-tool execution timeout in seconds.
-    pub tool_timeout_secs: u64,
     /// Context collapse char limit.
     pub collapse_char_limit: usize,
     /// Context collapse head chars.
@@ -674,7 +668,6 @@ impl Default for EngineConfig {
         Self {
             max_auto_continue: 3,
             stream_timeout_secs: 120,
-            tool_timeout_secs: 180,
             collapse_char_limit: 2400,
             collapse_head_chars: 900,
             collapse_tail_chars: 500,
