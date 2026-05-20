@@ -1,8 +1,8 @@
 //! Input history persistence — identity-scoped load/save from disk.
 //!
 //! History entries are persisted as a JSON array to:
-//! - `~/.config/zeno/input_history.json` (no identity / default)
-//! - `~/.config/zeno/input_history/{identity}.json` (per-identity)
+//! - `~/.local/share/zeno/input_history.json` (no identity / default)
+//! - `~/.local/share/zeno/input_history/{identity}.json` (per-identity)
 //!
 //! Uses atomic write (temp file + rename) to prevent partial reads by concurrent instances.
 
@@ -14,7 +14,8 @@ pub const MAX_PERSISTED_HISTORY: usize = 2000;
 /// Load input history from disk for an optional identity.
 ///
 /// When `identity` is Some and non-empty, loads per-identity history from
-/// `input_history/{identity}.json`. Otherwise loads the default `input_history.json`.
+/// `input_history/{identity}.json` under the data directory. Otherwise loads the
+/// default `input_history.json` from the data directory.
 ///
 /// Returns an empty Vec if the file doesn't exist or is corrupted, so the user
 /// never loses the ability to type.
@@ -48,8 +49,9 @@ pub fn load_history(identity: Option<&str>) -> Vec<String> {
 
 /// Save input history to disk for an optional identity.
 ///
-/// When `identity` is Some and non-empty, saves to `input_history/{identity}.json`.
-/// Otherwise saves to `input_history.json`.
+/// When `identity` is Some and non-empty, saves to `input_history/{identity}.json`
+/// under the data directory. Otherwise saves to `input_history.json` in the data
+/// directory.
 ///
 /// Truncates to MAX_PERSISTED_HISTORY entries. Uses atomic write (temp file + rename)
 /// to prevent partial reads by other concurrent Zeno instances.
