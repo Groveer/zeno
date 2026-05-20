@@ -35,7 +35,7 @@ use crate::api::types::{ApiError, ContentBlock, StopReason, StreamEvent, Usage};
 use crate::engine::carryover::resolve_file_path;
 use crate::engine::compact::{auto_compact_if_needed, is_prompt_too_long_error};
 use crate::engine::query_engine::QueryEngine;
-use crate::engine::tui_events::UiEvent;
+use crate::engine::tui_events::EngineEvent;
 use crate::hooks::executor::HookExecutor;
 use crate::hooks::types::HookEvent;
 use crate::permissions::checker;
@@ -335,7 +335,7 @@ impl QueryEngine {
         &mut self,
         user_input: &str,
         image_blocks: Vec<(String, String)>, // (media_type, base64_data)
-        sender: &tokio::sync::mpsc::UnboundedSender<UiEvent>,
+        sender: &tokio::sync::mpsc::UnboundedSender<EngineEvent>,
         cancel: CancellationToken,
     ) -> Result<(), ApiError> {
         // --- UserMessage hook: may transform the input ---
@@ -409,7 +409,7 @@ impl QueryEngine {
             }
 
             if turn > self.max_turns {
-                let _ = sender.send(UiEvent::Status(format!(
+                let _ = sender.send(EngineEvent::Status(format!(
                 "max turns ({}) reached — task may not be complete. Type '继续' or 'continue' to resume.",
                 self.max_turns
             )));
@@ -417,7 +417,7 @@ impl QueryEngine {
                 // continue the task by typing "继续" in the next input.
                 // But clear steer — it was for this run.
                 self.clear_steer();
-                let _ = sender.send(UiEvent::QueryDone {
+                let _ = sender.send(EngineEvent::QueryDone {
                     text: String::new(),
                     tool_calls: 0,
                     tokens: self.cost_tracker.last_prompt_tokens
@@ -446,7 +446,7 @@ impl QueryEngine {
                     return Ok(());
                 }
             } {
-                let _ = sender.send(UiEvent::CompactProgress {
+                let _ = sender.send(EngineEvent::CompactProgress {
                     method: match result.method {
                         crate::engine::compact::CompactMethod::Micro => "micro".into(),
                         crate::engine::compact::CompactMethod::Full => "full".into(),
@@ -503,7 +503,7 @@ impl QueryEngine {
                     } else {
                         "LLM response empty"
                     };
-                    let _ = sender.send(UiEvent::Status(format!(
+                    let _ = sender.send(EngineEvent::Status(format!(
                         "{}{} — retrying ({}/{})...",
                         label, error_detail, retry_attempt, max_retries
                     )));
@@ -590,7 +590,7 @@ impl QueryEngine {
                     "Prompt too long, triggering reactive compact"
                 );
                                     let _ =
-                                        sender.send(UiEvent::Status("Prompt too long, compressing...".into()));
+                                        sender.send(EngineEvent::Status("Prompt too long, compressing...".into()));
                                     let cw = self.effective_context_window();
                                     match tokio::select! {
                                         r = auto_compact_if_needed(
@@ -610,7 +610,7 @@ impl QueryEngine {
                                         }
                                     } {
                                         Ok(Some(result)) => {
-                                            let _ = sender.send(UiEvent::Status(format!(
+                                            let _ = sender.send(EngineEvent::Status(format!(
                                                 "reactive-compact: {} → {} tokens",
                                                 result.tokens_before, result.tokens_after
                                             )));
@@ -703,7 +703,7 @@ impl QueryEngine {
                                             timeout_secs = self.settings.engine.stream_timeout_secs,
                                             "Stream event timeout — no token from LLM for too long"
                                         );
-                                        let _ = sender.send(UiEvent::Error(
+                                        let _ = sender.send(EngineEvent::Error(
                                             format!("Stream timed out after {}s of inactivity. The LLM may be stalled or the network may be down.", self.settings.engine.stream_timeout_secs)
                                         ));
                                         stream_failed = true;
@@ -734,11 +734,11 @@ impl QueryEngine {
 
                     match event {
                         Ok(StreamEvent::TextDelta(delta)) => {
-                            let _ = sender.send(UiEvent::TextDelta(delta.clone()));
+                            let _ = sender.send(EngineEvent::TextDelta(delta.clone()));
                             assistant_text.push_str(&delta);
                         }
                         Ok(StreamEvent::ReasoningDelta(delta)) => {
-                            let _ = sender.send(UiEvent::ReasoningDelta(delta.clone()));
+                            let _ = sender.send(EngineEvent::ReasoningDelta(delta.clone()));
                             reasoning_text.push_str(&delta);
                         }
                         Ok(StreamEvent::ToolUseStart {
@@ -788,7 +788,7 @@ impl QueryEngine {
                                 usage
                             };
                             self.cost_tracker.record(&self.model, &final_usage);
-                            let _ = sender.send(UiEvent::TokenUpdate {
+                            let _ = sender.send(EngineEvent::TokenUpdate {
                                 total_tokens: self.cost_tracker.last_prompt_tokens
                                     + self.cost_tracker.last_output_tokens,
                                 turn_count: self.cost_tracker.turn_count,
@@ -931,7 +931,7 @@ impl QueryEngine {
                         error_detail
                     )
                 };
-                let _ = sender.send(UiEvent::Status(msg));
+                let _ = sender.send(EngineEvent::Status(msg));
 
                 if auto_continue_count < self.settings.engine.max_auto_continue
                     && self.carryover.has_pending_goal()
@@ -942,7 +942,7 @@ impl QueryEngine {
                         max_auto_continue = self.settings.engine.max_auto_continue,
                         "auto-continue: injecting continuation for empty response"
                     );
-                    let _ = sender.send(UiEvent::Status(
+                    let _ = sender.send(EngineEvent::Status(
                         "Model returned empty — retrying with goal reminder...".into(),
                     ));
                     if let Some(prompt) = self.carryover.build_continuation_prompt() {
@@ -951,7 +951,7 @@ impl QueryEngine {
                     continue;
                 }
 
-                let _ = sender.send(UiEvent::QueryDone {
+                let _ = sender.send(EngineEvent::QueryDone {
                     text: String::new(),
                     tool_calls: 0,
                     tokens: self.cost_tracker.last_prompt_tokens
@@ -993,7 +993,7 @@ impl QueryEngine {
                         reason = "max_tokens",
                         "auto-continue: output truncated, requesting continuation"
                     );
-                    let _ = sender.send(UiEvent::Status(
+                    let _ = sender.send(EngineEvent::Status(
                         "Output truncated (max tokens reached) — continuing...".into(),
                     ));
                     // Tell the model its previous output was cut off and to continue
@@ -1016,7 +1016,7 @@ impl QueryEngine {
                         reason = "reasoning_only",
                         "auto-continue: model returned only reasoning, nudging for response"
                     );
-                    let _ = sender.send(UiEvent::Status("Model is thinking...".into()));
+                    let _ = sender.send(EngineEvent::Status("Model is thinking...".into()));
 
                     if let Some(prompt) = self.carryover.build_continuation_prompt() {
                         self.history.push_user(&prompt);
@@ -1043,7 +1043,7 @@ impl QueryEngine {
                         reason = "enforcement_or_pending_goal",
                         "auto-continue: model stopped without tool use, goal pending or planning detected"
                     );
-                    let _ = sender.send(UiEvent::Status(
+                    let _ = sender.send(EngineEvent::Status(
                         "Task not complete — enforcing tool use...".into(),
                     ));
                     if let Some(prompt) = self.carryover.build_continuation_prompt() {
@@ -1056,7 +1056,7 @@ impl QueryEngine {
                 self.carryover.clear_goal();
                 // Clear any pending steer — it was meant for this run, not the next.
                 self.clear_steer();
-                let _ = sender.send(UiEvent::QueryDone {
+                let _ = sender.send(EngineEvent::QueryDone {
                     text: String::new(),
                     tool_calls: 0,
                     tokens: self.cost_tracker.last_prompt_tokens
@@ -1123,7 +1123,7 @@ impl QueryEngine {
 
             for tu in &tool_uses {
                 let summary = format_tool_input_summary(&tu.name, &tu.input_json);
-                let _ = sender.send(UiEvent::ToolStart {
+                let _ = sender.send(EngineEvent::ToolStart {
                     name: tu.name.clone(),
                     input_summary: summary,
                 });
@@ -1269,10 +1269,11 @@ impl QueryEngine {
                     steer_len = steer_text.len(),
                     "Draining pending steer into conversation"
                 );
-                let _ = sender.send(UiEvent::Status(format!(
+                let _ = sender.send(EngineEvent::Status(format!(
                     "⇢ Steered: {}",
                     safe_truncate_str(&steer_text, 60)
                 )));
+                let _ = sender.send(EngineEvent::SteerHandled);
                 if !self.history.append_steer_to_last_tool_result(&steer_text) {
                     // Fallback: no tool result to append to (shouldn't happen
                     // since we just pushed tool_results, but handle gracefully).
@@ -1392,15 +1393,15 @@ impl QueryEngine {
 
     /// Called when the query is interrupted (Ctrl+C).
     /// Sanitizes history and sends the appropriate UI events.
-    fn handle_interrupt(&mut self, sender: &tokio::sync::mpsc::UnboundedSender<UiEvent>) {
+    fn handle_interrupt(&mut self, sender: &tokio::sync::mpsc::UnboundedSender<EngineEvent>) {
         tracing::info!(event = "interrupted", "Query interrupted by user");
         // A hard interrupt supersedes any pending steer — the steer was
         // meant for the agent's next tool-call iteration, which will no
         // longer happen. Drop it instead of surprising the user.
         self.clear_steer();
         self.history.sanitize();
-        let _ = sender.send(UiEvent::Interrupted);
-        let _ = sender.send(UiEvent::QueryDone {
+        let _ = sender.send(EngineEvent::Interrupted);
+        let _ = sender.send(EngineEvent::QueryDone {
             text: String::new(),
             tool_calls: 0,
             tokens: self.cost_tracker.last_prompt_tokens + self.cost_tracker.last_output_tokens,
@@ -1415,7 +1416,7 @@ impl QueryEngine {
     /// system prompt, so the model treats it as context rather than user input.
     async fn preprocess_images(
         &mut self,
-        sender: &tokio::sync::mpsc::UnboundedSender<UiEvent>,
+        sender: &tokio::sync::mpsc::UnboundedSender<EngineEvent>,
     ) -> String {
         // Anthropic handles images natively — no preprocessing needed
         let is_anthropic = self
@@ -1454,7 +1455,7 @@ impl QueryEngine {
                 } = block
                 {
                     // Send image to auxiliary vision model
-                    let _ = sender.send(UiEvent::Status(
+                    let _ = sender.send(EngineEvent::Status(
                         "Analyzing image via auxiliary model...".into(),
                     ));
 
@@ -1585,14 +1586,14 @@ async fn execute_single_tool_tui_catch(
     config: &ToolExecConfig<'_>,
     tu: &CollectedToolUse,
     ctx: &ToolContext,
-    sender: &tokio::sync::mpsc::UnboundedSender<crate::engine::tui_events::UiEvent>,
+    sender: &tokio::sync::mpsc::UnboundedSender<crate::engine::tui_events::EngineEvent>,
     cancel: &CancellationToken,
     last_failed_tool_input: &Arc<Mutex<Option<String>>>,
 ) -> ContentBlock {
     match execute_single_tool_tui(config, tu, ctx, sender, cancel, last_failed_tool_input).await {
         Some(block) => block,
         None => {
-            let _ = sender.send(UiEvent::ToolError {
+            let _ = sender.send(EngineEvent::ToolError {
                 name: tu.name.clone(),
                 error: "Internal error: tool returned no result".into(),
             });
@@ -1609,7 +1610,7 @@ async fn execute_single_tool_tui(
     config: &ToolExecConfig<'_>,
     tu: &CollectedToolUse,
     ctx: &ToolContext,
-    sender: &tokio::sync::mpsc::UnboundedSender<crate::engine::tui_events::UiEvent>,
+    sender: &tokio::sync::mpsc::UnboundedSender<crate::engine::tui_events::EngineEvent>,
     cancel: &CancellationToken,
     last_failed_tool_input: &Arc<Mutex<Option<String>>>,
 ) -> Option<ContentBlock> {
@@ -1621,7 +1622,7 @@ async fn execute_single_tool_tui(
             if let Ok(mut guard) = last_failed_tool_input.lock() {
                 *guard = Some(tu.input_json.clone());
             }
-            let _ = sender.send(UiEvent::ToolError {
+            let _ = sender.send(EngineEvent::ToolError {
                 name: tu.name.clone(),
                 error: e.clone(),
             });
@@ -1647,7 +1648,7 @@ async fn execute_single_tool_tui(
                     .execute_first_block(HookEvent::PreToolUse, &hook_ctx)
                     .await
                 {
-                    let _ = sender.send(UiEvent::ToolError {
+                    let _ = sender.send(EngineEvent::ToolError {
                         name: tu.name.clone(),
                         error: block_reason.clone(),
                     });
@@ -1674,7 +1675,7 @@ async fn execute_single_tool_tui(
         let validation: Result<(), crate::tools::base::ToolError> =
             t.as_ref().validate_input(&input);
         if let Err(e) = validation {
-            let _ = sender.send(UiEvent::ToolError {
+            let _ = sender.send(EngineEvent::ToolError {
                 name: tu.name.clone(),
                 error: e.to_string(),
             });
@@ -1737,7 +1738,7 @@ async fn execute_single_tool_tui(
             let display_detail = format_permission_detail(&tu.name, &tu.input_json);
             let (tx, rx) = tokio::sync::oneshot::channel();
             let response_tx = Arc::new(Mutex::new(Some(tx)));
-            let _ = sender.send(UiEvent::PermissionAsk {
+            let _ = sender.send(EngineEvent::PermissionAsk {
                 tool_name: tu.name.clone(),
                 reason: decision.reason.clone(),
                 input: display_detail,
@@ -1765,7 +1766,7 @@ async fn execute_single_tool_tui(
                     if allowed && matches!(r.as_str(), "a" | "all" | "always") {
                         let mut guard = config.permission_allow_all.lock().unwrap();
                         *guard = true;
-                        let _ = sender.send(UiEvent::Status(
+                        let _ = sender.send(EngineEvent::Status(
                             "All permissions granted for this session.".into(),
                         ));
                     }
@@ -1784,7 +1785,7 @@ async fn execute_single_tool_tui(
                 tool_id = %tu.id,
                 "Tool execution denied by policy"
             );
-            let _ = sender.send(UiEvent::ToolError {
+            let _ = sender.send(EngineEvent::ToolError {
                 name: tu.name.clone(),
                 error: denied_reason.clone(),
             });
@@ -1804,7 +1805,7 @@ async fn execute_single_tool_tui(
             tool_id = %tu.id,
             "Tool execution denied by user"
         );
-        let _ = sender.send(UiEvent::ToolError {
+        let _ = sender.send(EngineEvent::ToolError {
             name: tu.name.clone(),
             error: "Permission denied by user.".into(),
         });
@@ -1826,7 +1827,7 @@ async fn execute_single_tool_tui(
                         tool_name = %tu.name,
                         "Tool result cache hit"
                     );
-                    let _ = sender.send(UiEvent::ToolOutput {
+                    let _ = sender.send(EngineEvent::ToolOutput {
                         name: tu.name.clone(),
                         output: format!("(cached) {} chars", cached.len()),
                     });
@@ -1876,7 +1877,7 @@ async fn execute_single_tool_tui(
             }
             // Show a compact one-line summary in the TUI; full content goes to LLM.
             let display = summarize_tool_output(&tu.name, &result, &tu.input_json);
-            let _ = sender.send(UiEvent::ToolOutput {
+            let _ = sender.send(EngineEvent::ToolOutput {
                 name: tu.name.clone(),
                 output: display,
             });
@@ -1886,7 +1887,7 @@ async fn execute_single_tool_tui(
                 if let Ok(parsed) = serde_json::from_str::<Value>(&result) {
                     if let Some(diff_str) = parsed.get("diff").and_then(|d| d.as_str()) {
                         if !diff_str.is_empty() {
-                            let _ = sender.send(UiEvent::ToolDiff {
+                            let _ = sender.send(EngineEvent::ToolDiff {
                                 name: tu.name.clone(),
                                 diff: diff_str.to_string(),
                             });
@@ -1933,7 +1934,7 @@ async fn execute_single_tool_tui(
                 error = %e,
                 "Tool execution failed"
             );
-            let _ = sender.send(UiEvent::ToolError {
+            let _ = sender.send(EngineEvent::ToolError {
                 name: tu.name.clone(),
                 error: e.to_string(),
             });
@@ -1972,7 +1973,7 @@ async fn execute_single_tool_tui(
                 timeout_secs = config.tool_timeout_secs,
                 "Tool execution timed out"
             );
-            let _ = sender.send(UiEvent::ToolError {
+            let _ = sender.send(EngineEvent::ToolError {
                 name: tu.name.clone(),
                 error: timeout_msg.clone(),
             });

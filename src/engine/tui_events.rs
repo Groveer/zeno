@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 /// UI events emitted during a query for TUI rendering.
 #[derive(Debug, Clone)]
-pub enum UiEvent {
+pub enum EngineEvent {
     /// A chunk of text from the LLM stream.
     TextDelta(String),
     /// A chunk of reasoning / thinking content from the LLM stream.
@@ -78,7 +78,12 @@ pub enum UiEvent {
     },
     /// Image paste failed (no image in clipboard or tool unavailable).
     ImagePasteFailed,
+    /// User granted blanket permission (typed "a"/"all"/"always" in response
+    /// to a permission prompt). Gateway sets its permission_allow_all flag.
+    PermissionAllowAllSet,
+    /// Steer injection was consumed by the engine (next turn includes it).
+    SteerHandled,
 }
 
 /// Convenience type alias for the event sender half.
-pub type UiSender = tokio::sync::mpsc::UnboundedSender<UiEvent>;
+pub type EngineSender = tokio::sync::mpsc::UnboundedSender<EngineEvent>;

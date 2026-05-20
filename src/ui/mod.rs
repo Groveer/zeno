@@ -1,7 +1,10 @@
 pub mod app;
-pub mod clipboard;
+pub mod component;
 pub mod input;
 pub mod markdown;
 pub mod output;
+pub mod permission_overlay;
+pub mod side_panel;
 pub mod status_bar;
 pub mod theme;
+pub mod title_bar;

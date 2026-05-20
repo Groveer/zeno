@@ -140,7 +140,8 @@ pub struct ToolContext {
     /// "main" for the primary query, task-specific ID for sub-agents.
     pub task_id: String,
     /// For ask_user tool: channel to send the question to the TUI and receive the answer.
-    pub ask_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::engine::tui_events::UiEvent>>,
+    pub ask_sender:
+        Option<tokio::sync::mpsc::UnboundedSender<crate::engine::tui_events::EngineEvent>>,
     /// Shared MCP manager for lazy MCP server connections.
     pub mcp_manager: Option<std::sync::Arc<tokio::sync::Mutex<crate::mcp::manager::McpManager>>>,
     /// Dependencies for sub-agent delegation (set when the engine supports it).
@@ -161,7 +162,7 @@ impl ToolContext {
     /// Create a context with an ask channel (for TUI mode).
     pub fn with_ask_sender(
         cwd: PathBuf,
-        sender: tokio::sync::mpsc::UnboundedSender<crate::engine::tui_events::UiEvent>,
+        sender: tokio::sync::mpsc::UnboundedSender<crate::engine::tui_events::EngineEvent>,
         mcp_manager: Option<std::sync::Arc<tokio::sync::Mutex<crate::mcp::manager::McpManager>>>,
     ) -> Self {
         Self {

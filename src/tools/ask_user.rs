@@ -6,7 +6,7 @@
 //! 2. **Open-ended** — omit choices entirely. The user types a free-form response.
 
 use super::base::{Tool, ToolContext, ToolError};
-use crate::engine::tui_events::UiEvent;
+use crate::engine::tui_events::EngineEvent;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::io::{self, Write};
@@ -120,7 +120,7 @@ impl Tool for AskUserTool {
             };
 
             sender
-                .send(UiEvent::AskUser {
+                .send(EngineEvent::AskUser {
                     question: display_question,
                     response_tx,
                 })

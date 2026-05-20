@@ -53,3 +53,14 @@ pub fn display_width(s: &str) -> usize {
     }
     width
 }
+
+/// Truncate a string for display, safe for multi-byte UTF-8.
+/// Returns a `Cow` that borrows when no truncation is needed.
+pub fn truncate(s: &str, max_chars: usize) -> std::borrow::Cow<'_, str> {
+    if s.chars().count() <= max_chars {
+        std::borrow::Cow::Borrowed(s)
+    } else {
+        let end = s.floor_char_boundary(max_chars);
+        std::borrow::Cow::Owned(format!("{}…", &s[..end]))
+    }
+}

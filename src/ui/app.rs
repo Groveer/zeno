@@ -12,39 +12,35 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
-    text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph},
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::query_engine::steer_into_slot;
-use crate::engine::sub_agent::SubAgentEvent;
+use crate::gateway::UiCommand;
 use crate::tools::todo::TodoState;
+use crate::utils::truncate;
 
+use super::component::Component as ComponentTrait;
+use super::component::safe_view;
 use super::input::{self, InputState};
 use super::output::{OutputSegment, OutputState};
-use super::status_bar::{self, AppMode, StatusInfo};
+use super::permission_overlay::{self, PermissionOverlay};
+use super::side_panel::SidePanel;
+use super::status_bar::{AppMode, StatusInfo};
 use super::theme;
-
-/// Truncate a string for display, safe for multi-byte UTF-8.
-/// Returns a `Cow` that borrows when no truncation is needed.
-fn truncate_preview(s: &str, max_chars: usize) -> std::borrow::Cow<'_, str> {
-    if s.chars().count() <= max_chars {
-        std::borrow::Cow::Borrowed(s)
-    } else {
-        let end = s.floor_char_boundary(max_chars);
-        std::borrow::Cow::Owned(format!("{}…", &s[..end]))
-    }
-}
+use super::title_bar::TitleBar;
 
 /// Word-wrap text to fit within `max_width` terminal columns, respecting
 /// multi-byte UTF-8 and emoji width. Breaks at word boundaries when possible.
 /// Returns a list of wrapped line strings.
-fn word_wrap(s: &str, max_width: usize) -> Vec<String> {
+pub fn word_wrap(s: &str, max_width: usize) -> Vec<String> {
     if max_width == 0 || s.is_empty() {
-        return if s.is_empty() { vec![] } else { vec![String::new()] };
+        return if s.is_empty() {
+            vec![]
+        } else {
+            vec![String::new()]
+        };
     }
     let mut lines: Vec<String> = Vec::new();
     for line in s.lines() {
@@ -125,46 +121,34 @@ pub struct App {
     pub(crate) output: OutputState,
     mode: AppMode,
     pub(crate) status: StatusInfo,
+    /// Title bar component.
+    title_bar: TitleBar,
+    /// Side panel component (todo list).
+    side_panel: SidePanel,
+    /// Shared todo state reference (for poll_engine_status generation tracking).
+    todo_state: Option<std::sync::Arc<tokio::sync::Mutex<TodoState>>>,
+    /// Cached todo state generation — poll_engine_status compares against this.
+    todo_gen: u64,
     pending_query: Option<String>,
-    event_rx: mpsc::UnboundedReceiver<crate::engine::tui_events::UiEvent>,
-    event_tx: mpsc::UnboundedSender<crate::engine::tui_events::UiEvent>,
+    /// Channel receiver for UiCommands from Gateway.
+    cmd_rx: mpsc::UnboundedReceiver<UiCommand>,
+    /// Sender for engine events to Gateway (for image paste, etc.).
+    gateway_event_tx: mpsc::UnboundedSender<crate::engine::tui_events::EngineEvent>,
+    /// Permission overlay component (manages permission/ask_user queue).
+    permission_overlay: PermissionOverlay,
     should_quit: bool,
-    /// When AI asks a question, this holds the oneshot sender to reply.
-    ask_response_tx: Option<tokio::sync::oneshot::Sender<String>>,
-    /// The question being asked (for display in input placeholder).
-    ask_question: Option<String>,
-    /// Queue of pending permission requests waiting to be displayed.
-    /// When multiple tools request permission concurrently, earlier requests
-    /// are queued and processed one at a time after the user responds.
-    permission_queue: Vec<PendingPermission>,
     /// Cancellation token shared with the running LLM task.
-    /// Pressing Ctrl+C while Running cancels this token instead of quitting.
     cancel_token: CancellationToken,
-    /// RAII guard for the config file watcher (dropped when session ends).
+    /// RAII guard for the config file watcher (dropped on session ends).
     _watcher_guard: Option<crate::config::watcher::WatcherGuard>,
     /// Cancellation token for background tasks (curator, review).
-    /// Cancelled once on exit so background work stops promptly.
     background_cancel_token: CancellationToken,
     /// Set to true whenever something changed that requires a re-render.
-    /// The main loop skips terminal::draw() when this is false and mode is Idle.
     render_dirty: bool,
-    /// When true, auto-approve all permission requests without prompting.
-    /// Set when the user answers "a" (yes to all) in a permission prompt.
-    /// When true, auto-approve all permission requests without prompting.
-    /// Set when the user answers "a" (yes to all) in a permission prompt.
-    permission_allow_all: bool,
     /// Queue of user messages typed while the agent is running.
-    /// These are sent as "steer" to the engine when the user presses Enter.
     steer_queue: Vec<String>,
-    /// Shared reference to the engine's steer slot so the TUI can inject
-    /// mid-run user input into the agent loop without the engine lock.
+    /// Shared reference to the engine's steer slot.
     steer_slot: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
-    /// Receiver for sub-agent progress events (delegate_task).
-    sub_agent_rx: tokio::sync::mpsc::UnboundedReceiver<SubAgentEvent>,
-    /// Sender for sub-agent progress events (cloned into ToolContext).
-    sub_agent_tx: tokio::sync::mpsc::UnboundedSender<SubAgentEvent>,
-    /// Shared todo state for the side panel.
-    todo_state: Option<std::sync::Arc<tokio::sync::Mutex<TodoState>>>,
     /// Width of the side panel (todo list) in terminal columns.
     side_panel_width: u16,
     /// Whether the user is currently dragging the side panel divider.
@@ -175,14 +159,6 @@ pub struct App {
     pending_image_blocks: Vec<(String, String)>,
 }
 
-/// A queued permission request waiting for user response.
-struct PendingPermission {
-    tool_name: String,
-    reason: String,
-    input: String,
-    response_tx: tokio::sync::oneshot::Sender<String>,
-}
-
 impl App {
     /// Maximum height the input area can grow to (in rows including border).
     const MAX_INPUT_HEIGHT: u16 = 16;
@@ -190,12 +166,17 @@ impl App {
     /// Minimum height for the input area (1 border + 1 content line).
     const MIN_INPUT_HEIGHT: u16 = 3;
 
-    pub fn new() -> Self {
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let (sub_agent_tx, sub_agent_rx) = tokio::sync::mpsc::unbounded_channel();
-        Self {
+    pub fn new(
+        cmd_rx: mpsc::UnboundedReceiver<UiCommand>,
+        gateway_event_tx: mpsc::UnboundedSender<crate::engine::tui_events::EngineEvent>,
+    ) -> Self {
+        let mut app = Self {
             input: InputState::new(),
             output: OutputState::new(),
+            title_bar: TitleBar,
+            side_panel: SidePanel::new(),
+            todo_state: None,
+            todo_gen: 0,
             mode: AppMode::Idle,
             status: StatusInfo {
                 model: String::new(),
@@ -210,32 +191,49 @@ impl App {
                 active_identity: None,
                 tick: 0,
             },
-            event_rx,
-            event_tx,
+            cmd_rx,
+            gateway_event_tx,
+            permission_overlay: PermissionOverlay::new(),
             should_quit: false,
             pending_query: None,
-            ask_response_tx: None,
-            ask_question: None,
-            permission_queue: Vec::new(),
             cancel_token: CancellationToken::new(),
             background_cancel_token: CancellationToken::new(),
             render_dirty: true,
-            permission_allow_all: false,
             steer_queue: Vec::new(),
             steer_slot: None,
-            sub_agent_rx,
-            sub_agent_tx,
-            todo_state: None,
             side_panel_width: 40,
             side_panel_dragging: false,
             divider_x: 0,
             _watcher_guard: None,
             pending_image_blocks: Vec::new(),
-        }
+        };
+
+        // Mount child components — triggers any one-time initialization
+        // that components may need after construction.
+        app.mount_components();
+
+        app
     }
 
-    pub fn event_sender(&self) -> mpsc::UnboundedSender<crate::engine::tui_events::UiEvent> {
-        self.event_tx.clone()
+    /// Call mount() on all child components that implement the Component trait.
+    fn mount_components(&mut self) {
+        self.title_bar.mount();
+        self.output.mount();
+        self.input.mount();
+        self.side_panel.mount();
+        self.status.mount();
+        self.permission_overlay.mount();
+    }
+
+    /// Call unmount() on all child components on shutdown.
+    /// Components can use this to release resources (timers, channels, watchers).
+    pub fn unmount_components(&mut self) {
+        self.title_bar.unmount();
+        self.output.unmount();
+        self.input.unmount();
+        self.side_panel.unmount();
+        self.status.unmount();
+        self.permission_overlay.unmount();
     }
 
     /// Set the config file watcher guard (dropped on session exit).
@@ -249,15 +247,10 @@ impl App {
         self.steer_slot = Some(slot);
     }
 
-    /// Set the shared todo state for the side panel.
+    /// Set the shared todo state for the side panel and poll_engine_status tracking.
     pub fn set_todo_state(&mut self, state: std::sync::Arc<tokio::sync::Mutex<TodoState>>) {
+        self.side_panel.set_todo_state(state.clone());
         self.todo_state = Some(state);
-    }
-
-    /// Get the sender for sub-agent progress events.
-    /// The engine clones this and puts it into ToolContext for delegate_task.
-    pub fn sub_agent_sender(&self) -> tokio::sync::mpsc::UnboundedSender<SubAgentEvent> {
-        self.sub_agent_tx.clone()
     }
 
     /// Whether something changed since the last frame and a re-render is due.
@@ -275,6 +268,27 @@ impl App {
         self.render_dirty = false;
     }
 
+    /// Poll external shared state (TodoState) for changes and mark dirty if needed.
+    ///
+    /// Uses generation counter to detect changes without per-frame locking in view().
+    /// Called from the main loop each render cycle.
+    ///
+    /// TODO(Phase 4): Replace with tokio::sync::watch channel push notification.
+    pub fn poll_engine_status(&mut self) {
+        if let Some(ref state) = self.todo_state {
+            if let Ok(s) = state.try_lock() {
+                let cur_gen = s.generation();
+                if cur_gen != self.todo_gen {
+                    self.todo_gen = cur_gen;
+                    self.render_dirty = true;
+                }
+            }
+            // try_lock failure: todo_state held by tool — skip this cycle.
+            // If contention persists across frames, side panel misses updates.
+            // Phase 4 watch channel resolves this entirely.
+        }
+    }
+
     pub fn set_status(&mut self, info: StatusInfo) {
         self.status = info;
         self.render_dirty = true;
@@ -286,29 +300,23 @@ impl App {
     /// `[img]` marker in the input buffer. The marker is deletable like
     /// normal text.
     pub fn trigger_image_paste(&mut self) {
-        let tx = self.event_tx.clone();
+        let tx = self.gateway_event_tx.clone();
         tokio::spawn(async move {
-            match crate::ui::clipboard::read_clipboard_image().await {
+            match crate::ui::input::clipboard::read_clipboard_image().await {
                 Some(img) => {
                     let size_kb = img.size_bytes / 1024;
                     let (media_type, base64_data) = img.into_tuple();
-                    let _ = tx.send(crate::engine::tui_events::UiEvent::ImagePasted {
+                    let _ = tx.send(crate::engine::tui_events::EngineEvent::ImagePasted {
                         media_type,
                         base64_data,
                         size_kb,
                     });
                 }
                 None => {
-                    let _ = tx.send(crate::engine::tui_events::UiEvent::ImagePasteFailed);
+                    let _ = tx.send(crate::engine::tui_events::EngineEvent::ImagePasteFailed);
                 }
             }
         });
-    }
-
-    /// Insert an image marker into the input buffer.
-    fn on_image_pasted(&mut self, media_type: String, base64_data: String, _size_kb: usize) {
-        self.input.insert_image(media_type, base64_data);
-        self.render_dirty = true;
     }
 
     /// Take image blocks extracted from input markers on the last submit.
@@ -342,12 +350,12 @@ impl App {
         self.input.insert_str(&text);
         // Also check clipboard for image data (terminal paste may carry both
         // text and image representations — e.g. wl-paste or xclip).
-        let tx = self.event_tx.clone();
+        let tx = self.gateway_event_tx.clone();
         tokio::spawn(async move {
-            if let Some(img) = crate::ui::clipboard::read_clipboard_image().await {
+            if let Some(img) = crate::ui::input::clipboard::read_clipboard_image().await {
                 let size_kb = img.size_bytes / 1024;
                 let (media_type, base64_data) = img.into_tuple();
-                let _ = tx.send(crate::engine::tui_events::UiEvent::ImagePasted {
+                let _ = tx.send(crate::engine::tui_events::EngineEvent::ImagePasted {
                     media_type,
                     base64_data,
                     size_kb,
@@ -362,11 +370,7 @@ impl App {
     const SIDE_PANEL_MAX: u16 = 80;
 
     /// Process a mouse event for side panel drag resizing.
-    pub fn handle_mouse(
-        &mut self,
-        mouse: crossterm::event::MouseEvent,
-        terminal_width: u16,
-    ) {
+    pub fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent, terminal_width: u16) {
         use crossterm::event::MouseEventKind;
 
         match mouse.kind {
@@ -374,7 +378,8 @@ impl App {
                 if self.side_panel_dragging {
                     // Resize: side panel width = total - mouse column position
                     let new_width = terminal_width.saturating_sub(mouse.column);
-                    self.side_panel_width = new_width.clamp(Self::SIDE_PANEL_MIN, Self::SIDE_PANEL_MAX);
+                    self.side_panel_width =
+                        new_width.clamp(Self::SIDE_PANEL_MIN, Self::SIDE_PANEL_MAX);
                     self.render_dirty = true;
                 }
             }
@@ -394,11 +399,14 @@ impl App {
     }
 
     /// Process keyboard events.
+    ///
+    /// Handles global shortcuts (Ctrl+D, Ctrl+C, PageUp/Down, Alt+V) directly,
+    /// then delegates to `InputState::dispatch_key()` for mode-specific input handling.
     pub fn handle_key(&mut self, key: KeyEvent) {
         self.render_dirty = true;
-        // Global shortcuts — Ctrl+D = immediate hard quit, regardless of mode.
-        // Unlike Ctrl+C which first interrupts then quits, Ctrl+D always exits
-        // immediately even while running or waiting for input.
+
+        // ── Global shortcuts (any mode) ────────────────────────
+        // Ctrl+D: immediate hard quit
         if matches!(
             key,
             KeyEvent {
@@ -408,136 +416,83 @@ impl App {
             }
         ) {
             self.should_quit = true;
-            // Also cancel any running LLM task so the engine lock is
-            // released quickly.  Without this, the quit path would have
-            // to wait for the query_tui loop to notice the cancellation
-            // at its next checkpoint, causing a multi-second hang.
             self.cancel_token.cancel();
             return;
         }
 
-        match key {
+        // Ctrl+C: clear input / interrupt / quit (depends on mode + text)
+        if matches!(
+            key,
             KeyEvent {
                 code: KeyCode::Char('c'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
-            } => {
-                // If there's text in the input, clear it first regardless of mode.
-                // Ctrl+C with text should never quit — it clears the input.
-                // Press Ctrl+C again (with empty input) to interrupt or do nothing.
-                if !self.input.text.is_empty() {
-                    self.input.reset();
-                    return;
-                }
-
-                match self.mode {
-                    AppMode::Running | AppMode::WaitingInput => {
-                        // Interrupt the LLM task instead of quitting.
-                        // Works in both Running and WaitingInput modes so
-                        // Ctrl+C can escape permission prompts, ask_user, etc.
-                        self.cancel_token.cancel();
-                        // If we were waiting for a permission/ask_user response,
-                        // drop the response channel so the receiver gets Err.
-                        if self.mode == AppMode::WaitingInput {
-                            self.ask_response_tx.take();
-                            self.ask_question.take();
-                            self.permission_queue.clear();
-                        }
-                    }
-                    _ => {
-                        // Idle mode with empty input: exit the app.
-                        self.should_quit = true;
-                    }
-                }
-                return;
             }
-            KeyEvent {
-                code: KeyCode::PageUp,
-                ..
-            } => {
-                self.output.scroll_up(10);
-                return;
-            }
-            KeyEvent {
-                code: KeyCode::PageDown,
-                ..
-            } => {
-                self.output.scroll_down(10);
-                return;
-            }
-            // Alt+V: paste image from clipboard (if already has markers, remove the last one)
-            KeyEvent {
-                code: KeyCode::Char('v'),
-                modifiers: KeyModifiers::ALT,
-                ..
-            } => {
-                if self.mode == AppMode::Idle {
-                    if self.input.image_count() > 0 {
-                        // Remove the last image marker (undo)
-                        self.input.remove_last_image();
-                        self.render_dirty = true;
-                    } else {
-                        self.trigger_image_paste();
-                    }
-                }
-                return;
-            }
-            _ => {}
-        }
-
-        if self.mode == AppMode::Running {
-            // Allow the user to type while the agent is running.
-            // On Enter, the text is "steered" into the engine's pending
-            // input slot so the model sees it on the next turn.
-            let consumed = self.input.handle_key(key);
-
-            // Scroll fallback (same as idle mode)
-            if !consumed {
-                match key {
-                    KeyEvent {
-                        code: KeyCode::Up,
-                        modifiers: KeyModifiers::NONE,
-                        ..
-                    } => {
-                        self.output.scroll_up(3);
-                    }
-                    KeyEvent {
-                        code: KeyCode::Down,
-                        modifiers: KeyModifiers::NONE,
-                        ..
-                    } => {
-                        self.output.scroll_down(3);
-                    }
-                    _ => {}
-                }
-            }
-
-            if self.input.submitted {
-                let text = self.input.text.trim().to_string();
+        ) {
+            if !self.input.text.is_empty() {
                 self.input.reset();
-
-                if !text.is_empty() {
-                    // Inject into the engine's steer slot
-                    if let Some(ref slot) = self.steer_slot {
-                        steer_into_slot(slot, &text);
+                return;
+            }
+            match self.mode {
+                AppMode::Running | AppMode::WaitingInput => {
+                    self.cancel_token.cancel();
+                    if self.mode == AppMode::WaitingInput {
+                        self.permission_overlay.clear();
                     }
-                    self.steer_queue.push(text.clone());
-                    self.status.steer_count = self.steer_queue.len();
-                    self.output.push(OutputSegment::Status(format!(
-                        "\u{f054} Steered: {} (will be injected on next turn)",
-                        truncate_preview(&text, 60)
-                    )));
+                }
+                _ => {
+                    self.should_quit = true;
                 }
             }
             return;
         }
 
-        let consumed = self.input.handle_key(key);
+        // PageUp/PageDown: scroll output
+        if matches!(
+            key,
+            KeyEvent {
+                code: KeyCode::PageUp,
+                ..
+            }
+        ) {
+            self.output.scroll_up(10);
+            return;
+        }
+        if matches!(
+            key,
+            KeyEvent {
+                code: KeyCode::PageDown,
+                ..
+            }
+        ) {
+            self.output.scroll_down(10);
+            return;
+        }
 
-        // If input didn't consume Up/Down, scroll output instead.
-        // This handles keyboard Up/Down when input has no history entry
-        // to navigate to (e.g., empty history, or at the boundary).
-        if !consumed {
+        // Alt+V: paste/remove image
+        if matches!(
+            key,
+            KeyEvent {
+                code: KeyCode::Char('v'),
+                modifiers: KeyModifiers::ALT,
+                ..
+            }
+        ) {
+            if self.mode == AppMode::Idle {
+                if self.input.image_count() > 0 {
+                    self.input.remove_last_image();
+                } else {
+                    self.trigger_image_paste();
+                }
+            }
+            return;
+        }
+
+        // ── Mode-specific input via InputPanel ─────────────────
+        let action = self.input.dispatch_key(key, self.mode);
+
+        // Scroll fallback: if input didn't consume Up/Down, scroll output
+        if matches!(action, input::InputAction::Consumed) {
             match key {
                 KeyEvent {
                     code: KeyCode::Up,
@@ -557,352 +512,191 @@ impl App {
             }
         }
 
-        if self.input.submitted {
-            // If we were waiting for an ask_user or permission response, send it back
-            if self.mode == AppMode::WaitingInput {
-                let text = self.input.text.trim().to_string();
-                // Don't save ask_user / permission responses to input history
-                self.input.reset_without_history();
-
-                // Let the query engine handle the "allow all" status message
-                // (it sends UiEvent::Status back to us), so avoid duplication here.
-                let lower = text.trim().to_lowercase();
-                if matches!(lower.as_str(), "a" | "all" | "always") {
-                    self.permission_allow_all = true;
+        // ── Route InputAction ──────────────────────────────────
+        match action {
+            input::InputAction::Consumed | input::InputAction::HardQuit => {
+                if matches!(action, input::InputAction::HardQuit) {
+                    self.should_quit = true;
+                    self.cancel_token.cancel();
                 }
-
-                // Show the user's response in the output area.
-                // Use AskResponse if we have a pending ask question (ask_user tool),
-                // otherwise UserInput for permission responses.
-                if self.ask_question.is_some() {
+            }
+            input::InputAction::SubmitQuery { text, images } => {
+                self.output.push(OutputSegment::UserInput(text.clone()));
+                self.pending_image_blocks = images;
+                self.pending_query = Some(text);
+                self.mode = AppMode::Running;
+            }
+            input::InputAction::Steer(text) => {
+                if let Some(ref slot) = self.steer_slot {
+                    steer_into_slot(slot, &text);
+                }
+                self.steer_queue.push(text.clone());
+                self.status.steer_count = self.steer_queue.len();
+                self.output.push(OutputSegment::Status(format!(
+                    "\u{f054} Steered: {} (will be injected on next turn)",
+                    truncate(&text, 60)
+                )));
+            }
+            input::InputAction::Respond { text } => {
+                // Show response in output
+                let is_ask = self.permission_overlay.is_ask_user_active();
+                if is_ask {
                     self.output.push(OutputSegment::AskResponse(text.clone()));
                 } else {
                     self.output.push(OutputSegment::UserInput(text.clone()));
                 }
 
-                if let Some(tx) = self.ask_response_tx.take() {
-                    let _ = tx.send(text);
+                // Notify Gateway for permission_allow_all
+                let lower = text.trim().to_lowercase();
+                if matches!(lower.as_str(), "a" | "all" | "always") {
+                    let _ = self
+                        .gateway_event_tx
+                        .send(crate::engine::tui_events::EngineEvent::PermissionAllowAllSet);
                 }
-                self.ask_question = None;
 
-                // Drain queued permission requests: auto-approve if allow_all
-                // is set, otherwise show the next one to the user.
-                if !self.drain_permission_queue() {
-                    self.mode = AppMode::Running;
+                // Delegate to overlay
+                let queue_action = self.permission_overlay.respond(&text);
+                match queue_action {
+                    permission_overlay::QueueAction::AskUserActive
+                    | permission_overlay::QueueAction::ShownNext => {}
+                    _ => {
+                        self.mode = AppMode::Running;
+                    }
                 }
-                return;
             }
-
-            // Regular user input — save to history
-            // Extract image markers before saving to history
-            let (image_blocks, text_without_markers) = self.input.extract_images();
-            let text = text_without_markers.trim().to_string();
-
-            // Empty with no images → ignore
-            if text.is_empty() && image_blocks.is_empty() {
-                self.input.reset();
-                return;
+            input::InputAction::Cancel => {
+                self.cancel_token.cancel();
+                if self.mode == AppMode::WaitingInput {
+                    self.permission_overlay.clear();
+                }
             }
-
-            self.pending_image_blocks = image_blocks;
-            // Save text without markers to input history (reset does this)
-            self.input.reset();
-
-            if text == "/exit" || text == "/quit" {
-                self.should_quit = true;
-                return;
-            }
-
-            // /clear is handled by cli::commands (needs engine lock to clear history).
-            // Only clear the TUI output here, the engine history is cleared in the command handler.
-
-            self.output.push(OutputSegment::UserInput(text.clone()));
-            self.pending_query = Some(text);
-            self.mode = AppMode::Running;
         }
     }
 
-    /// Process engine events (called every tick).
-    pub fn process_events(&mut self) {
-        while let Ok(event) = self.event_rx.try_recv() {
-            self.render_dirty = true;
-            use crate::engine::tui_events::UiEvent;
-            match event {
-                UiEvent::ClearOutput => {
-                    self.output.clear();
-                }
-                UiEvent::TextDelta(delta) => {
-                    let mut pushed = false;
-                    if let Some(OutputSegment::Text(existing)) = self.output.segments.last_mut() {
-                        existing.push_str(&delta);
-                        pushed = true;
-                    }
+    /// Process a single UiCommand — dispatch to the appropriate component.
+    ///
+    /// This is the core of the component-based architecture:
+    /// Gateway → Transport → App.update() → child components.
+    pub fn update(&mut self, cmd: UiCommand) {
+        self.render_dirty = true;
+        match cmd {
+            // ── OutputPanel — delegate to Component ──────────────
+            UiCommand::AppendText(_)
+            | UiCommand::AppendReasoning(_)
+            | UiCommand::ClearOutput
+            | UiCommand::ToolStart { .. }
+            | UiCommand::ToolComplete { .. }
+            | UiCommand::ToolError { .. }
+            | UiCommand::ToolDiff { .. }
+            | UiCommand::ScrollBy(_)
+            | UiCommand::ScrollToBottom
+            | UiCommand::ShowStatus(_)
+            | UiCommand::SubAgentStarted { .. }
+            | UiCommand::SubAgentThought(_)
+            | UiCommand::SubAgentToolStart { .. }
+            | UiCommand::SubAgentToolEnd { .. }
+            | UiCommand::SubAgentStatus { .. }
+            | UiCommand::SubAgentCompleted { .. } => {
+                self.output.update(cmd);
+            }
 
-                    if !pushed {
-                        self.output.push(OutputSegment::Text(delta));
-                    } else {
-                        self.output.mark_dirty();
-                    }
-                }
-                UiEvent::ReasoningDelta(delta) => {
-                    let mut pushed = false;
-                    if let Some(OutputSegment::Reasoning(existing)) =
-                        self.output.segments.last_mut()
-                    {
-                        existing.push_str(&delta);
-                        pushed = true;
-                    }
+            // ── ShowError → output + mode reset ──────────────────
+            UiCommand::ShowError(err) => {
+                self.output.update(UiCommand::ShowError(err));
+                self.mode = AppMode::Idle;
+            }
 
-                    if !pushed {
-                        self.output.push(OutputSegment::Reasoning(delta));
-                    } else {
-                        self.output.mark_dirty();
-                    }
-                }
-                UiEvent::ToolStart {
-                    name,
-                    input_summary,
-                } => {
-                    let display = if input_summary.is_empty() {
-                        name
-                    } else {
-                        input_summary
-                    };
-                    self.output.push(OutputSegment::ToolExecuting(display));
-                }
-                UiEvent::ToolOutput { name: _, output } => {
-                    // Replace the last ToolExecuting with ToolComplete,
-                    // preserving the operation description.
-                    if let Some(last) = self
-                        .output
-                        .segments
-                        .iter_mut()
-                        .rev()
-                        .find(|s| matches!(s, OutputSegment::ToolExecuting(_)))
-                    {
-                        let summary =
-                            match std::mem::replace(last, OutputSegment::Status(String::new())) {
-                                OutputSegment::ToolExecuting(op) => format!("{} → {}", op, output),
-                                _ => output.clone(),
-                            };
-                        *last = OutputSegment::ToolComplete(summary);
-                        self.output.mark_dirty();
-                    }
-                }
-                UiEvent::ToolError { name: _, error } => {
-                    // Replace the last ToolExecuting with error,
-                    // preserving the operation description.
-                    if let Some(last) = self
-                        .output
-                        .segments
-                        .iter_mut()
-                        .rev()
-                        .find(|s| matches!(s, OutputSegment::ToolExecuting(_)))
-                    {
-                        let summary =
-                            match std::mem::replace(last, OutputSegment::Status(String::new())) {
-                                OutputSegment::ToolExecuting(op) => format!("{} → {}", op, error),
-                                _ => error.clone(),
-                            };
-                        *last = OutputSegment::ToolError(summary);
-                        self.output.mark_dirty();
-                    } else {
-                        self.output.push(OutputSegment::ToolError(error));
-                    }
-                }
-                UiEvent::ToolDiff { name: _, diff } => {
-                    self.output.push(OutputSegment::Diff(diff));
-                }
-                UiEvent::AskUser {
-                    question,
-                    response_tx,
-                } => {
-                    self.output
-                        .push(OutputSegment::AskQuestion(question.clone()));
-                    // Extract the oneshot sender from the Arc<Mutex>
-                    let tx = {
-                        let mut guard = response_tx.lock().unwrap();
-                        guard.take()
-                    };
-                    self.ask_response_tx = tx;
-                    self.ask_question = Some(question);
-                    self.mode = AppMode::WaitingInput;
-                }
-                UiEvent::PermissionAsk {
+            // ── StatusBar — delegate to Component trait ──────────────
+            UiCommand::SetMode(mode) => {
+                self.mode = mode;
+                self.status.update(UiCommand::SetMode(mode));
+            }
+            UiCommand::UpdateStatus(info) => {
+                self.status.update(UiCommand::UpdateStatus(info));
+            }
+            UiCommand::UpdateTokens(tokens) => {
+                self.status.update(UiCommand::UpdateTokens(tokens));
+            }
+            UiCommand::UpdateTurnCount(turns) => {
+                self.status.update(UiCommand::UpdateTurnCount(turns));
+            }
+            UiCommand::SetModel(model) => {
+                self.status.update(UiCommand::SetModel(model));
+            }
+
+            // ── PermissionOverlay — delegate to overlay ──────────
+            UiCommand::ShowPermission {
+                tool_name,
+                reason,
+                detail,
+                response_tx,
+            } => {
+                // Display in output
+                self.output.push(OutputSegment::PermissionPrompt {
+                    tool_name: tool_name.clone(),
+                    reason: reason.clone(),
+                    detail: detail.clone(),
+                });
+                // Delegate queue management to overlay (takes ownership of response_tx)
+                self.permission_overlay.update(UiCommand::ShowPermission {
                     tool_name,
                     reason,
-                    input,
+                    detail,
                     response_tx,
-                } => {
-                    let tx = {
-                        let mut guard = response_tx.lock().unwrap();
-                        guard.take()
-                    };
-                    if let Some(tx) = tx {
-                        // If "allow all" was already granted, auto-approve without prompting
-                        if self.permission_allow_all {
-                            let _ = tx.send("y".into());
-                            continue;
-                        }
-                        // If we're already waiting for a permission response,
-                        // queue this request instead of overwriting.
-                        if self.mode == AppMode::WaitingInput {
-                            self.permission_queue.push(PendingPermission {
-                                tool_name,
-                                reason,
-                                input,
-                                response_tx: tx,
-                            });
-                        } else {
-                            // Display permission prompt in TUI
-                            self.output.push(OutputSegment::PermissionPrompt {
-                                tool_name: tool_name.clone(),
-                                reason: reason.clone(),
-                                detail: input.clone(),
-                            });
-                            self.ask_response_tx = Some(tx);
-                            self.ask_question =
-                                Some(format!("[permission] {} — allow?", tool_name));
-                            self.mode = AppMode::WaitingInput;
-                        }
-                    }
-                }
-                UiEvent::QueryDone {
-                    text,
-                    tool_calls: _,
-                    tokens,
-                } => {
-                    if !text.is_empty() {
-                        self.output.push(OutputSegment::Text(text));
-                    }
-                    self.status.total_tokens = tokens;
-                    // QueryDone is now only sent when the query loop fully exits,
-                    // so we always switch back to Idle regardless of tool_calls count.
-                    self.mode = AppMode::Idle;
-                    self.steer_queue.clear();
-                    self.status.steer_count = 0;
-                }
-                UiEvent::Status(msg) => {
-                    self.output.push(OutputSegment::Status(msg));
-                }
-                UiEvent::Error(err) => {
-                    self.output.push(OutputSegment::Error(err));
-                    self.mode = AppMode::Idle;
-                }
-                UiEvent::ImagePasted {
-                    media_type,
-                    base64_data,
-                    size_kb,
-                } => {
-                    self.on_image_pasted(media_type, base64_data, size_kb);
-                }
-                UiEvent::ImagePasteFailed => {
-                    self.output.push(OutputSegment::Error(
-                        "No image in clipboard, or clipboard tool not available.\n\
-                         Usage: Alt+V — paste image from clipboard (requires wl-paste/xclip/osascript)"
-                            .into(),
-                    ));
-                }
-                UiEvent::Interrupted => {
-                    self.output.push(OutputSegment::Status(
-                        "⏸  Interrupted — press Ctrl+C again to quit.".into(),
-                    ));
-                    self.mode = AppMode::Idle;
-                    self.steer_queue.clear();
-                    self.status.steer_count = 0;
-                }
-                UiEvent::TokenUpdate {
-                    total_tokens,
-                    turn_count,
-                } => {
-                    self.status.total_tokens = total_tokens;
-                    self.status.turn_count = turn_count;
-                }
-                UiEvent::CompactProgress {
-                    method,
-                    tokens_before,
-                    tokens_after,
-                } => {
-                    self.output.push(OutputSegment::Status(format!(
-                        "󰏖 compact: {} ({}  {} tokens)",
-                        method, tokens_before, tokens_after
-                    )));
+                });
+                self.mode = AppMode::WaitingInput;
+            }
+            UiCommand::ShowAskUser {
+                question,
+                response_tx,
+            } => {
+                // Display in output
+                self.output
+                    .push(OutputSegment::AskQuestion(question.clone()));
+                // Delegate queue management to overlay
+                self.permission_overlay.update(UiCommand::ShowAskUser {
+                    question,
+                    response_tx,
+                });
+                self.mode = AppMode::WaitingInput;
+            }
+            UiCommand::HideOverlay => {
+                self.permission_overlay.update(UiCommand::HideOverlay);
+                if self.mode == AppMode::WaitingInput {
+                    self.mode = AppMode::Running;
                 }
             }
-        }
 
-        // Process sub-agent events
-        self.process_sub_agent_events();
+            // ── Steer ────────────────────────────────────────────
+            UiCommand::ClearSteerQueue => {
+                self.steer_queue.clear();
+                self.status.steer_count = 0;
+            }
+
+            // ── Input — delegate to Component trait ─────────────────
+            UiCommand::PasteImage { .. }
+            | UiCommand::SetInputText(_)
+            | UiCommand::SetInputPlaceholder(_)
+            | UiCommand::FocusInput
+            | UiCommand::BlurInput => {
+                self.input.update(cmd);
+            }
+        }
     }
 
-    /// Process sub-agent progress events from delegate_task.
-    fn process_sub_agent_events(&mut self) {
-        while let Ok(event) = self.sub_agent_rx.try_recv() {
-            self.render_dirty = true;
-            match event {
-                SubAgentEvent::Started { goal, tools, .. } => {
-                    let tools_str = if tools.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" [tools: {}]", tools.join(", "))
-                    };
-                    let short_goal = truncate_preview(&goal, 60);
-                    self.output.push(OutputSegment::Status(format!(
-                        " sub-agent started: {}{}",
-                        short_goal, tools_str
-                    )));
-                }
-                SubAgentEvent::Thinking { text, .. } => {
-                    let short = truncate_preview(&text, 80);
-                    if !short.trim().is_empty() {
-                        self.output
-                            .push(OutputSegment::Status(format!(" sub-agent: {}", short)));
-                    }
-                }
-                SubAgentEvent::ToolStarted {
-                    tool,
-                    input_summary,
-                    ..
-                } => {
-                    let display = if input_summary.is_empty() {
-                        tool
-                    } else {
-                        format!("{} ({})", tool, input_summary)
-                    };
-                    self.output.push(OutputSegment::ToolExecuting(format!(
-                        "sub-agent: {}",
-                        display
-                    )));
-                }
-                SubAgentEvent::ToolCompleted {
-                    tool,
-                    result_bytes,
-                    is_error,
-                    ..
-                } => {
-                    let status = if is_error { "" } else { "" };
-                    self.output.push(OutputSegment::ToolComplete(format!(
-                        "{} {} ({} bytes)",
-                        status, tool, result_bytes
-                    )));
-                }
-                SubAgentEvent::Status { message, .. } => {
-                    self.output
-                        .push(OutputSegment::Status(format!("sub-agent: {}", message)));
-                }
-                SubAgentEvent::Completed { result, .. } => {
-                    let status = if result.interrupted {
-                        "interrupted"
-                    } else if result.error.is_some() {
-                        "failed"
-                    } else {
-                        "completed"
-                    };
-                    let summary_len = result.summary.len();
-                    self.output.push(OutputSegment::Status(format!(
-                        " sub-agent {} ({} calls, {:.1}s, {} chars)",
-                        status, result.api_calls, result.duration_seconds, summary_len
-                    )));
+    /// Drain UiCommands from the Gateway channel (non-blocking).
+    ///
+    /// Uses try_recv to consume up to MAX_BATCH commands per render cycle.
+    /// This replaces the old process_events() method for the new architecture.
+    pub fn drain_commands(&mut self) {
+        const MAX_BATCH: usize = 256;
+        for _ in 0..MAX_BATCH {
+            match self.cmd_rx.try_recv() {
+                Ok(cmd) => self.update(cmd),
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    self.should_quit = true;
+                    break;
                 }
             }
         }
@@ -923,28 +717,26 @@ impl App {
             .min(full.height.saturating_sub(2));
         let input_height = desired_input_height.max(Self::MIN_INPUT_HEIGHT);
 
-        // Vertical layout: output area | input area | status bar
+        // Vertical layout per design spec: TitleBar | OutputPanel | InputPanel | StatusBar
         let vert_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(1),
                 Constraint::Min(1),
                 Constraint::Length(input_height),
                 Constraint::Length(1),
             ])
             .split(full);
 
-        let vert_output_area = vert_chunks[0];
-        let input_area = vert_chunks[1];
-        let status_area = vert_chunks[2];
+        let title_area = vert_chunks[0];
+        let vert_output_area = vert_chunks[1];
+        let input_area = vert_chunks[2];
+        let status_area = vert_chunks[3];
 
-        // Decide layout: if todo_state is present, split output area horizontally
-        // with the side panel on the right. Input and status bar span full width.
+        // Decide layout: if side panel has active todos and there's room,
+        // split output area horizontally.
         let side_panel_width = self.side_panel_width;
-        let has_side_panel = self
-            .todo_state
-            .as_ref()
-            .is_some_and(|s| Self::has_active_todo(s))
-            && full.width > side_panel_width + 20;
+        let has_side_panel = self.side_panel.is_visible() && full.width > side_panel_width + 20;
 
         let (output_area, side_area) = if has_side_panel {
             let areas = Layout::default()
@@ -959,52 +751,30 @@ impl App {
             (vert_output_area, Rect::default())
         };
 
-        // Title bar
-        let title = format!(
-            " zeno {} (Ctrl+D to quit, Ctrl+C to interrupt) ",
-            env!("CARGO_PKG_VERSION")
-        );
-        let title_area = Rect {
-            y: output_area.y,
-            height: 1,
-            ..output_area
-        };
-        frame.render_widget(
-            ratatui::widgets::Paragraph::new(title).style(
-                ratatui::style::Style::new()
-                    .fg(theme::TEXT_BRIGHT)
-                    .bg(theme::ACCENT_DIM),
-            ),
-            title_area,
-        );
+        // Title bar (independent constraint, not carved from output area)
+        safe_view(&mut self.title_bar, title_area, frame);
 
-        // Output area (skip title row)
-        let output_render_area = Rect {
-            y: output_area.y + 1,
-            height: output_area.height.saturating_sub(1),
-            ..output_area
-        };
-
+        // Output area
         if self.output.segments.is_empty() && self.mode == AppMode::Idle {
             let hint = "Ask a question or type /help for available commands.";
             frame.render_widget(
                 ratatui::widgets::Paragraph::new(hint)
                     .style(ratatui::style::Style::new().fg(theme::TEXT_DIM)),
-                output_render_area,
+                output_area,
             );
         } else {
-            super::output::render(frame, output_render_area, &mut self.output);
+            safe_view(&mut self.output, output_area, frame);
         }
 
         // Input area
-        input::render(frame, input_area, &self.input, &self.mode);
+        safe_view(&mut self.input, input_area, frame);
 
         // Status bar
-        status_bar::render(frame, status_area, &self.status);
+        safe_view(&mut self.status, status_area, frame);
 
         // Side panel (todo list)
-        if let Some(ref state_arc) = self.todo_state {
-            Self::render_side_panel(frame, side_area, state_arc);
+        if has_side_panel {
+            safe_view(&mut self.side_panel, side_area, frame);
         }
 
         // Cursor
@@ -1034,157 +804,6 @@ impl App {
 
             frame.set_cursor_position((cursor_x, cursor_y));
         }
-    }
-
-    /// Returns true if the todo side panel should be visible.
-    /// The panel is hidden when there are no todo_state, or when
-    /// the task list is empty or all tasks are completed.
-    fn has_active_todo(state: &std::sync::Arc<tokio::sync::Mutex<TodoState>>) -> bool {
-        match state.try_lock() {
-            Ok(s) => {
-                if s.tasks.is_empty() {
-                    return false;
-                }
-                let all_completed = s.tasks.iter().all(|t| t.status == "completed");
-                !all_completed
-            }
-            Err(_) => {
-                // Contended lock means something is happening — show the panel
-                true
-            }
-        }
-    }
-
-    /// Render the right side panel showing the todo list.
-    fn render_side_panel(
-        frame: &mut Frame,
-        area: Rect,
-        state_arc: &std::sync::Arc<tokio::sync::Mutex<TodoState>>,
-    ) {
-        // Try to lock; if contended, show a brief message
-        let state = match state_arc.try_lock() {
-            Ok(s) => s,
-            Err(_) => {
-                let block = Block::default()
-                    .title(" Tasks ")
-                    .borders(Borders::LEFT)
-                    .border_style(Style::new().fg(theme::BORDER));
-                frame.render_widget(
-                    Paragraph::new(Span::styled(
-                        " loading...",
-                        Style::new().fg(theme::TEXT_DIM),
-                    ))
-                    .block(block),
-                    area,
-                );
-                return;
-            }
-        };
-
-        let total = state.tasks.len();
-        let completed = state
-            .tasks
-            .iter()
-            .filter(|t| t.status == "completed")
-            .count();
-
-        // Create block early so we can measure the actual content width (accounting for Borders::LEFT)
-        let block = Block::default()
-            .borders(Borders::LEFT)
-            .border_style(Style::new().fg(theme::BORDER));
-        let inner_width = block.inner(area).width as usize;
-
-        let mut lines: Vec<Line<'static>> = Vec::new();
-
-        // Title line
-        lines.push(Line::from(vec![
-            Span::styled(" ", Style::new().fg(theme::ACCENT)),
-            Span::styled(
-                "Tasks",
-                Style::new()
-                    .fg(theme::TEXT_BRIGHT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
-        lines.push(Line::from(""));
-
-        // Plan name
-        if !state.plan.is_empty() {
-            let plan_width = inner_width.saturating_sub(4);
-            for wrapped_line in word_wrap(&state.plan, plan_width) {
-                lines.push(Line::from(Span::styled(
-                    wrapped_line,
-                    Style::new().fg(theme::ACCENT),
-                )));
-            }
-            lines.push(Line::from(""));
-        }
-
-        // Text-based progress bar
-        if total > 0 {
-            let fraction = format!("{}/{}", completed, total);
-            // fixed overhead: ' ', '[', ']', ' ' = 4 chars
-            let bar_width = inner_width.saturating_sub(4 + fraction.len());
-            let filled = if bar_width > 0 && total > 0 {
-                (completed * bar_width) / total
-            } else {
-                0
-            };
-            let empty = bar_width.saturating_sub(filled);
-            let bar = format!(
-                " [{}{}] {}",
-                "█".repeat(filled),
-                "░".repeat(empty),
-                fraction
-            );
-            lines.push(Line::from(vec![Span::styled(
-                bar,
-                Style::new().fg(theme::SUCCESS).bg(theme::SURFACE),
-            )]));
-            lines.push(Line::from(""));
-        }
-
-        // Task items
-        let desc_width = inner_width.saturating_sub(8); // checkbox icon + spaces
-        for task in &state.tasks {
-            let (checkbox, color) = match task.status.as_str() {
-                "completed" => ("", theme::TEXT_DIM),
-                "in_progress" => ("", theme::ACCENT),
-                _ => ("", theme::TEXT),
-            };
-            let wrapped = word_wrap(&task.description, desc_width);
-            for (i, line) in wrapped.iter().enumerate() {
-                if i == 0 {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            format!(" {} ", checkbox),
-                            Style::new().fg(color).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(line.clone(), Style::new().fg(color)),
-                    ]));
-                } else {
-                    // Continuation line — indent to align with description
-                    lines.push(Line::from(vec![
-                        Span::styled("   ", Style::new().fg(color)),
-                        Span::styled(line.clone(), Style::new().fg(color)),
-                    ]));
-                }
-            }
-        }
-        if total == 0 {
-            lines.push(Line::from(Span::styled(
-                " (no tasks)",
-                Style::new().fg(theme::TEXT_DIM),
-            )));
-        }
-
-        // Render with left border
-        frame.render_widget(
-            Paragraph::new(Text::from(lines))
-                .block(block)
-                .style(Style::new().bg(theme::BG)),
-            area,
-        );
     }
 
     pub fn take_pending_query(&mut self) -> Option<String> {
@@ -1220,43 +839,6 @@ impl App {
     /// Get the background cancellation token for long-running tasks.
     pub fn background_cancel_token(&self) -> CancellationToken {
         self.background_cancel_token.clone()
-    }
-
-    /// Drain the permission queue. When `permission_allow_all` is set,
-    /// auto-approve all queued requests. Otherwise, show the next one
-    /// and stay in WaitingInput mode.
-    /// Returns `true` if it's still waiting for user input (a queued
-    /// request was promoted to active), `false` if nothing is pending.
-    fn drain_permission_queue(&mut self) -> bool {
-        // Auto-approve all queued requests if "allow all" was granted
-        while self.permission_allow_all {
-            if let Some(next) = self.permission_queue.first() {
-                if !next.input.is_empty() {
-                    // Show what was auto-approved
-                    self.output.push(OutputSegment::Status(format!(
-                        "󰌾 [{}] {} (auto-approved)",
-                        next.tool_name, next.reason
-                    )));
-                }
-                let queued = self.permission_queue.remove(0);
-                let _ = queued.response_tx.send("y".into());
-            } else {
-                return false;
-            }
-        }
-        // Not allow-all: promote the next queued request to active
-        if !self.permission_queue.is_empty() {
-            let next = self.permission_queue.remove(0); // FIFO
-            self.output.push(OutputSegment::PermissionPrompt {
-                tool_name: next.tool_name.clone(),
-                reason: next.reason.clone(),
-                detail: next.input.clone(),
-            });
-            self.ask_response_tx = Some(next.response_tx);
-            self.ask_question = Some(format!("[permission] {} — allow?", next.tool_name));
-            return true;
-        }
-        false
     }
 }
 

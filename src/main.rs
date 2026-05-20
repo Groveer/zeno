@@ -2,6 +2,7 @@ mod api;
 mod auxiliary;
 mod config;
 mod engine;
+mod gateway;
 mod hooks;
 mod mcp;
 mod memory;
@@ -20,6 +21,7 @@ use config::settings;
 use config::settings::ProviderConfig;
 use engine::messages::ConversationHistory;
 use engine::query_engine::QueryEngine;
+use gateway::transport::ChannelTransport;
 use memory::provider::MemoryProvider;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -29,219 +31,62 @@ use std::time::SystemTime;
 use tools::base::ToolRegistry;
 use ui::status_bar::AppMode;
 
+use ui::component::Component;
+
 /// Regex for matching image file paths in query text.
 /// Matches paths ending in common image extensions (png, jpg, jpeg, gif, webp, bmp).
 static IMAGE_PATH_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)(?:^|\s)([\w.\-/\\]+\.(?:png|jpe?g|gif|webp|bmp))(?:\s|$)").unwrap()
 });
 
-// ---------------------------------------------------------------------------
-// Slash command dispatch
-// ---------------------------------------------------------------------------
+/// Auto-detect image file paths in query text, read the files, and
+/// convert them to base64 image blocks. Returns (cleaned_text, image_blocks).
+fn extract_image_paths(query_text: &str) -> (String, Vec<(String, String)>) {
+    let re = &*IMAGE_PATH_REGEX;
+    let mut text = query_text.to_string();
+    let mut image_blocks = Vec::new();
+    let mut found_any = false;
 
-/// What the TUI main loop should do after evaluating a slash command.
-enum CommandAction {
-    /// The command was handled synchronously; events already sent.
-    Done,
-    /// /compact — needs async engine task.
-    Compact,
-    /// /cost, /clear, /goal — need engine lock.
-    NeedEngine(&'static str, String), // (command_name, arg)
-    /// Not a slash command — send to LLM.
-    Query,
-}
-
-/// Try to handle a slash command. Returns what action the caller should take.
-fn dispatch_command(input: &str) -> CommandAction {
-    if !input.starts_with('/') {
-        return CommandAction::Query;
+    for cap in re.captures_iter(query_text) {
+        let path_str = cap.get(1).unwrap().as_str();
+        let path = std::path::Path::new(path_str);
+        if path.exists() {
+            match std::fs::read(path) {
+                Ok(bytes) => {
+                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("png");
+                    let media_type = match ext.to_lowercase().as_str() {
+                        "png" => "image/png",
+                        "jpg" | "jpeg" => "image/jpeg",
+                        "gif" => "image/gif",
+                        "webp" => "image/webp",
+                        "bmp" => "image/bmp",
+                        _ => "image/png",
+                    };
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                    let size_kb = bytes.len() / 1024;
+                    if size_kb <= 10240 {
+                        image_blocks.push((media_type.to_string(), b64));
+                        found_any = true;
+                        text = text.replace(path_str, "");
+                    }
+                }
+                Err(_) => {}
+            }
+        }
     }
 
-    match input {
-        "/help" => CommandAction::Done, // handled inline in caller
-        "/cost" => CommandAction::NeedEngine("cost", String::new()),
-        "/clear" => CommandAction::NeedEngine("clear", String::new()),
-        "/compact" => CommandAction::Compact,
-        "/restore" => CommandAction::NeedEngine("resume", String::new()),
-        s if s.starts_with("/restore") => {
-            let arg = s.strip_prefix("/restore").unwrap_or("").trim().to_string();
-            CommandAction::NeedEngine("resume", arg)
-        }
-        s if s.starts_with("/model") => {
-            let arg = s.strip_prefix("/model").unwrap_or("").trim().to_string();
-            CommandAction::NeedEngine("model", arg)
-        }
-        "/tools" => CommandAction::Done,
-        "/memory" => CommandAction::Done,
-        "/mcp" => CommandAction::Done,
-        "/skills" => CommandAction::Done,
-        "/hooks" => CommandAction::NeedEngine("hooks", String::new()),
-        "/search" => CommandAction::NeedEngine("search", String::new()),
-        s if s.starts_with("/search") => {
-            let arg = s.strip_prefix("/search").unwrap_or("").trim().to_string();
-            CommandAction::NeedEngine("search", arg)
-        }
-        s if s.starts_with("/goal") => {
-            let arg = s.strip_prefix("/goal").unwrap_or("").trim().to_string();
-            CommandAction::NeedEngine("goal", arg)
-        }
-        s if s.starts_with("/identity") => {
-            let arg = s.strip_prefix("/identity").unwrap_or("").trim().to_string();
-            CommandAction::NeedEngine("identity", arg)
-        }
-        // Unknown slash command  send to LLM
-        _ => CommandAction::Query,
-    }
-}
-
-/// Help text (constant to avoid re-allocation every call).
-/// Rendered through the markdown pipeline: `##` headings, `**bold**`,
-/// `` `code` ``, and `-` list items all get styled automatically.
-const HELP_TEXT: &str = "\
-## Available Commands
-
-**Session**
-- `/help` — Show this help
-- `/exit` `/quit` — Exit
-- `/clear` — Clear history
-- `/compact` — Compress history
-- `/cost` — Token usage
-- `/model` — Current model
-
-**Inspect**
-- `/tools` — List builtin tools
-- `/mcp` — List MCP servers and tools
-- `/skills` — List loaded skills
-- `/memory` — Memory files
-- `/hooks` — List hooks
-
-**History**
-- `/restore` — Restore the last session
-- `/restore N` — Restore session #N
-- `/search` — Search past sessions
-- `/search [query]` — Search by topic
-
-**Goal**
-- `/goal [text]` — Set goal
-- `/goal clear` — Clear goal
-- `/goal pause` — Pause goal
-- `/goal resume` — Resume goal
-
-**Identity**
-- `/identity` — Show current identity
-- `/identity [name]` — Switch to named identity
-- `/identity clear` — Clear identity (use default role)
-- `/identity none` — Same as clear
-
-## Navigation
-
-- `/` — History (input) or scroll (output)
-- `PgUp` `PgDn` — Scroll output
-- `Mouse wheel` — Scroll output
-- `Shift+drag` — Select and copy text
-- `Ctrl+C` — Clear input / Interrupt
-- `Ctrl+D` — Hard quit (immediate)
-";
-
-/// Send a simple text response + QueryDone through the channel.
-fn send_text_response(sender: &engine::tui_events::UiSender, text: &str) {
-    let _ = sender.send(engine::tui_events::UiEvent::TextDelta(text.to_string()));
-    let _ = sender.send(engine::tui_events::UiEvent::QueryDone {
-        text: String::new(),
-        tool_calls: 0,
-        tokens: 0,
-    });
-}
-
-/// Handle /goal command — requires &mut QueryEngine.
-fn handle_goal(eng: &mut QueryEngine, arg: &str) -> String {
-    if arg.is_empty() || arg == "status" {
-        if eng.carryover.has_pending_goal() {
-            format!(" Goal (active): {}", eng.carryover.task_focus.goal)
+    if found_any {
+        let cleaned = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if cleaned.is_empty() {
+            ("[Attached image(s)]".to_string(), image_blocks)
         } else {
-            "No active goal. Use /goal <text> to set one.".to_string()
-        }
-    } else if arg == "clear" || arg == "stop" {
-        let had = eng.carryover.has_pending_goal();
-        eng.carryover.clear_goal();
-        if had {
-            " Goal cleared.".to_string()
-        } else {
-            "No active goal.".to_string()
-        }
-    } else if arg == "pause" {
-        if eng.carryover.has_pending_goal() {
-            let goal_text = eng.carryover.task_focus.goal.clone();
-            eng.carryover.clear_goal();
-            format!("⏸ Goal paused: {}", goal_text)
-        } else {
-            "No active goal to pause.".to_string()
-        }
-    } else if arg == "resume" {
-        let last_goal = eng.carryover.task_focus.recent_goals.last().cloned();
-        if let Some(last) = last_goal {
-            eng.carryover.set_goal(&last);
-            format!("▶ Goal resumed: {}", last)
-        } else {
-            "No recent goal to resume.".to_string()
+            (cleaned, image_blocks)
         }
     } else {
-        eng.carryover.set_goal(arg);
-        format!(" Goal set: {}", arg)
+        (text, image_blocks)
     }
 }
 
-/// Rebuild system prompt and reload memory store after identity change.
-///
-/// This helper extracts the common logic shared between `/identity clear`
-/// and `/identity <name>` commands:
-/// 1. Build memory prompt from memory manager
-/// 2. Rebuild system prompt with optional identity override
-/// 3. Reload memory store from identity-scoped (or global) paths
-async fn rebuild_after_identity_change(
-    eng: &mut QueryEngine,
-    skill_registry: &Arc<tokio::sync::Mutex<skills::registry::SkillRegistry>>,
-    memory_store: &Arc<tokio::sync::Mutex<memory::store::MemoryStore>>,
-    settings: &settings::Settings,
-    identity_config: Option<&settings::IdentityConfig>,
-    identity_name: Option<&str>,
-) {
-    // 1. Build memory prompt
-    let memory_prompt = eng
-        .memory_manager
-        .as_ref()
-        .map(|mm| {
-            let mm_guard = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(mm.lock())
-            });
-            mm_guard.build_system_prompt()
-        })
-        .unwrap_or_default();
-
-    // 2. Rebuild system prompt with optional identity override
-    let skill_reg = skill_registry.lock().await;
-    let new_prompt = crate::prompts::system_prompt::build(
-        &eng.cwd,
-        &eng.tools,
-        &skill_reg,
-        Some(&memory_prompt),
-        &eng.settings.role,
-        identity_config,
-    );
-    drop(skill_reg);
-    eng.system_prompt = new_prompt;
-
-    // 3. Reload memory store from identity-scoped (or global) paths
-    let mem_dir = config::paths::memory_dir_for_identity(identity_name);
-    let mut store = memory_store.lock().await;
-    *store = memory::store::MemoryStore::new(
-        mem_dir.join("MEMORY.md"),
-        mem_dir.join("USER.md"),
-        settings.memory.memory_char_limit,
-        settings.memory.user_char_limit,
-    );
-    store.load_from_disk();
-}
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -372,10 +217,6 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Create sub-agent progress channel (attached to ToolContext for delegate_task)
-    let (_sub_agent_progress_tx, _sub_agent_progress_rx) =
-        tokio::sync::mpsc::unbounded_channel::<crate::engine::sub_agent::SubAgentEvent>();
-
     // Resolve working directory early (needed for memory dir + skills + system prompt)
     let cwd = std::env::current_dir().unwrap_or_default();
 
@@ -463,7 +304,6 @@ async fn main() -> anyhow::Result<()> {
 
     let builtin_tool_names: Vec<String> = registry.names().into_iter().map(String::from).collect();
     tracing::info!(tools = ?builtin_tool_names, "Registered tools");
-    let builtin_tool_count = builtin_tool_names.len();
 
     // Release built-in skills to user config dir if needed.
     // Uses spawn_blocking since it involves synchronous filesystem I/O
@@ -591,22 +431,65 @@ async fn main() -> anyhow::Result<()> {
 
     let engine = Arc::new(Mutex::new(engine));
 
-    let mut app = ui::app::App::new();
+    // Create Gateway command channel (cmd_rx goes to App, cmd_tx to Gateway transport)
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    // Create Gateway — event routing + command dispatch
+    let transport = Box::new(ChannelTransport::new(cmd_tx));
+    let mut gateway = gateway::Gateway::new(
+        engine.clone(),
+        settings.clone(),
+        transport,
+        memory_manager.clone(),
+        skill_registry.clone(),
+        mcp_manager.clone(),
+        todo_state.clone(),
+        provider_name.to_string(),
+        model.to_string(),
+        builtin_tool_names,
+        cwd.clone(),
+    );
+
+    // Register method handlers (forward-looking API for JSON-RPC dispatch).
+    // These enable future StdioTransport integration (external TUI frontends).
+    gateway.register_handler(
+        "session.create",
+        Box::new(gateway::handlers::session::SessionCreateHandler),
+    );
+    gateway.register_handler(
+        "session.list",
+        Box::new(gateway::handlers::session::SessionListHandler),
+    );
+    gateway.register_handler(
+        "config.get",
+        Box::new(gateway::handlers::config::ConfigGetHandler::new(
+            settings.clone(),
+        )),
+    );
+    gateway.register_handler(
+        "prompt.submit",
+        Box::new(gateway::handlers::prompt::PromptSubmitHandler::new(
+            engine.clone(),
+        )),
+    );
+
+    // Create App — pass Gateway's engine event sender for image paste, etc.
+    let mut app = ui::app::App::new(cmd_rx, gateway.engine_event_sender());
     // Populate identity names for /identity argument completion
     app.input.identity_names = settings.identities.keys().cloned().collect();
     // Share the todo state so the TUI can render the side panel
-    app.set_todo_state(todo_state);
+    app.set_todo_state(todo_state.clone());
     // Share the sub-agent progress sender with the engine so delegate_task
     // can report sub-agent progress to the TUI.
     {
         let eng = engine.lock().await;
         app.set_steer_slot(eng.pending_steer.clone());
     }
-    // Wire sub-agent progress channel AFTER app is created (app owns the rx).
-    // The engine clones the tx into each ToolContext so delegate_task can send events.
+    // Wire sub-agent progress channel — Gateway owns the channel,
+    // the engine clones the tx into ToolContext for delegate_task.
     {
         let mut eng = engine.lock().await;
-        eng.sub_agent_tx = Some(app.sub_agent_sender());
+        eng.sub_agent_tx = Some(gateway.sub_agent_sender());
     }
     // Share the background cancellation token so background review tasks
     // can be cancelled on shutdown.
@@ -631,7 +514,7 @@ async fn main() -> anyhow::Result<()> {
     // Start config file watcher for hot-reload notification
     let config_path = config::paths::config_path();
     if config_path.exists() {
-        match config::watcher::watch_config(config_path, app.event_sender()) {
+        match config::watcher::watch_config(config_path, gateway.engine_event_sender()) {
             Ok(guard) => {
                 app.set_watcher_guard(guard);
                 tracing::info!("Config file watcher started");
@@ -641,6 +524,28 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+
+    // ── Global panic hook: protect terminal from raw mode residue ──
+    // If any code panics after init_terminal() (raw mode, alternate screen),
+    // this hook restores the terminal before the default panic behavior.
+    //
+    // ⚠️  The hook runs in a signal-safe context — use only `std::io::stdout()`
+    //     directly (not ratatui's terminal handle). Crossterm's execute! and
+    //     disable_raw_mode are safe to call from the hook.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        // Best-effort terminal recovery — if something panicked, we still want
+        // the user to see the panic message, not a blank alternate screen.
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::LeaveAlternateScreen,
+            crossterm::event::DisableMouseCapture,
+            crossterm::event::DisableBracketedPaste,
+        );
+        // Chain to the original hook for proper panic reporting
+        prev_hook(panic_info);
+    }));
 
     let mut terminal = ui::app::init_terminal()?;
 
@@ -668,9 +573,12 @@ async fn main() -> anyhow::Result<()> {
     // This dramatically reduces CPU when the user isn't interacting.
     let mut idle_frames = 0u32;
     loop {
-        // 1. Process engine events (non-blocking drain)
+        // 1. Process events: Gateway maps EngineEvents → UiCommands, App processes UiCommands
         {
-            app.process_events();
+            gateway.drain_engine_events();
+            gateway.drain_sub_agent_events();
+            app.drain_commands();
+            app.poll_engine_status();
             if let Ok(eng) = engine.try_lock() {
                 let ct = &eng.cost_tracker;
                 // Context pressure = last API call's full prompt + output
@@ -682,10 +590,13 @@ async fn main() -> anyhow::Result<()> {
                     || app.status.context_window != cw
                     || app.status.model != eng.model
                 {
-                    app.status.total_tokens = ctx_tokens;
-                    app.status.turn_count = turns;
+                    app.status
+                        .update(gateway::UiCommand::UpdateTokens(ctx_tokens));
+                    app.status
+                        .update(gateway::UiCommand::UpdateTurnCount(turns));
                     app.status.context_window = cw;
-                    app.status.model = eng.model.clone();
+                    app.status
+                        .update(gateway::UiCommand::SetModel(eng.model.clone()));
                     app.mark_dirty();
                 }
             }
@@ -740,552 +651,16 @@ async fn main() -> anyhow::Result<()> {
             was_running = app.is_running();
         }
 
-        // 2. Dispatch user input
+        // 2. Dispatch user input via Gateway
         if let Some(query_text) = app.take_pending_query() {
-            let engine = engine.clone();
-            let sender = app.event_sender();
-
-            match dispatch_command(&query_text) {
-                CommandAction::Done => {
-                    // Handle synchronous commands that don't need engine lock
-                    match query_text.as_str() {
-                        "/help" => send_text_response(&sender, HELP_TEXT),
-                        "/model" => send_text_response(
-                            &sender,
-                            &format!("Model: {} (provider: {})", model, provider_name),
-                        ),
-                        "/tools" => send_text_response(
-                            &sender,
-                            &format!(
-                                "Tools ({})\n{}",
-                                builtin_tool_count,
-                                builtin_tool_names.join(", ")
-                            ),
-                        ),
-                        "/memory" => {
-                            let summary = {
-                                let store = memory_store.lock().await;
-                                let mut s = store.summary();
-                                // Append external provider info if active
-                                let mgr = memory_manager.lock().await;
-                                if let Some(name) = mgr.external_name() {
-                                    s.push_str(&format!(
-                                        "\n\nExternal provider: {} (active)",
-                                        name
-                                    ));
-                                }
-                                s
-                            };
-                            send_text_response(&sender, &summary);
-                        }
-                        "/mcp" => {
-                            let summary = {
-                                let mgr = mcp_manager.lock().await;
-                                mgr.summary()
-                            };
-                            send_text_response(&sender, &summary);
-                        }
-                        "/skills" => {
-                            let mut lines = Vec::new();
-                            let reg = skill_registry.lock().await;
-                            let categories = reg.categories();
-                            if categories.is_empty() {
-                                let skills = reg.list_skills();
-                                lines.push(format!("Skills ({})\n", skills.len()));
-                                for s in &skills {
-                                    lines.push(format!("- {}: {}", s.name, s.description));
-                                }
-                            } else {
-                                lines.push(format!(
-                                    "Skills ({} skills in {} categories)\n",
-                                    reg.len(),
-                                    categories.len()
-                                ));
-                                for (cat, info) in categories {
-                                    lines.push(format!(
-                                        "## {} — {}",
-                                        cat,
-                                        if info.description.is_empty() {
-                                            String::new()
-                                        } else {
-                                            info.description.clone()
-                                        }
-                                    ));
-                                    for name in &info.skill_names {
-                                        if let Some(skill) = reg.get(name) {
-                                            lines.push(format!(
-                                                "- {}: {}",
-                                                skill.name, skill.description
-                                            ));
-                                        }
-                                    }
-                                    lines.push(String::new());
-                                }
-                            }
-                            drop(reg);
-                            send_text_response(&sender, &lines.join("\n"));
-                        }
-                        _ => {} // shouldn't reach here
-                    }
-                }
-                CommandAction::NeedEngine(cmd, arg) => match cmd {
-                    "cost" => {
-                        let eng = engine.lock().await;
-                        let ct = &eng.cost_tracker;
-                        let total = ct.total_tokens();
-                        let msg = if ct.model_breakdown().len() > 1 {
-                            // Multi-model breakdown
-                            let mut lines = vec![format!(
-                                "Token usage: {} total ({} input + {} output + {} cache) — {} API calls",
-                                total,
-                                ct.total_input_tokens,
-                                ct.total_output_tokens,
-                                ct.total_cached_tokens(),
-                                ct.turn_count,
-                            )];
-                            lines.push(format!(
-                                "Context pressure: {} prompt + {} output = {} tokens",
-                                ct.last_prompt_tokens,
-                                ct.last_output_tokens,
-                                ct.last_prompt_tokens + ct.last_output_tokens,
-                            ));
-                            for (model, mc) in ct.model_breakdown() {
-                                lines.push(format!(
-                                    "  {model}: {} input + {} output ({} calls)",
-                                    mc.input_tokens, mc.output_tokens, mc.calls,
-                                ));
-                                let mut sub_parts = Vec::new();
-                                if mc.cache_read_input_tokens > 0
-                                    || mc.cache_creation_input_tokens > 0
-                                {
-                                    sub_parts.push(format!(
-                                        "cache: {} read + {} write",
-                                        mc.cache_read_input_tokens, mc.cache_creation_input_tokens,
-                                    ));
-                                }
-                                if mc.reasoning_tokens > 0 {
-                                    sub_parts.push(format!(
-                                        "reasoning: {} (included in output)",
-                                        mc.reasoning_tokens,
-                                    ));
-                                }
-                                for part in &sub_parts {
-                                    lines.push(format!("    {part}"));
-                                }
-                            }
-                            lines.join("\n")
-                        } else {
-                            let mut msg = format!(
-                                "Token usage: {} total ({} input + {} output",
-                                total, ct.total_input_tokens, ct.total_output_tokens,
-                            );
-                            if ct.total_cached_tokens() > 0 {
-                                msg.push_str(&format!(" + {} cached", ct.total_cached_tokens()));
-                            }
-                            msg.push(')');
-                            if ct.total_reasoning_tokens > 0 {
-                                msg.push_str(&format!(
-                                    " (reasoning: {}, included in output)",
-                                    ct.total_reasoning_tokens
-                                ));
-                            }
-                            let calls = if ct.turn_count == 1 { "call" } else { "calls" };
-                            msg.push_str(&format!(" — {} {}", ct.turn_count, calls));
-                            msg.push_str(&format!(
-                                "\nContext pressure: {} prompt + {} output = {} tokens",
-                                ct.last_prompt_tokens,
-                                ct.last_output_tokens,
-                                ct.last_prompt_tokens + ct.last_output_tokens,
-                            ));
-                            msg
-                        };
-                        drop(eng);
-                        send_text_response(&sender, &msg);
-                    }
-                    "clear" => {
-                        let mut eng = engine.lock().await;
-                        let count = eng.history.len();
-                        eng.history.clear();
-                        drop(eng);
-                        let _ = sender.send(engine::tui_events::UiEvent::ClearOutput);
-                        send_text_response(&sender, &format!("Cleared {} entries.", count));
-                    }
-                    "goal" => {
-                        let mut eng = engine.lock().await;
-                        let msg = handle_goal(&mut eng, &arg);
-                        drop(eng);
-                        send_text_response(&sender, &msg);
-                    }
-                    "identity" => {
-                        let mut eng = engine.lock().await;
-                        if arg.is_empty() || arg == "status" {
-                            // Show current identity
-                            let msg = match &eng.active_identity {
-                                Some(name) => format!("Identity: {} (active)", name),
-                                None => "No active identity (using default role).".to_string(),
-                            };
-                            drop(eng);
-                            send_text_response(&sender, &msg);
-                        } else if arg == "none" || arg == "clear" {
-                            // Clear identity — revert to default role
-                            eng.active_identity = None;
-                            // Rebuild system prompt with default role
-                            rebuild_after_identity_change(
-                                &mut eng,
-                                &skill_registry,
-                                &memory_store,
-                                &settings,
-                                None,
-                                None,
-                            )
-                            .await;
-                            drop(eng);
-                            app.status.active_identity = None;
-                            app.mark_dirty();
-                            send_text_response(&sender, "Identity cleared — using default role.");
-                        } else {
-                            // Switch to named identity
-                            let identity_config = settings.identities.get(&arg).cloned();
-                            if let Some(identity_config) = identity_config {
-                                eng.active_identity = Some(arg.clone());
-                                // Rebuild system prompt with identity override
-                                rebuild_after_identity_change(
-                                    &mut eng,
-                                    &skill_registry,
-                                    &memory_store,
-                                    &settings,
-                                    Some(&identity_config),
-                                    Some(&arg),
-                                )
-                                .await;
-                                drop(eng);
-                                app.status.active_identity = Some(arg.clone());
-                                app.mark_dirty();
-                                send_text_response(
-                                    &sender,
-                                    &format!("Switched to identity: {}", arg),
-                                );
-                            } else {
-                                drop(eng);
-                                send_text_response(
-                                    &sender,
-                                    &format!(
-                                        "Unknown identity: '{}'. Available: {}",
-                                        arg,
-                                        if settings.identities.is_empty() {
-                                            "(none defined — use zn.def_identity() in init.lua)"
-                                                .to_string()
-                                        } else {
-                                            settings
-                                                .identities
-                                                .keys()
-                                                .cloned()
-                                                .collect::<Vec<_>>()
-                                                .join(", ")
-                                        }
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                    "hooks" => {
-                        let eng = engine.lock().await;
-                        let msg = if let Some(he) = &eng.hook_executor {
-                            let events = he.registered_events();
-                            if events.is_empty() {
-                                "No hooks registered. Use zn.hook(event, fn) in init.lua to register hooks.".to_string()
-                            } else {
-                                let mut lines =
-                                    vec![format!("Registered hooks ({} total):", he.hook_count())];
-                                for (event, count) in &events {
-                                    lines.push(format!("  {} — {} handler(s)", event, count));
-                                }
-                                lines.join("\n")
-                            }
-                        } else {
-                            "No hooks registered. Use zn.hook(event, fn) in init.lua to register hooks.".to_string()
-                        };
-                        drop(eng);
-                        send_text_response(&sender, &msg);
-                    }
-                    "model" => {
-                        if arg.is_empty() {
-                            send_text_response(
-                                &sender,
-                                &format!("Model: {} (provider: {})", model, provider_name),
-                            );
-                        } else {
-                            let mut eng = engine.lock().await;
-                            eng.set_model(arg.clone());
-                            drop(eng);
-                            app.status.model = arg.clone();
-                            app.mark_dirty();
-                            send_text_response(
-                                &sender,
-                                &format!("Model temporarily set to: {}", arg),
-                            );
-                        }
-                    }
-                    "resume" => {
-                        // Parse optional index argument: "/restore" or "/restore 2"
-                        let session_data = {
-                            if arg.trim().is_empty() {
-                                engine::session::load_latest_session()
-                            } else if let Ok(n) = arg.trim().parse::<usize>() {
-                                let index = engine::session::load_session_index();
-                                if n == 0 || n > index.len() {
-                                    let list = engine::session::format_session_list(&index);
-                                    send_text_response(
-                                        &sender,
-                                        &format!(
-                                            "Invalid session number: {}. {}\n\n{}",
-                                            n,
-                                            if index.is_empty() {
-                                                "No sessions available."
-                                            } else {
-                                                ""
-                                            },
-                                            list,
-                                        ),
-                                    );
-                                    None // handled
-                                } else {
-                                    engine::session::load_session_by_id(&index[n - 1].id)
-                                }
-                            } else {
-                                let index = engine::session::load_session_index();
-                                let list = engine::session::format_session_list(&index);
-                                send_text_response(&sender, &list);
-                                None // handled
-                            }
-                        };
-
-                        if let Some(data) = session_data {
-                            let new_session_id = data.id.clone();
-                            let mut eng = engine.lock().await;
-                            // Rebuild conversation history from saved entries
-                            let hist = ConversationHistory::from_entries(data.entries.clone());
-                            eng.history = hist;
-                            eng.cost_tracker = crate::engine::cost_tracker::CostTracker::default();
-                            let one_liner = engine::session::build_one_liner(&data);
-                            let summary = data.summary.clone();
-
-                            // Notify external memory provider of session switch
-                            if let Some(ref mm) = eng.memory_manager {
-                                let mm = mm.lock().await;
-                                mm.on_session_switch(&new_session_id, "", false);
-                            }
-                            drop(eng);
-
-                            // Also rebuild the TUI output area with the saved summary
-                            let _ = sender.send(engine::tui_events::UiEvent::ClearOutput);
-                            let _ = sender.send(engine::tui_events::UiEvent::Status(format!(
-                                "󰄘 Resumed: {}",
-                                one_liner
-                            )));
-                            let _ = sender.send(engine::tui_events::UiEvent::TextDelta(format!(
-                                "━━━ Session Resume ━━━\n\
-                                     Saved: {}\n\
-                                     Model: {} | Provider: {}\n\
-                                     Total tokens: {}\n\n\
-                                     {}\n\
-                                     ━━━ End of Session ━━━\n\n\
-                                     Ready to continue — type your next message.",
-                                &data
-                                    .saved_at
-                                    .get(..19)
-                                    .unwrap_or(&data.saved_at)
-                                    .replace('T', " "),
-                                data.model,
-                                data.provider,
-                                data.total_tokens,
-                                summary,
-                            )));
-                            let _ = sender.send(engine::tui_events::UiEvent::QueryDone {
-                                text: String::new(),
-                                tool_calls: 0,
-                                tokens: data.total_tokens,
-                            });
-                        } else {
-                            // No session data available — the handler above already sent
-                            // the appropriate message, or there was nothing to resume.
-                            // Ensure we always return to Idle.
-                            send_text_response(&sender, "No saved session to resume.");
-                        }
-                    }
-                    "search" => {
-                        let query = arg.trim();
-                        let index = engine::session::load_session_index();
-                        if index.is_empty() {
-                            send_text_response(&sender, "No saved sessions to search.");
-                        } else if query.is_empty() {
-                            let list = engine::session::format_session_list(&index);
-                            send_text_response(
-                                &sender,
-                                &format!("Usage: `/search [query]`\n\n{}", list),
-                            );
-                        } else {
-                            let settings = settings.clone();
-                            let sender2 = sender.clone();
-                            let query_owned = query.to_string();
-                            let index_owned = index.clone();
-                            tokio::spawn(async move {
-                                let _ = sender2.send(engine::tui_events::UiEvent::Status(
-                                    "Searching sessions...".into(),
-                                ));
-                                match auxiliary::session_search::search_sessions(
-                                    &settings,
-                                    &query_owned,
-                                    &index_owned,
-                                )
-                                .await
-                                {
-                                    Ok(result) => {
-                                        let mut output = format!(
-                                            "### Session Search: {}\n\n{}",
-                                            query_owned, result
-                                        );
-                                        output.push_str("\n\nUse `/restore N` to load a session.");
-                                        let _ = sender2
-                                            .send(engine::tui_events::UiEvent::TextDelta(output));
-                                        let _ =
-                                            sender2.send(engine::tui_events::UiEvent::QueryDone {
-                                                text: String::new(),
-                                                tool_calls: 0,
-                                                tokens: 0,
-                                            });
-                                    }
-                                    Err(e) => {
-                                        let _ =
-                                            sender2.send(engine::tui_events::UiEvent::TextDelta(
-                                                format!("Search failed: {}", e),
-                                            ));
-                                        let _ =
-                                            sender2.send(engine::tui_events::UiEvent::QueryDone {
-                                                text: String::new(),
-                                                tool_calls: 0,
-                                                tokens: 0,
-                                            });
-                                    }
-                                }
-                            });
-                        }
-                    }
-                    _ => {}
-                },
-                CommandAction::Compact => {
-                    let settings = settings.clone();
-                    let sender2 = sender.clone();
-                    tokio::spawn(async move {
-                        // Take a snapshot while holding the lock, then release for compression.
-                        let (snapshot, orig_len) = {
-                            let eng = engine.lock().await;
-                            (eng.history.clone(), eng.history.len())
-                        };
-                        match auxiliary::compressor::compress_history(&settings, &snapshot, None)
-                            .await
-                        {
-                            Ok(summary) => {
-                                let mut eng = engine.lock().await;
-                                // Replace history only if it wasn't already compacted
-                                // (another task may have run compression between our
-                                // snapshot and this lock acquisition).
-                                if eng.history.len() >= orig_len / 2 {
-                                    eng.history.clear();
-                                    eng.history.push_user(&format!(
-                                        "[Compressed conversation history ({} entries)]\n\n{}",
-                                        orig_len, summary,
-                                    ));
-                                }
-                                let _ = sender2.send(engine::tui_events::UiEvent::Status(format!(
-                                    "Compressed {} entries  {} chars",
-                                    orig_len,
-                                    summary.len()
-                                )));
-                                let _ = sender2.send(engine::tui_events::UiEvent::QueryDone {
-                                    text: String::new(),
-                                    tool_calls: 0,
-                                    tokens: eng.cost_tracker.last_prompt_tokens
-                                        + eng.cost_tracker.last_output_tokens,
-                                });
-                            }
-                            Err(e) => {
-                                let _ = sender2.send(engine::tui_events::UiEvent::Error(format!(
-                                    "Compression failed: {}",
-                                    e
-                                )));
-                            }
-                        }
-                    });
-                }
-                CommandAction::Query => {
-                    let cancel = app.reset_cancel_token();
-                    let mut image_blocks = app.take_pending_image_blocks();
-
-                    // Auto-detect image file paths in the query text
-                    let cleaned_text = {
-                        // Use a simple word-boundary scan for paths ending in image extensions
-                        let re = &*IMAGE_PATH_REGEX;
-                        let mut text = query_text.clone();
-                        let mut found_any = false;
-                        for cap in re.captures_iter(&query_text) {
-                            let path_str = cap.get(1).unwrap().as_str();
-                            let path = std::path::Path::new(path_str);
-                            if path.exists() {
-                                match std::fs::read(path) {
-                                    Ok(bytes) => {
-                                        let ext = path
-                                            .extension()
-                                            .and_then(|e| e.to_str())
-                                            .unwrap_or("png");
-                                        let media_type = match ext.to_lowercase().as_str() {
-                                            "png" => "image/png",
-                                            "jpg" | "jpeg" => "image/jpeg",
-                                            "gif" => "image/gif",
-                                            "webp" => "image/webp",
-                                            "bmp" => "image/bmp",
-                                            _ => "image/png",
-                                        };
-                                        let b64 = base64::engine::general_purpose::STANDARD
-                                            .encode(&bytes);
-                                        let size_kb = bytes.len() / 1024;
-                                        if size_kb <= 10240 {
-                                            image_blocks.push((media_type.to_string(), b64));
-                                            found_any = true;
-                                            // Remove the path from the text
-                                            text = text.replace(path_str, "");
-                                        }
-                                    }
-                                    Err(_) => {
-                                        // File exists but unreadable — leave text as-is
-                                    }
-                                }
-                            }
-                        }
-                        if found_any {
-                            // Clean up leftover whitespace
-                            let cleaned = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                            if cleaned.is_empty() {
-                                "[Attached image(s)]".to_string()
-                            } else {
-                                cleaned
-                            }
-                        } else {
-                            text
-                        }
-                    };
-
-                    tokio::spawn(async move {
-                        let mut eng = engine.lock().await;
-                        if let Err(e) = eng
-                            .query_tui(&cleaned_text, image_blocks, &sender, cancel)
-                            .await
-                        {
-                            let _ = sender.send(engine::tui_events::UiEvent::Error(e.to_string()));
-                        }
-                    });
-                }
-            }
+            let cancel = app.reset_cancel_token();
+            let image_blocks = app.take_pending_image_blocks();
+            let (cleaned_text, path_images) = extract_image_paths(&query_text);
+            let mut all_images = image_blocks;
+            all_images.extend(path_images);
+            gateway
+                .handle_input(&cleaned_text, all_images, cancel)
+                .await;
         }
 
         // 3. Adaptive frame gating: skip render when nothing changed (idle).
@@ -1381,6 +756,8 @@ async fn main() -> anyhow::Result<()> {
             app.cancel_running();
             // Cancel background tasks (curator, review) so they stop promptly.
             app.cancel_background();
+            // Unmount child components — signals lifecycle end for cleanup.
+            app.unmount_components();
             break;
         }
     }

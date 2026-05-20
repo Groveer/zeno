@@ -1,20 +1,15 @@
-//! Scrollable output area for conversation history.
-
+//! Output segment types and segment-to-lines conversion.
 //!
+//! Defines the [`OutputSegment`] enum and the core rendering logic
+//! that converts each segment variant to styled ratatui lines.
+//! This is separated from the output state and cache management
+//! so that the conversion logic can be unit-tested independently.
 
-//! Displays assistant text, tool calls, and tool results with
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
 
-//! distinct styling.  Supports scrolling through history.
-
-use ratatui::{
-    Frame,
-    layout::Rect,
-    style::{Modifier, Style},
-    text::{Line, Span, Text},
-    widgets::Paragraph,
-};
-
-use super::theme;
+use super::super::theme;
+use crate::utils::{char_width, display_width};
 
 /// A single segment of rendered output.
 #[derive(Debug, Clone)]
@@ -51,239 +46,9 @@ pub enum OutputSegment {
     Error(String),
 }
 
-/// Scrollable output state.
-pub struct OutputState {
-    /// All rendered segments so far.
-    pub(crate) segments: Vec<OutputSegment>,
-    /// Scroll offset from the bottom (0 = bottom / newest).
-    scroll: usize,
-    /// Whether auto-scroll is enabled (follows new output).
-    auto_scroll: bool,
-    /// Cached rendered lines (built by build_cached_lines, invalidated on push/clear).
-    cached_lines: Vec<Line<'static>>,
-    /// Generation counter: incremented on push/clear, compared by render() to detect staleness.
-    cache_gen: u64,
-    /// Last width used to build cache; if width changes, we rebuild.
-    cache_width: usize,
-}
-
-impl OutputState {
-    pub fn new() -> Self {
-        Self {
-            segments: Vec::new(),
-            scroll: 0,
-            auto_scroll: true,
-            cached_lines: Vec::new(),
-            cache_gen: 0,
-            cache_width: 0,
-        }
-    }
-
-    /// Invalidate the line cache (call after any mutation to segments).
-    fn bump_gen(&mut self) {
-        self.cache_gen += 1;
-    }
-
-    pub fn push(&mut self, seg: OutputSegment) {
-        self.segments.push(seg);
-        self.bump_gen();
-    }
-
-    /// Call after in-place mutation of a segment (e.g. TextDelta append).
-    /// Invalidates the render cache without adding a new segment.
-    pub fn mark_dirty(&mut self) {
-        self.bump_gen();
-    }
-
-    pub fn clear(&mut self) {
-        self.segments.clear();
-        self.scroll = 0;
-        self.auto_scroll = true;
-        self.cached_lines.clear();
-        self.bump_gen();
-    }
-
-    /// Scroll up by N lines (towards older content).
-    pub fn scroll_up(&mut self, lines: usize) {
-        self.scroll = self.scroll.saturating_add(lines);
-        self.auto_scroll = false;
-    }
-
-    /// Scroll down by N lines (towards newer content).
-    pub fn scroll_down(&mut self, lines: usize) {
-        if self.scroll <= lines {
-            self.scroll = 0;
-            self.auto_scroll = true;
-        } else {
-            self.scroll -= lines;
-        }
-    }
-}
-
-/// Build the full cached line list from segments.
-/// This is the expensive path (markdown parsing, syntect highlighting, wrapping).
-/// Called only when the cache is stale.
-fn build_cache(state: &OutputState, width: usize) -> Vec<Line<'static>> {
-    let all_lines: Vec<Line<'static>> = state.segments.iter().flat_map(segment_to_lines).collect();
-    all_lines
-        .into_iter()
-        .flat_map(|line| wrap_line(line, width))
-        .collect()
-}
-
-/// Render the output area.
-///
-/// Uses a write-through cache: `segment_to_lines()` + `wrap_line()` are
-/// re-done only when segments change or the terminal width changes.
-pub fn render(frame: &mut Frame, area: Rect, state: &mut OutputState) {
-    let visible_height = area.height as usize;
-    let width = area.width as usize;
-    if visible_height == 0 || width == 0 {
-        return;
-    }
-
-    // Rebuild cache if stale (segments changed or width changed).
-    if state.cache_gen > 0 || state.cache_width != width {
-        state.cached_lines = build_cache(state, width);
-        state.cache_width = width;
-        // Reset gen so we don't rebuild again until next mutation.
-        // Use wrapping to avoid overflow on billions of mutations.
-        state.cache_gen = 0;
-    }
-
-    let total = state.cached_lines.len();
-    let start = if total <= visible_height {
-        0
-    } else {
-        let max_scroll = total - visible_height;
-        let s = state.scroll.min(max_scroll);
-        max_scroll - s
-    };
-
-    let visible: Vec<Line> = state.cached_lines[start..]
-        .iter()
-        .take(visible_height)
-        .cloned()
-        .collect();
-
-    let text = Text::from(visible);
-
-    frame.render_widget(Paragraph::new(text).style(Style::new().bg(theme::BG)), area);
-
-    // Scroll indicator
-    if total > visible_height && state.scroll > 0 {
-        let max_scroll = total - visible_height;
-        let pct = state.scroll as f64 / max_scroll as f64;
-        if pct > 0.0 && area.width > 8 {
-            let indicator = format!(" {}% ", (pct * 100.0) as u32);
-            let ind_area = Rect {
-                x: area.x + area.width.saturating_sub(indicator.len() as u16),
-                y: area.y,
-                width: indicator.len() as u16,
-                height: 1,
-            };
-            frame.render_widget(
-                Paragraph::new(Span::styled(
-                    indicator,
-                    Style::new()
-                        .fg(theme::TEXT_BRIGHT)
-                        .bg(theme::ACCENT_DIM)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                ind_area,
-            );
-        }
-    }
-}
-
-use crate::utils::{char_width, display_width};
-
-/// Wrap a single styled line to fit within `max_width` terminal columns.
-/// Returns multiple lines if the original line is too wide.
-fn wrap_line(line: Line<'static>, max_width: usize) -> Vec<Line<'static>> {
-    // Calculate total display width of the line (emoji-aware)
-    let total_width: usize = line
-        .spans
-        .iter()
-        .map(|s| display_width(s.content.as_ref()))
-        .sum();
-
-    if total_width <= max_width || max_width == 0 {
-        return vec![line];
-    }
-
-    // Walk through spans, splitting at max_width boundaries
-    let mut result: Vec<Line<'static>> = Vec::new();
-    let mut current_line: Vec<Span<'static>> = Vec::new();
-    let mut current_width: usize = 0;
-
-    for span in &line.spans {
-        let span_str: &str = span.content.as_ref();
-        let span_style = span.style;
-
-        // Split this span's text by width (emoji-aware)
-        let mut remaining = span_str;
-        while !remaining.is_empty() {
-            // If current line is already full, start a new one
-            if current_width >= max_width {
-                result.push(Line::from(std::mem::take(&mut current_line)));
-                current_width = 0;
-            }
-
-            let room = max_width - current_width;
-
-            // Find how many chars fit in `room` columns
-            let mut byte_end = remaining.len();
-            let mut used_width = 0;
-            let chars: Vec<char> = remaining.chars().collect();
-            let mut ci = 0;
-            #[allow(clippy::explicit_counter_loop)]
-            for (i, ch) in remaining.char_indices() {
-                let next = chars.get(ci + 1).copied();
-                let w = char_width(ch, next);
-                if used_width + w > room {
-                    byte_end = i;
-                    break;
-                }
-                used_width += w;
-                byte_end = remaining.len();
-                // Skip VS16 if it was consumed as part of an emoji sequence
-                if next == Some('\u{FE0F}') {
-                    ci += 2;
-                } else {
-                    ci += 1;
-                }
-            }
-
-            if byte_end == 0 {
-                // Single char wider than room — force it onto current line
-                let ch = remaining.chars().next().unwrap();
-                byte_end = ch.len_utf8();
-                let next = remaining.chars().nth(1);
-                used_width = char_width(ch, next);
-            }
-
-            let (chunk, rest) = remaining.split_at(byte_end);
-            current_line.push(Span::styled(chunk.to_string(), span_style));
-            current_width += used_width;
-            remaining = rest;
-        }
-    }
-
-    if !current_line.is_empty() {
-        result.push(Line::from(current_line));
-    }
-
-    if result.is_empty() {
-        result.push(Line::from(""));
-    }
-
-    result
-}
-
 /// Convert a segment to styled lines.
 /// Returns owned `'static` lines suitable for caching.
-fn segment_to_lines(seg: &OutputSegment) -> Vec<Line<'static>> {
+pub fn segment_to_lines(seg: &OutputSegment) -> Vec<Line<'static>> {
     match seg {
         OutputSegment::UserInput(text) => {
             let mut lines: Vec<Line<'static>> = Vec::new();
@@ -359,7 +124,7 @@ fn segment_to_lines(seg: &OutputSegment) -> Vec<Line<'static>> {
         }
         OutputSegment::Text(text) => {
             // Render markdown to styled lines
-            super::markdown::render_markdown(text)
+            super::super::markdown::render_markdown(text)
         }
         OutputSegment::Reasoning(text) => {
             // Single-line rolling display: show the latest snippet of reasoning.
@@ -641,11 +406,10 @@ mod tests {
     fn test_heading_renders_with_color_in_paragraph() {
         let seg = OutputSegment::Text("## Hello World\nSome text".to_string());
         let lines = segment_to_lines(&seg);
-        eprintln!("[TEST] lines: {:?}", lines);
 
-        let area = Rect::new(0, 0, 40, 2);
-        let text = Text::from(lines);
-        let paragraph = Paragraph::new(text)
+        let area = ratatui::layout::Rect::new(0, 0, 40, 2);
+        let text = ratatui::text::Text::from(lines);
+        let paragraph = ratatui::widgets::Paragraph::new(text)
             .wrap(ratatui::widgets::Wrap { trim: false })
             .style(Style::new().bg(theme::BG));
 
@@ -654,12 +418,6 @@ mod tests {
 
         // New renderer: heading starts at position 0 (no "## " prefix)
         let cell = buf.cell((0, 0)).unwrap();
-        eprintln!(
-            "[TEST] Cell (2,0): symbol={:?} fg={:?} bg={:?}",
-            cell.symbol(),
-            cell.fg,
-            cell.bg
-        );
 
         assert!(
             matches!(cell.fg, Color::Rgb(_, _, _)),

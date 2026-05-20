@@ -39,9 +39,22 @@ pub struct TodoState {
     pub plan: String,
     pub tasks: Vec<Task>,
     pub next_id: u32,
+    /// Generation counter bumped on every mutation.
+    /// Used by App::poll_engine_status() to detect changes without per-frame locking.
+    generation: u64,
 }
 
 impl TodoState {
+    /// Current generation counter — bumped on every mutation.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Bump the generation counter (called by TodoTool on mutation).
+    fn bump_gen(&mut self) {
+        self.generation += 1;
+    }
+
     /// Format a human-readable summary of the plan and all tasks.
     pub fn format_task_list(&self) -> String {
         if self.tasks.is_empty() {
@@ -201,6 +214,7 @@ impl Tool for TodoTool {
                 state.plan = plan;
                 state.tasks = tasks;
                 state.next_id = (state.tasks.len() + 1) as u32;
+                state.bump_gen();
 
                 let count = state.tasks.len();
                 Ok(format!(
@@ -229,6 +243,7 @@ impl Tool for TodoTool {
                         status: "pending".into(),
                     });
                 }
+                state.bump_gen();
 
                 Ok(format!(
                     "Added {} task(s).\n{}",
@@ -270,6 +285,7 @@ impl Tool for TodoTool {
                     task_id_str = task.id.clone();
                     status_str = task.status.clone();
                 } // mutable borrow on state ends here
+                state.bump_gen();
 
                 Ok(format!(
                     "Updated {} → {}.\n{}",
@@ -293,6 +309,7 @@ impl Tool for TodoTool {
                         task_id
                     )));
                 }
+                state.bump_gen();
 
                 Ok(format!(
                     "Deleted {}.\n{}",

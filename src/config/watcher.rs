@@ -19,7 +19,7 @@ use std::time::Duration;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use tokio::sync::Mutex;
 
-use crate::engine::tui_events::UiSender;
+use crate::engine::tui_events::EngineSender;
 
 /// Debounce window: how long to wait after the last change event before
 /// sending the notification. Prevents duplicate notifications from atomic
@@ -33,7 +33,7 @@ const DEBOUNCE_MS: u64 = 500;
 /// thread-based watcher on Linux/macOS).
 ///
 /// Returns immediately. The watcher lives until the returned handle is dropped.
-pub fn watch_config(config_path: PathBuf, sender: UiSender) -> Result<WatcherGuard, String> {
+pub fn watch_config(config_path: PathBuf, sender: EngineSender) -> Result<WatcherGuard, String> {
     let sender = Arc::new(Mutex::new(sender));
     let path = config_path.clone();
 
@@ -51,7 +51,7 @@ pub fn watch_config(config_path: PathBuf, sender: UiSender) -> Result<WatcherGua
                     while rx.try_recv().is_ok() {}
                     // Send notification
                     let s = sender.lock().await;
-                    let _ = s.send(crate::engine::tui_events::UiEvent::Status(format!(
+                    let _ = s.send(crate::engine::tui_events::EngineEvent::Status(format!(
                         "Config changed: {} — restart to apply",
                         path.display()
                     )));

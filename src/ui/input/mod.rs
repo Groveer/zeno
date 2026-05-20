@@ -2,8 +2,28 @@
 //!
 //! Supports cursor movement, backspace, Shift+Enter for newlines, Enter to submit,
 //! Ctrl+D submission, and a popup completion menu for slash commands and file paths.
+//!
+//! ## Sub-modules
+//!
+//! - [`completion`] — `CompletionPopup` state and navigation
+//! - [`history`] — input history persistence (load/save from disk)
+//! - [`clipboard`] — clipboard image reading for Alt+V paste
 
+pub mod clipboard;
+pub mod completion;
+pub mod editor;
+pub mod history;
+pub mod paste;
+
+use completion::CompletionPopup;
+use completion::CompletionType;
+use completion::MAX_POPUP_ITEMS;
+
+use crate::gateway::UiCommand;
+use crate::ui::status_bar::AppMode;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+use super::component::Component;
 use ratatui::{
     Frame,
     layout::Rect,
@@ -14,9 +34,31 @@ use ratatui::{
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
-use crate::config::paths;
-
 use super::theme;
+
+/// Actions returned by `InputState::dispatch_key()` for App to route.
+///
+/// Each variant describes what the user intended, decoupled from the
+/// mode-specific handling that App performs.
+#[derive(Debug)]
+pub enum InputAction {
+    /// Key was consumed by the editor (no routing needed).
+    Consumed,
+    /// User submitted a query (Idle mode Enter).
+    SubmitQuery {
+        text: String,
+        images: Vec<(String, String)>,
+    },
+    /// User typed while agent was running (Running mode Enter) — inject steer.
+    Steer(String),
+    /// User responded to ask_user / permission prompt (WaitingInput mode Enter).
+    Respond { text: String },
+    /// Ctrl+C or Escape — interrupt / cancel (reserved for future InputPanel-level handling).
+    #[allow(dead_code)]
+    Cancel,
+    /// Ctrl+D with empty input — hard quit.
+    HardQuit,
+}
 
 /// All slash commands supported by the TUI, with short aliases first.
 const COMMANDS: &[&str] = &[
@@ -37,109 +79,6 @@ const COMMANDS: &[&str] = &[
     "/skills",
     "/tools",
 ];
-
-/// Maximum number of items shown in the completion popup.
-const MAX_POPUP_ITEMS: usize = 5;
-
-/// Maximum number of history entries to persist to disk.
-const MAX_PERSISTED_HISTORY: usize = 2000;
-
-// Completion popup state
-
-/// Completion type to distinguish between command and path completions.
-#[derive(Debug, Clone, PartialEq)]
-enum CompletionType {
-    /// Slash command completion (e.g., "/he" -> "/help")
-    Command,
-    /// Command argument completion (e.g., "/identity de" -> "/identity dev").
-    /// `cmd_len` is the byte length of the command prefix including trailing space
-    /// (e.g., "/identity ".len() = 10). The popup replaces text from `cmd_len` to cursor.
-    CommandArg { cmd_len: usize },
-    /// File path completion (e.g., "src/" -> ["src/main.rs", "src/lib.rs"])
-    Path {
-        /// The token prefix being completed (e.g., "src/")
-        prefix: String,
-        /// Start byte position of the path token in the input text
-        start: usize,
-    },
-}
-
-/// State for the command/path completion popup.
-pub struct CompletionPopup {
-    /// Matching items for the current prefix (commands or paths).
-    pub matches: Vec<String>,
-    /// Currently selected index (0-based).
-    pub selected: usize,
-    /// Scroll offset for navigating beyond MAX_POPUP_ITEMS.
-    pub scroll: usize,
-    /// Type of completion (command or path).
-    completion_type: CompletionType,
-}
-
-impl CompletionPopup {
-    fn new_command(matches: Vec<String>) -> Self {
-        Self {
-            matches,
-            selected: 0,
-            scroll: 0,
-            completion_type: CompletionType::Command,
-        }
-    }
-
-    fn new_path(matches: Vec<String>, prefix: String, start: usize) -> Self {
-        Self {
-            matches,
-            selected: 0,
-            scroll: 0,
-            completion_type: CompletionType::Path { prefix, start },
-        }
-    }
-
-    fn new_command_arg(matches: Vec<String>, cmd_len: usize) -> Self {
-        Self {
-            matches,
-            selected: 0,
-            scroll: 0,
-            completion_type: CompletionType::CommandArg { cmd_len },
-        }
-    }
-
-    /// Move selection up.
-    fn move_up(&mut self) {
-        if self.selected > 0 {
-            self.selected -= 1;
-            if self.selected < self.scroll {
-                self.scroll = self.selected;
-            }
-        }
-    }
-
-    /// Move selection down.
-    fn move_down(&mut self) {
-        if self.selected + 1 < self.matches.len() {
-            self.selected += 1;
-            if self.selected >= self.scroll + MAX_POPUP_ITEMS {
-                self.scroll = self.selected - MAX_POPUP_ITEMS + 1;
-            }
-        }
-    }
-
-    /// Get the currently selected item.
-    fn selected_item(&self) -> Option<&str> {
-        self.matches.get(self.selected).map(|s| s.as_str())
-    }
-
-    /// Visible slice of matches for rendering.
-    fn visible_slice(&self) -> &[String] {
-        let end = (self.scroll + MAX_POPUP_ITEMS).min(self.matches.len());
-        &self.matches[self.scroll..end]
-    }
-
-    /// Get the completion type.
-    fn completion_type(&self) -> &CompletionType {
-        &self.completion_type
-    }
-}
 
 /// Marker character used in the text buffer to represent an inline image token.
 /// Renders as a styled "[img]" span in the input area. Deletable like normal chars.
@@ -175,11 +114,13 @@ pub struct InputState {
     /// Stores only the suffix to append — the part the user hasn't typed yet.
     /// Displayed as dim shadow text after the cursor. Tab accepts it.
     ghost_text: Option<String>,
+    /// Current app mode, synced from App for use in view() and dispatch_key().
+    app_mode: AppMode,
 }
 
 impl InputState {
     pub fn new() -> Self {
-        let history = load_history();
+        let history = history::load_history();
         Self {
             text: String::new(),
             cursor: 0,
@@ -192,6 +133,7 @@ impl InputState {
             images: Vec::new(),
             identity_names: Vec::new(),
             ghost_text: None,
+            app_mode: AppMode::default(),
         }
     }
 
@@ -458,6 +400,70 @@ impl InputState {
         }
     }
 
+    /// Process a key event and return an InputAction for App to route.
+    ///
+    /// This is the component-level key handler: it processes the key through
+    /// the editor, then checks the `submitted` flag to determine the action.
+    /// Global shortcuts (Ctrl+D, Ctrl+C, PageUp/Down, Alt+V) are handled by
+    /// App before calling this method.
+    pub fn dispatch_key(&mut self, key: KeyEvent, mode: AppMode) -> InputAction {
+        // Ctrl+D with empty text → hard quit (global, but detected here since
+        // it also sets submitted + text="/exit" in handle_key)
+        if matches!(
+            key,
+            KeyEvent {
+                code: KeyCode::Char('d'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            }
+        ) && self.text.is_empty()
+        {
+            return InputAction::HardQuit;
+        }
+
+        match mode {
+            AppMode::Running => {
+                let _ = self.handle_key(key);
+                if self.submitted {
+                    let text = self.text.trim().to_string();
+                    self.reset();
+                    if !text.is_empty() {
+                        InputAction::Steer(text)
+                    } else {
+                        InputAction::Consumed
+                    }
+                } else {
+                    InputAction::Consumed
+                }
+            }
+            AppMode::WaitingInput => {
+                let _ = self.handle_key(key);
+                if self.submitted {
+                    let text = self.text.trim().to_string();
+                    self.reset_without_history();
+                    InputAction::Respond { text }
+                } else {
+                    InputAction::Consumed
+                }
+            }
+            AppMode::Idle => {
+                let _ = self.handle_key(key);
+                if self.submitted {
+                    let (images, text) = self.extract_images();
+                    let text = text.trim().to_string();
+                    self.reset();
+                    if text.is_empty() && images.is_empty() {
+                        InputAction::Consumed
+                    } else {
+                        InputAction::SubmitQuery { text, images }
+                    }
+                } else {
+                    InputAction::Consumed
+                }
+            }
+        }
+    }
+
     /// Clear after submission. Saves the current text to input history.
     pub fn reset(&mut self) {
         // Save to history (skip empty, slash commands, and duplicates of the most recent entry)
@@ -484,11 +490,11 @@ impl InputState {
         // Persist: re-read latest disk state, merge new entry, save.
         // This prevents overwriting entries from other concurrent Zeno instances.
         if is_history_entry {
-            let mut on_disk = load_history();
+            let mut on_disk = history::load_history();
             if on_disk.first().map(|s| s.as_str()) != Some(&trimmed) {
                 on_disk.insert(0, trimmed);
             }
-            save_history(&on_disk);
+            history::save_history(&on_disk);
         }
     }
 
@@ -514,7 +520,7 @@ impl InputState {
     fn cursor_row_col(&self) -> (usize, usize) {
         let cursor = self.cursor.min(self.text.len());
         // Defensive: snap cursor to the nearest char boundary if somehow misaligned.
-        let cursor = snap_to_char_boundary(&self.text, cursor);
+        let cursor = editor::snap_to_char_boundary(&self.text, cursor);
         let before = &self.text[..cursor];
         let row = before.chars().filter(|&c| c == '\n').count();
         let last_newline = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
@@ -575,7 +581,7 @@ impl InputState {
         let prev_line_end = self.line_end_byte(row - 1);
         let prev_line_len = prev_line_end - prev_line_start;
         let target = prev_line_start + col_byte.min(prev_line_len);
-        self.cursor = snap_to_char_boundary(&self.text, target);
+        self.cursor = editor::snap_to_char_boundary(&self.text, target);
         true
     }
 
@@ -591,7 +597,7 @@ impl InputState {
         let next_line_end = self.line_end_byte(row + 1);
         let next_line_len = next_line_end - next_line_start;
         let target = next_line_start + col_byte.min(next_line_len);
-        self.cursor = snap_to_char_boundary(&self.text, target);
+        self.cursor = editor::snap_to_char_boundary(&self.text, target);
         true
     }
 
@@ -1160,34 +1166,61 @@ impl InputState {
     }
 
     fn prev_char_boundary(&self) -> usize {
-        let mut idx = self.cursor.saturating_sub(1);
-        while idx > 0 && !self.text.is_char_boundary(idx) {
-            idx -= 1;
-        }
-        idx
+        editor::prev_char_boundary(&self.text, self.cursor)
     }
 
     fn next_char_boundary(&self) -> usize {
-        let mut idx = self.cursor + 1;
-        while idx < self.text.len() && !self.text.is_char_boundary(idx) {
-            idx += 1;
-        }
-        idx.min(self.text.len())
+        editor::next_char_boundary(&self.text, self.cursor)
     }
 }
 
-/// Snap a byte offset to the nearest UTF-8 char boundary at or before it.
-fn snap_to_char_boundary(s: &str, offset: usize) -> usize {
-    let offset = offset.min(s.len());
-    if s.is_char_boundary(offset) {
-        offset
-    } else {
-        // Walk backwards to the previous char boundary.
-        let mut idx = offset;
-        while idx > 0 && !s.is_char_boundary(idx) {
-            idx -= 1;
+// ── Component trait implementation ─────────────────────────────────────────
+
+impl Component for InputState {
+    fn mount(&mut self) {
+        // History is loaded in new() — no additional mount work needed
+    }
+
+    fn unmount(&mut self) {
+        // Persist input history to disk on shutdown
+        history::save_history(&self.input_history);
+    }
+
+    fn update(&mut self, cmd: UiCommand) {
+        match cmd {
+            UiCommand::SetInputText(text) => {
+                self.text = text;
+                self.cursor = self.text.len();
+            }
+            UiCommand::SetInputPlaceholder(_text) => {
+                // Placeholder would need additional state; reserved for future use
+            }
+            UiCommand::FocusInput => {
+                self.active = true;
+            }
+            UiCommand::BlurInput => {
+                self.active = false;
+            }
+            UiCommand::PasteImage {
+                media_type,
+                base64_data,
+                ..
+            } => {
+                self.insert_image(media_type, base64_data);
+            }
+            UiCommand::SetMode(mode) => {
+                self.app_mode = mode;
+            }
+            _ => {} // Ignore non-input commands
         }
-        idx
+    }
+
+    fn view(&mut self, area: Rect, frame: &mut Frame) {
+        render(frame, area, self, &self.app_mode);
+    }
+
+    fn needs_render(&self) -> bool {
+        true // Input area is cheap to render and changes on every keypress
     }
 }
 
@@ -1447,61 +1480,9 @@ fn draw_border(frame: &mut Frame, area: Rect, color: Color, suffix: &str) {
     frame.render_widget(Paragraph::new(line), top);
 }
 
-// Session history persistence
-
-/// Load input history from disk. Returns an empty Vec if the file doesn't
-/// exist or is corrupted, so the user never loses the ability to type.
-fn load_history() -> Vec<String> {
-    let path = paths::session_history_path();
-    if !path.exists() {
-        return Vec::new();
-    }
-    match std::fs::read_to_string(&path) {
-        Ok(json) => match serde_json::from_str::<Vec<String>>(&json) {
-            Ok(history) => history,
-            Err(e) => {
-                tracing::warn!(error = %e, path = %path.display(), "Failed to parse session history, starting fresh");
-                Vec::new()
-            }
-        },
-        Err(e) => {
-            tracing::warn!(error = %e, path = %path.display(), "Failed to read session history, starting fresh");
-            Vec::new()
-        }
-    }
-}
-
-/// Save input history to disk. Truncates to MAX_PERSISTED_HISTORY entries.
-/// Uses atomic write (temp file + rename) to prevent partial reads by
-/// other concurrent Zeno instances.
-fn save_history(history: &[String]) {
-    let path = paths::session_history_path();
-    let truncated: Vec<&str> = history
-        .iter()
-        .take(MAX_PERSISTED_HISTORY)
-        .map(|s| s.as_str())
-        .collect();
-    match serde_json::to_string(&truncated) {
-        Ok(json) => {
-            // Atomic write: write to temp file, then rename to final path.
-            // This prevents other instances from reading a partially-written file.
-            let tmp_path = path.with_extension("json.tmp");
-            if let Err(e) = std::fs::write(&tmp_path, &json) {
-                tracing::warn!(error = %e, path = %tmp_path.display(), "Failed to save session history");
-                return;
-            }
-            if let Err(e) = std::fs::rename(&tmp_path, &path) {
-                tracing::warn!(error = %e, path = %path.display(), "Failed to atomically save session history");
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to serialize session history");
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::editor;
     use super::*;
 
     #[test]
@@ -1846,11 +1827,11 @@ mod tests {
     fn test_snap_to_char_boundary() {
         // '过' = bytes 0-2, so byte 1 is inside the char
         let s = "hello过world";
-        assert_eq!(snap_to_char_boundary(s, 5), 5); // 'h','e','l','l','o' = ascii
-        assert_eq!(snap_to_char_boundary(s, 6), 5); // inside '过', snap back
-        assert_eq!(snap_to_char_boundary(s, 7), 5); // inside '过', snap back
-        assert_eq!(snap_to_char_boundary(s, 8), 8); // 'w', on boundary
-        assert_eq!(snap_to_char_boundary(s, 100), s.len()); // past end
+        assert_eq!(editor::snap_to_char_boundary(s, 5), 5); // 'h','e','l','l','o' = ascii
+        assert_eq!(editor::snap_to_char_boundary(s, 6), 5); // inside '过', snap back
+        assert_eq!(editor::snap_to_char_boundary(s, 7), 5); // inside '过', snap back
+        assert_eq!(editor::snap_to_char_boundary(s, 8), 8); // 'w', on boundary
+        assert_eq!(editor::snap_to_char_boundary(s, 100), s.len()); // past end
     }
 
     #[test]

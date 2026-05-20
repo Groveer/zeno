@@ -7,9 +7,33 @@ use ratatui::{
     text::{Line, Span},
 };
 
+use crate::gateway::UiCommand;
+
 use super::theme;
 
+impl super::component::Component for StatusInfo {
+    fn update(&mut self, cmd: UiCommand) {
+        match cmd {
+            UiCommand::SetMode(mode) => self.mode = mode,
+            UiCommand::UpdateStatus(info) => *self = info,
+            UiCommand::UpdateTokens(tokens) => self.total_tokens = tokens,
+            UiCommand::UpdateTurnCount(turns) => self.turn_count = turns,
+            UiCommand::SetModel(model) => self.model = model,
+            _ => {}
+        }
+    }
+
+    fn view(&mut self, area: Rect, frame: &mut Frame) {
+        render(frame, area, self);
+    }
+
+    fn needs_render(&self) -> bool {
+        true // Status bar is cheap to render, always redraw
+    }
+}
+
 /// Data the status bar renders.
+#[derive(Debug, Clone)]
 pub struct StatusInfo {
     pub model: String,
     pub provider: String,

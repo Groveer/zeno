@@ -46,6 +46,11 @@ impl MemoryManager {
         }
     }
 
+    /// Get a reference to the built-in memory store.
+    pub fn memory_store(&self) -> &Arc<Mutex<MemoryStore>> {
+        &self.builtin_store
+    }
+
     /// Set (or replace) the external memory provider.
     /// Only ONE external provider can be active at a time.
     /// If a provider is already set, it is shut down first.
