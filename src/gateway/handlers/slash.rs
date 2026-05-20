@@ -480,9 +480,12 @@ impl Gateway {
                 None,
             )
             .await;
+            let skill_count = self.skill_registry.lock().await.len();
             drop(eng);
             self.emit(UiCommand::UpdateStatus(StatusInfo {
                 active_identity: None,
+                mcp_server_count: self.settings.mcp.servers.len(),
+                skill_count,
                 ..self.default_status_info()
             }));
             self.emit(UiCommand::SetInputIdentity(None));
@@ -508,6 +511,8 @@ impl Gateway {
                 drop(eng);
                 self.emit(UiCommand::UpdateStatus(StatusInfo {
                     active_identity: Some(arg.to_string()),
+                    mcp_server_count: self.settings.mcp.servers.len(),
+                    skill_count: self.skill_registry.lock().await.len(),
                     ..self.default_status_info()
                 }));
                 self.emit(UiCommand::SetInputIdentity(Some(arg.to_string())));
