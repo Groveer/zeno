@@ -712,8 +712,12 @@ impl App {
 
         let full = frame.area();
 
-        // Calculate dynamic input height based on text line count
-        let text_lines = self.input.line_count() as u16;
+        // Calculate dynamic input height based on visual (wrapped) line count
+        // Prompt icons ( /  / ) have unicode-width=1 (PUA), + trailing space = 2 total.
+        // We use 2, NOT display_width() which overrides PUA→2 for Nerd Font content.
+        const PROMPT_WIDTH: u16 = 2u16;
+        let text_area_width = full.width.saturating_sub(PROMPT_WIDTH);
+        let text_lines = self.input.visual_line_count(text_area_width) as u16;
         let desired_input_height = (Self::MIN_INPUT_HEIGHT + text_lines.saturating_sub(1))
             .min(Self::MAX_INPUT_HEIGHT)
             .min(full.height.saturating_sub(2));
@@ -784,25 +788,12 @@ impl App {
             || self.mode == AppMode::WaitingInput
             || self.mode == AppMode::Running
         {
-            let cursor_col = self.input.cursor_display_col();
-            let prompt_width: u16 = 2u16;
-            let text_width = input_area.width.saturating_sub(prompt_width);
+            const PROMPT_WIDTH: u16 = 2u16;
+            let text_width = input_area.width.saturating_sub(PROMPT_WIDTH);
+            let (visual_row, visual_col) = self.input.visual_cursor_row_col(text_width);
 
-            let h_scroll = if cursor_col >= text_width {
-                cursor_col - text_width + 1
-            } else {
-                0u16
-            };
-
-            let cursor_x = input_area.x + prompt_width + cursor_col.saturating_sub(h_scroll);
-            let cursor_row = self.input.cursor_row() as u16;
-            let content_height = input_area.height.saturating_sub(1);
-            let v_scroll = if cursor_row >= content_height {
-                cursor_row - content_height + 1
-            } else {
-                0u16
-            };
-            let cursor_y = input_area.y + 1 + cursor_row.saturating_sub(v_scroll);
+            let cursor_x = input_area.x + PROMPT_WIDTH + visual_col as u16;
+            let cursor_y = input_area.y + 1 + visual_row as u16;
 
             frame.set_cursor_position((cursor_x, cursor_y));
         }

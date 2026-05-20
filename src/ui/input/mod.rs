@@ -570,13 +570,6 @@ impl InputState {
         self.text.len()
     }
 
-    /// Return the content of a given row (0-indexed), without the trailing \n.
-    fn line_content(&self, row: usize) -> &str {
-        let start = self.line_start_byte(row);
-        let end = self.line_end_byte(row);
-        &self.text[start..end]
-    }
-
     /// Move cursor up one line (multi-line navigation).
     /// Returns false if the cursor was already on the first line (caller should fall through).
     fn move_cursor_up(&mut self) -> bool {
@@ -1065,22 +1058,73 @@ impl InputState {
 
     // helpers
 
-    /// Return the display-column offset of the cursor on the current line (accounts for CJK etc.).
-    pub fn cursor_display_col(&self) -> u16 {
-        let (row, col_byte) = self.cursor_row_col();
-        let line = self.line_content(row);
-        let byte_end = col_byte.min(line.len());
-        crate::utils::display_width(&line[..byte_end]) as u16
-    }
-
-    /// Return the cursor row index (0-based).
-    pub fn cursor_row(&self) -> usize {
-        self.cursor_row_col().0
-    }
-
-    /// Total number of display rows in the text.
+    /// Total number of display rows in the text (physical `\n` lines only).
     pub fn line_count(&self) -> usize {
         self.text.chars().filter(|&c| c == '\n').count() + 1
+    }
+
+    /// Total visual lines accounting for both `\n` and line wrapping at the given width.
+    pub fn visual_line_count(&self, text_area_width: u16) -> usize {
+        let text = &self.text;
+        let mut count = 1usize;
+        let mut display_col: u16 = 0;
+
+        for (byte_idx, c) in text.char_indices() {
+            if c == '\n' {
+                count += 1;
+                display_col = 0;
+                continue;
+            }
+
+            let rest = &text[byte_idx + c.len_utf8()..];
+            let next = rest.chars().next();
+            let cw = crate::utils::char_width(c, next) as u16;
+
+            if display_col + cw > text_area_width && display_col > 0 {
+                count += 1;
+                display_col = cw;
+            } else {
+                display_col += cw;
+            }
+        }
+
+        count
+    }
+
+    /// Return (visual_row, display_col) of the cursor, accounting for line wrapping.
+    /// `text_area_width` is the available width in display columns for text content
+    /// (excluding the prompt prefix).
+    pub fn visual_cursor_row_col(&self, text_area_width: u16) -> (usize, usize) {
+        let cursor = self.cursor.min(self.text.len());
+        let cursor = editor::snap_to_char_boundary(&self.text, cursor);
+
+        let mut visual_row = 0usize;
+        let mut display_col: u16 = 0;
+
+        for (byte_idx, c) in self.text.char_indices() {
+            if byte_idx >= cursor {
+                break;
+            }
+
+            if c == '\n' {
+                visual_row += 1;
+                display_col = 0;
+                continue;
+            }
+
+            let rest = &self.text[byte_idx + c.len_utf8()..];
+            let next = rest.chars().next();
+            let cw = crate::utils::char_width(c, next) as u16;
+
+            if display_col + cw > text_area_width && display_col > 0 {
+                visual_row += 1;
+                display_col = cw;
+            } else {
+                display_col += cw;
+            }
+        }
+
+        (visual_row, display_col as usize)
     }
 
     /// Remove the last image marker from text and images.
@@ -1249,6 +1293,41 @@ impl Component for InputState {
 
 // Rendering
 
+/// Split a single physical line into visual segments that fit within `max_width`.
+fn wrap_physical_line<'a>(line: &'a str, max_width: u16) -> Vec<&'a str> {
+    let full_width = crate::utils::display_width(line) as u16;
+    if full_width <= max_width {
+        return vec![line];
+    }
+
+    let mut segments: Vec<&str> = Vec::new();
+    let mut seg_start: usize = 0;
+    let mut display_col: u16 = 0;
+
+    for (byte_idx, c) in line.char_indices() {
+        let rest = &line[byte_idx + c.len_utf8()..];
+        let next = rest.chars().next();
+        let cw = crate::utils::char_width(c, next) as u16;
+
+        if display_col + cw > max_width && display_col > 0 {
+            segments.push(&line[seg_start..byte_idx]);
+            seg_start = byte_idx;
+            display_col = 0;
+        }
+
+        display_col += cw;
+    }
+
+    // Last segment (or full line if no wrapping occurred)
+    if seg_start < line.len() {
+        segments.push(&line[seg_start..]);
+    } else if seg_start == 0 && line.is_empty() {
+        segments.push(line);
+    }
+
+    segments
+}
+
 /// Render the input area.
 pub fn render(
     frame: &mut Frame,
@@ -1297,57 +1376,26 @@ pub fn render(
     };
 
     // Available width for text (excluding prompt)
-    let prompt_display_width: u16 = crate::utils::display_width(prompt) as u16;
+    // Prompt icons ( /  / ) have unicode-width=1 (PUA), + trailing space = 2 total.
+    // Use 2, NOT display_width() which overrides PUA→2 for Nerd Font text content.
+    let prompt_display_width: u16 = 2u16;
     let text_area_width = content_area.width.saturating_sub(prompt_display_width);
 
-    // Compute horizontal scroll offset for the current line
-    let cursor_col = state.cursor_display_col();
-    let h_scroll = if cursor_col >= text_area_width {
-        cursor_col - text_area_width + 1 // +1 so cursor is at least 1 col from right edge
-    } else {
-        0u16
-    };
-
-    // Compute vertical scroll offset for multi-line
-    let cursor_row = state.cursor_row() as u16;
-    let v_scroll = if cursor_row >= content_area.height {
-        cursor_row - content_area.height + 1
-    } else {
-        0u16
-    };
-
-    // Build lines from text, applying horizontal scroll offset per line
+    // Build lines from text, wrapping each physical line to fit text_area_width
     let all_lines: Vec<&str> = display_text.split('\n').collect();
-    let lines: Vec<Line> = all_lines
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i >= v_scroll as usize)
-        .map(|(i, line_str)| {
-            let scrolled = if h_scroll > 0 {
-                // Need to skip h_scroll display columns
-                let mut col: u16 = 0;
-                let mut byte_start = 0;
-                let chars: Vec<char> = line_str.chars().collect();
-                for (ci, (byte_idx, c)) in line_str.char_indices().enumerate() {
-                    let next = chars.get(ci + 1).copied();
-                    let w = crate::utils::char_width(c, next) as u16;
-                    if col + w > h_scroll {
-                        byte_start = byte_idx;
-                        break;
-                    }
-                    col += w;
-                    byte_start = byte_idx + c.len_utf8();
-                }
-                &line_str[byte_start..]
-            } else {
-                *line_str
-            };
+    let mut lines: Vec<Line> = Vec::new();
+    let mut is_first_visual_line = true;
 
-            // Build spans for this line, splitting by image markers
-            let spans = build_line_spans(scrolled, text_color);
+    for line_str in &all_lines {
+        let visual_segments = wrap_physical_line(line_str, text_area_width);
 
-            // Only first line gets the prompt prefix; continuation lines are indented
-            let mut prefix_spans: Vec<Span<'static>> = if i == 0 {
+        for segment in &visual_segments {
+            // Build spans for this segment, splitting by image markers
+            let spans = build_line_spans(segment, text_color);
+
+            // First visual line gets the prompt prefix; continuation lines are indented
+            let mut prefix_spans: Vec<Span<'static>> = if is_first_visual_line {
+                is_first_visual_line = false;
                 vec![Span::styled(prompt, Style::new().fg(theme::ACCENT_DIM))]
             } else {
                 vec![Span::styled(
@@ -1356,12 +1404,11 @@ pub fn render(
                 )]
             };
             prefix_spans.extend(spans);
-            Line::from(prefix_spans)
-        })
-        .collect();
+            lines.push(Line::from(prefix_spans));
+        }
+    }
 
     // Append ghost text (inline autosuggestion) to the last line
-    let mut lines = lines;
     if let Some(ref ghost) = state.ghost_text
         && !ghost.is_empty()
         && let Some(last_line) = lines.last_mut()
