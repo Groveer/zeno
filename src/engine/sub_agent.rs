@@ -19,13 +19,15 @@
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use crate::api::client::SupportsStreamingMessages;
 use crate::api::types::{ContentBlock, Role, StreamEvent, Usage};
 use crate::engine::messages::ConversationHistory;
+use crate::engine::tui_events::EngineEvent;
+use crate::permissions::checker;
 use crate::tools::base::{SubAgentDeps, ToolContext};
 
 // ---------------------------------------------------------------------------
@@ -44,8 +46,11 @@ const BUILTIN_SUBAGENT_BLOCKED_TOOLS: &[&str] = &[
     "skill_manage",  // No modification to skill system
 ];
 
-/// Built-in default tools available to sub-agents (read-only safe set).
-const BUILTIN_SUBAGENT_TOOLS: &[&str] = &["read", "glob", "grep", "web_search", "web_fetch"];
+/// Built-in default tools available to sub-agents.
+/// `bash` is included because sub-agents now have permission checking
+/// (via `check_sub_agent_permission`) — dangerous commands require user confirmation.
+const BUILTIN_SUBAGENT_TOOLS: &[&str] =
+    &["read", "glob", "grep", "web_search", "web_fetch", "bash"];
 
 // ---------------------------------------------------------------------------
 // Types
@@ -708,17 +713,39 @@ async fn run_single_sub_agent(
 
             let input = serde_json::from_str::<Value>(&tu.input_json)
                 .unwrap_or(Value::Object(Default::default()));
-            let result = match deps.tool_registry.execute(&tu.name, input, &ctx).await {
-                Ok(output) => ContentBlock::ToolResult {
-                    tool_use_id: tu.id.clone(),
-                    content: output,
-                    is_error: None,
-                },
-                Err(e) => ContentBlock::ToolResult {
-                    tool_use_id: tu.id.clone(),
-                    content: format!("Tool execution error: {}", e),
-                    is_error: Some(true),
-                },
+
+            // --- Permission check (TUI-aware) ---
+            // Sub-agents now check permission and can prompt the user via the
+            // TUI event channel (if available). This prevents dangerous tool
+            // calls (destructive bash, writes outside CWD, etc.) from executing
+            // silently — the same protection the main agent has.
+            let cwd = ctx.get_cwd();
+            let permission_result = check_sub_agent_permission(deps, &tu.name, &input, &cwd).await;
+
+            let result = match permission_result {
+                Ok(()) => {
+                    // Permission granted — execute the tool
+                    match deps.tool_registry.execute(&tu.name, input, &ctx).await {
+                        Ok(output) => ContentBlock::ToolResult {
+                            tool_use_id: tu.id.clone(),
+                            content: output,
+                            is_error: None,
+                        },
+                        Err(e) => ContentBlock::ToolResult {
+                            tool_use_id: tu.id.clone(),
+                            content: format!("Tool execution error: {}", e),
+                            is_error: Some(true),
+                        },
+                    }
+                }
+                Err(reason) => {
+                    // Permission denied — return error to the sub-agent's LLM
+                    ContentBlock::ToolResult {
+                        tool_use_id: tu.id.clone(),
+                        content: format!("Permission denied: {}", reason),
+                        is_error: Some(true),
+                    }
+                }
             };
 
             let result_bytes = match &result {
@@ -1028,4 +1055,154 @@ async fn create_subagent_client(
 
     let client = (deps.client_factory)(&provider_name, &effective_config);
     Ok((client, model))
+}
+
+// ---------------------------------------------------------------------------
+// Permission check for sub-agents
+// ---------------------------------------------------------------------------
+
+/// Check whether a tool call is permitted in a sub-agent context.
+///
+/// Returns `Ok(())` if the tool is allowed. Returns `Err(reason)` if
+/// the tool is denied or requires user confirmation.
+///
+/// Permission flow:
+/// 1. If `permission_allow_all` is set (session-wide), auto-allow.
+/// 2. Call `checker::evaluate_permission()` with the tool's input.
+/// 3. If confirmation is required, send `EngineEvent::PermissionAsk` to
+///    the TUI via `deps.tui_event_sender` and wait for the user's response.
+/// 4. If the user answers "y" → allow. "a"/"all" → allow + set session flag.
+///    Any other answer → deny.
+///
+/// If no `tui_event_sender` is available (e.g. background review),
+/// permission-required operations are auto-denied (safe default).
+async fn check_sub_agent_permission(
+    deps: &SubAgentDeps,
+    tool_name: &str,
+    tool_input: &Value,
+    cwd: &Path,
+) -> Result<(), String> {
+    // Check read-only status from the tool registry
+    let is_read_only = deps
+        .tool_registry
+        .get(tool_name)
+        .map(|t| t.as_ref().is_read_only(tool_input))
+        .unwrap_or(false);
+
+    // 1. Check session-wide "allow all" flag
+    if let Some(ref allow_all) = deps.permission_allow_all
+        && let Ok(guard) = allow_all.lock()
+        && *guard
+    {
+        tracing::debug!(
+            tool_name = %tool_name,
+            permission_decision = "allowed",
+            reason = "session_allow_all",
+            agent = "sub",
+            "Sub-agent tool permitted by session-wide allow-all"
+        );
+        return Ok(());
+    }
+
+    let mode = &deps.settings.permissions;
+    let resolved = checker::resolve_paths(tool_name, tool_input, cwd);
+    let decision = checker::evaluate_permission(
+        mode,
+        &deps.settings.trusted_paths,
+        tool_name,
+        is_read_only,
+        resolved.file_path.as_deref(),
+        resolved.command.as_deref(),
+        cwd,
+        &deps.settings.tools.ask_commands,
+        &deps.settings.safe_paths,
+        &deps.settings.tools.denied_commands,
+    );
+
+    if decision.allowed {
+        tracing::debug!(
+            tool_name = %tool_name,
+            permission_decision = "allowed",
+            mode = ?mode,
+            is_read_only = is_read_only,
+            agent = "sub",
+            "Sub-agent tool permitted"
+        );
+        return Ok(());
+    }
+
+    if !decision.requires_confirmation {
+        // Auto-denied by policy (denied_commands, deny mode, etc.)
+        tracing::warn!(
+            tool_name = %tool_name,
+            permission_decision = "denied",
+            mode = ?mode,
+            reason = %decision.reason,
+            agent = "sub",
+            "Sub-agent tool denied by policy"
+        );
+        return Err(decision.reason);
+    }
+
+    // Requires user confirmation — send through TUI event channel
+    if let Some(ref sender) = deps.tui_event_sender {
+        let display_detail = crate::engine::query::format_permission_detail(
+            tool_name,
+            &serde_json::to_string(tool_input).unwrap_or_default(),
+        );
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let response_tx = Arc::new(Mutex::new(Some(tx)));
+
+        let _ = sender.send(EngineEvent::PermissionAsk {
+            tool_name: tool_name.to_string(),
+            reason: decision.reason.clone(),
+            input: display_detail,
+            response_tx,
+        });
+
+        match rx.await {
+            Ok(response) => {
+                let r = response.trim().to_lowercase();
+                let allowed = r == "y" || r == "yes" || r == "a" || r == "all" || r == "always";
+
+                tracing::info!(
+                    tool_name = %tool_name,
+                    permission_decision = if allowed { "user_allowed" } else { "user_denied" },
+                    mode = "ask",
+                    user_response = %r,
+                    agent = "sub",
+                    "User responded to sub-agent permission prompt"
+                );
+
+                // If user said "allow all", set the session-wide flag
+                if allowed && matches!(r.as_str(), "a" | "all" | "always") {
+                    if let Some(ref allow_all) = deps.permission_allow_all
+                        && let Ok(mut guard) = allow_all.lock()
+                    {
+                        *guard = true;
+                    }
+                    let _ = sender.send(EngineEvent::Status(
+                        "All permissions granted for this session (from sub-agent).".into(),
+                    ));
+                }
+
+                if allowed {
+                    Ok(())
+                } else {
+                    Err("User denied permission for this tool call".to_string())
+                }
+            }
+            Err(_) => Err("Permission prompt was cancelled".to_string()),
+        }
+    } else {
+        // No TUI available — auto-deny to be safe
+        tracing::warn!(
+            tool_name = %tool_name,
+            permission_decision = "denied",
+            reason = "no_tui_sender",
+            agent = "sub",
+            "Sub-agent tool denied because no TUI event sender is available"
+        );
+        Err("Permission required but no UI available to ask. Configure the engine with a TUI sender.".to_string())
+    }
 }

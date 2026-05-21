@@ -75,11 +75,11 @@ impl Tool for DelegateTaskTool {
                         },
                         "tools": {
                             "type": "array",
-                            "description": "Additional tools beyond the defaults (read, glob, grep, web_search, web_fetch) that the sub-agent may use. \
-                                Allowed: bash, write, edit. Blocked: delegate_task, ask_user, memory, skill_manage.",
+                            "description": "Additional tools beyond the defaults (read, glob, grep, web_search, web_fetch, bash) that the sub-agent may use. \
+                                Allowed: write, edit. Blocked: delegate_task, ask_user, memory, skill_manage.",
                             "items": {
                                 "type": "string",
-                                "enum": ["bash", "write", "edit"]
+                                "enum": ["write", "edit"]
                             }
                         }
                     },

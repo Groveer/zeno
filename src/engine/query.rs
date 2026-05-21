@@ -215,7 +215,7 @@ fn parse_tool_input(input_json: &str) -> Result<Value, String> {
 
 /// Fallback: parse tool input, returning an empty object on failure.
 /// Use only in non-critical paths (display, history, parallel safety).
-fn parse_tool_input_or_empty(input_json: &str) -> Value {
+pub(crate) fn parse_tool_input_or_empty(input_json: &str) -> Value {
     parse_tool_input(input_json).unwrap_or_default()
 }
 
@@ -1109,7 +1109,9 @@ impl QueryEngine {
                     progress_tx,
                     self.settings.delegation.clone(),
                     self.sub_agent_cost_tracker.clone(),
-                );
+                )
+                .with_tui_event_sender(sender.clone())
+                .with_permission_allow_all(self.permission_allow_all.clone());
                 ctx = ctx.with_sub_agent_deps(deps);
             }
             let mut tool_results: Vec<ContentBlock> = Vec::new();
@@ -1370,6 +1372,8 @@ impl QueryEngine {
             self.sub_agent_cost_tracker.clone(),
         )
         .with_write_origin(crate::skills::provenance::BACKGROUND_REVIEW);
+        // Background review intentionally does NOT receive tui_event_sender
+        // or permission_allow_all — it should never prompt the user.
 
         crate::engine::review::spawn_background_review(
             deps,
@@ -2284,7 +2288,7 @@ fn summarize_tool_output(tool_name: &str, output: &str, _input_json: &str) -> St
 /// Unlike `format_tool_input_summary` (which is a compact one-liner),
 /// this shows the key parameters so the user can make an informed decision.
 /// Commands are NOT truncated — the user must see the full command to judge safety.
-fn format_permission_detail(tool_name: &str, input_json: &str) -> String {
+pub(crate) fn format_permission_detail(tool_name: &str, input_json: &str) -> String {
     let input = parse_tool_input_or_empty(input_json);
 
     match tool_name {

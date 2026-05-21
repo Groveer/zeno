@@ -83,6 +83,15 @@ pub struct SubAgentDeps {
     /// Write origin for skill_manage provenance tracking.
     /// "foreground" (default) = user-directed, "background_review" = agent-autonomous.
     pub write_origin: String,
+    /// TUI event sender for routing permission prompts (and other UI events)
+    /// from sub-agents to the terminal UI. When `None`, permission prompts
+    /// that require user confirmation will be auto-denied (safe default).
+    pub tui_event_sender:
+        Option<tokio::sync::mpsc::UnboundedSender<crate::engine::tui_events::EngineEvent>>,
+    /// Shared "allow all" flag from the parent engine — when the user answers
+    /// "allow all" (y/a) to a permission prompt, this flag is set so subsequent
+    /// tools in both the main agent AND sub-agents are auto-approved.
+    pub permission_allow_all: Option<Arc<Mutex<bool>>>,
 }
 
 impl std::fmt::Debug for SubAgentDeps {
@@ -90,6 +99,11 @@ impl std::fmt::Debug for SubAgentDeps {
         f.debug_struct("SubAgentDeps")
             .field("settings", &self.settings)
             .field("write_origin", &self.write_origin)
+            .field("has_tui_sender", &self.tui_event_sender.is_some())
+            .field(
+                "has_permission_allow_all",
+                &self.permission_allow_all.is_some(),
+            )
             .finish()
     }
 }
@@ -116,6 +130,8 @@ impl SubAgentDeps {
             delegation_config,
             cost_tracker,
             write_origin: String::from("foreground"),
+            tui_event_sender: None,
+            permission_allow_all: None,
         }
     }
 
@@ -123,6 +139,24 @@ impl SubAgentDeps {
     /// Use `"background_review"` for autonomous background tasks.
     pub fn with_write_origin(mut self, origin: &str) -> Self {
         self.write_origin = origin.to_string();
+        self
+    }
+
+    /// Attach a TUI event sender so sub-agents can prompt the user for
+    /// permission confirmation. Without this, permission-required operations
+    /// are auto-denied.
+    pub fn with_tui_event_sender(
+        mut self,
+        sender: tokio::sync::mpsc::UnboundedSender<crate::engine::tui_events::EngineEvent>,
+    ) -> Self {
+        self.tui_event_sender = Some(sender);
+        self
+    }
+
+    /// Attach the parent engine's "allow all" flag so sub-agents respect
+    /// the user's session-wide blanket permission.
+    pub fn with_permission_allow_all(mut self, flag: Arc<Mutex<bool>>) -> Self {
+        self.permission_allow_all = Some(flag);
         self
     }
 }
