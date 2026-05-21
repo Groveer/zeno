@@ -70,13 +70,30 @@ impl Tool for GlobTool {
         }
 
         let pattern_owned = pattern.to_string();
-        let base_dir_display = base_dir.display().to_string();
         let skip_dirs = self.skip_dirs.clone();
+        // Capture raw path parameter value so output paths are CWD-relative
+        // (making them directly usable by the `read` tool).
+        let path_prefix = arguments
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        // Use the raw path argument for display when available, so error messages
+        // and result paths use the same CWD-relative format.
+        let base_dir_display = path_prefix
+            .as_deref()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| base_dir.display().to_string());
 
         // Offload blocking filesystem traversal to tokio's blocking thread pool
         // so we don't starve the async worker threads.
         let matches = tokio::task::spawn_blocking(move || {
-            glob_sync(&base_dir, &pattern_owned, limit, &skip_dirs)
+            glob_sync(
+                &base_dir,
+                &pattern_owned,
+                limit,
+                &skip_dirs,
+                path_prefix.as_deref(),
+            )
         })
         .await
         .map_err(|e| ToolError::Execution(format!("Task join error: {}", e)))?;
@@ -258,6 +275,7 @@ fn glob_sync(
     pattern: &str,
     limit: usize,
     extra_skip_dirs: &[String],
+    path_prefix: Option<&str>,
 ) -> Vec<String> {
     let has_doublestar = pattern.contains("**");
     let mut matches = Vec::new();
@@ -293,7 +311,12 @@ fn glob_sync(
         }
 
         if glob_matches(pattern, &rel_str) {
-            matches.push(format!("{}", relative.display()));
+            let display_path = if let Some(prefix) = path_prefix {
+                format!("{}/{}", prefix, relative.display())
+            } else {
+                format!("{}", relative.display())
+            };
+            matches.push(display_path);
         }
     }
 

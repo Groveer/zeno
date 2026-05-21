@@ -94,8 +94,19 @@ impl Tool for GrepTool {
 
         let pattern_owned = pattern.to_string();
         let include_owned = include.map(String::from);
-        let base_path_display = base_path.display().to_string();
         let skip_dirs = self.skip_dirs.clone();
+        // Capture raw path parameter value so output paths are CWD-relative
+        // (making them directly usable by the `read` tool).
+        let path_prefix = arguments
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        // Use the raw path argument for display when available, so error messages
+        // and result paths use the same CWD-relative format.
+        let base_path_display = path_prefix
+            .as_deref()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| base_path.display().to_string());
 
         // Offload all blocking filesystem I/O (WalkDir traversal, file reads,
         // regex matching) to tokio's blocking thread pool so we don't starve
@@ -109,6 +120,7 @@ impl Tool for GrepTool {
                 context,
                 limit,
                 &skip_dirs,
+                path_prefix.as_deref(),
             )
         })
         .await
@@ -142,6 +154,7 @@ fn grep_sync(
     context: usize,
     limit: usize,
     extra_skip_dirs: &[String],
+    path_prefix: Option<&str>,
 ) -> (usize, Vec<String>) {
     // Max number of file entries to scan (prevent OOM on huge repos)
     const MAX_FILE_ENTRIES: usize = 10_000;
@@ -201,7 +214,12 @@ fn grep_sync(
 
             let lines: Vec<&str> = content.lines().collect();
             let relative = path.strip_prefix(base_path).unwrap_or(&path);
-            let file_key = relative.to_string_lossy().to_string();
+            let mut file_key = relative.to_string_lossy().to_string();
+            // Prepend the raw `path` parameter so paths are CWD-relative
+            // (directly usable by `read` tool).
+            if let Some(prefix) = path_prefix {
+                file_key = format!("{}/{}", prefix, file_key);
+            }
             let file_count = file_match_counts.entry(file_key.clone()).or_insert(0);
 
             for (line_idx, line) in lines.iter().enumerate() {
@@ -379,7 +397,7 @@ mod tests {
         let path = dir.join("_test_zeno_grep_sync.txt");
         std::fs::write(&path, "hello world\nfoo bar\nbaz qux\n").unwrap();
         let re = regex::Regex::new("foo").unwrap();
-        let (count, results) = grep_sync(&path, &re, "foo", None, 0, 10, &[]);
+        let (count, results) = grep_sync(&path, &re, "foo", None, 0, 10, &[], None);
         assert_eq!(count, 1);
         assert!(results[0].contains("foo bar"));
         std::fs::remove_file(&path).unwrap();
@@ -391,7 +409,7 @@ mod tests {
         let path = dir.join("_test_zeno_grep_sync_none.txt");
         std::fs::write(&path, "hello world\n").unwrap();
         let re = regex::Regex::new("zzz").unwrap();
-        let (count, results) = grep_sync(&path, &re, "zzz", None, 0, 10, &[]);
+        let (count, results) = grep_sync(&path, &re, "zzz", None, 0, 10, &[], None);
         assert_eq!(count, 0);
         assert!(results.is_empty());
         std::fs::remove_file(&path).unwrap();
