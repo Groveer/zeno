@@ -39,6 +39,7 @@ use crate::engine::tui_events::EngineEvent;
 use crate::hooks::executor::HookExecutor;
 use crate::hooks::types::HookEvent;
 use crate::permissions::checker;
+use crate::prompts::system_prompt::MEMORY_GUIDANCE;
 use crate::tools::base::{SubAgentDeps, ToolContext};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
@@ -565,6 +566,22 @@ impl QueryEngine {
                     if !prefetch_text.is_empty() {
                         effective_system_prompt.push_str("\n\n## Relevant Memory\n\n");
                         effective_system_prompt.push_str(&prefetch_text);
+                    }
+                }
+
+                // --- Live built-in memory: inject up-to-date memory snapshot ---
+                // Memory is stored as a frozen snapshot during session init; mid-session
+                // writes via the `memory` tool update the snapshot via refresh_snapshot().
+                // This block re-reads the live snapshot each turn so the LLM always sees
+                // the latest entries without requiring an explicit memory(action='read').
+                if let Some(ref mm) = self.memory_manager {
+                    let mm = mm.lock().await;
+                    let live_block = mm.build_system_prompt();
+                    if !live_block.is_empty() {
+                        effective_system_prompt.push_str("\n\n");
+                        effective_system_prompt.push_str(MEMORY_GUIDANCE);
+                        effective_system_prompt.push_str("\n\n");
+                        effective_system_prompt.push_str(&live_block);
                     }
                 }
 

@@ -222,6 +222,15 @@ impl MemoryStore {
         (self.memory_entries.len(), self.user_entries.len())
     }
 
+    /// Refresh the frozen snapshot from live entries after a mid-session mutation.
+    /// This ensures the next turn's system prompt reflects the latest memory state.
+    pub fn refresh_snapshot(&mut self) {
+        self.system_prompt_snapshot = [
+            self.render_block("memory", &self.memory_entries),
+            self.render_block("user", &self.user_entries),
+        ];
+    }
+
     /// Return the memory directory path (for logging/display).
     pub fn dir(&self) -> &Path {
         self.memory_path.parent().unwrap_or(&self.memory_path)
@@ -292,6 +301,7 @@ impl MemoryStore {
 
         self.entries_for_mut(target).push(content.to_string());
         self.save_to_disk(target);
+        self.refresh_snapshot();
 
         self.success_response(target, Some("Entry added."))
     }
@@ -363,6 +373,7 @@ impl MemoryStore {
 
         self.entries_for_mut(target)[idx] = new_content.to_string();
         self.save_to_disk(target);
+        self.refresh_snapshot();
 
         self.success_response(target, Some("Entry replaced."))
     }
@@ -406,6 +417,7 @@ impl MemoryStore {
         let idx = matches[0].0;
         self.entries_for_mut(target).remove(idx);
         self.save_to_disk(target);
+        self.refresh_snapshot();
 
         self.success_response(target, Some("Entry removed."))
     }
@@ -855,13 +867,16 @@ mod tests {
             assert!(snapshot.is_some());
             assert!(snapshot.as_ref().unwrap().contains("test note"));
 
-            // Add more after snapshot — should NOT change snapshot
+            // Add more after snapshot — snapshot IS refreshed (our fix)
             store.add("memory", "another note");
             let snapshot2 = store
                 .format_for_system_prompt("memory")
                 .map(|s| s.to_string());
-            assert_eq!(snapshot, snapshot2);
-            assert!(!snapshot2.as_ref().unwrap().contains("another note"));
+            assert!(snapshot2.is_some());
+            assert!(
+                snapshot2.as_ref().unwrap().contains("another note"),
+                "snapshot should be refreshed after mid-session add"
+            );
         }
     }
 

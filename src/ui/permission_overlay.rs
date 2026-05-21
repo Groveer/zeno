@@ -192,7 +192,15 @@ impl PermissionOverlay {
             {
                 return QueueAction::AskUserActive;
             }
-            self.active = None;
+
+            // Send "y" for the currently active Permission request before clearing it.
+            // Without this, the oneshot::Sender is silently dropped, the engine's
+            // rx.await returns Err(RecvError), and the tool is wrongly denied.
+            if let Some(active) = self.active.take()
+                && let Some(tx) = active.response_tx.lock().unwrap().take()
+            {
+                let _ = tx.send("y".into());
+            }
             self.render_dirty = true;
             return QueueAction::AllApproved;
         }

@@ -374,8 +374,6 @@ async fn main() -> anyhow::Result<()> {
     let mcp_server_count = settings.mcp.servers.len();
     let skill_count = skill_registry.lock().await.len();
 
-    // Build system prompt — use memory manager for built-in + external provider content
-    let memory_prompt = memory_manager.lock().await.build_system_prompt();
     let skill_registry_guard = skill_registry.lock().await;
     let active_identity_config = settings
         .active_identity
@@ -385,12 +383,11 @@ async fn main() -> anyhow::Result<()> {
         &cwd,
         &registry,
         &skill_registry_guard,
-        Some(&memory_prompt),
+        None::<&str>,
         &settings.role,
         active_identity_config,
     );
     drop(skill_registry_guard);
-    drop(memory_prompt);
     tracing::debug!(prompt_len = system_prompt.len(), "System prompt assembled");
 
     let registry = Arc::new(registry); // wrap for shared access by sub-agents
