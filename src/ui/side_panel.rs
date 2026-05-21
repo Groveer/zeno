@@ -17,8 +17,9 @@ use tokio::sync::Mutex;
 
 use crate::gateway::UiCommand;
 use crate::tools::todo::TodoState;
+use crate::ui::wrap::word_wrap;
+use crate::utils::padded_emoji;
 
-use super::app::word_wrap;
 use super::component::Component;
 use super::theme;
 
@@ -186,12 +187,13 @@ impl SidePanel {
                 "in_progress" => ("", theme::ACCENT),
                 _ => ("○", theme::TEXT),
             };
+            let padded_cb = padded_emoji(checkbox);
             let wrapped = word_wrap(&task.description, desc_width);
             for (i, line) in wrapped.iter().enumerate() {
                 if i == 0 {
                     lines.push(Line::from(vec![
                         Span::styled(
-                            format!(" {} ", checkbox),
+                            padded_cb.clone(),
                             Style::new().fg(color).add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(line.clone(), Style::new().fg(color)),

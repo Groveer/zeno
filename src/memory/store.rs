@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use fs2::FileExt;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Character delimiter between entries.
 const ENTRY_DELIMITER: &str = "\n§\n";
@@ -619,15 +620,24 @@ fn error_response(msg: &str) -> serde_json::Value {
     serde_json::json!({ "success": false, "error": msg })
 }
 
-/// Truncate a string to at most `max_chars` Unicode characters, appending "..." if truncated.
-/// This is char-boundary safe — avoids panic on multi-byte UTF-8 (CJK, emoji).
-fn truncate_preview(s: &str, max_chars: usize) -> String {
-    let preview: String = s.chars().take(max_chars).collect();
-    if s.len() > preview.len() {
-        format!("{}...", preview)
-    } else {
-        preview
+/// Truncate a string to at most `max_graphemes` grapheme clusters, appending "..." if truncated.
+/// Grapheme-safe — avoids breaking multi-codepoint emoji (ZWJ sequences, flags, etc.).
+fn truncate_preview(s: &str, max_graphemes: usize) -> String {
+    if max_graphemes == 0 || s.is_empty() {
+        return String::new();
     }
+    let grapheme_indices: Vec<(usize, &str)> = s.grapheme_indices(true).collect();
+    if grapheme_indices.len() <= max_graphemes {
+        return s.to_string();
+    }
+    // Reserve at least 1 grapheme for "...".
+    let content_graphemes = if max_graphemes >= 3 {
+        max_graphemes - 3
+    } else {
+        max_graphemes.saturating_sub(1)
+    };
+    let truncate_idx = grapheme_indices[content_graphemes].0;
+    format!("{}...", &s[..truncate_idx])
 }
 
 // ---------------------------------------------------------------------------
@@ -1031,17 +1041,27 @@ mod tests {
         assert!(cjk.len() > 80); // many bytes
         let preview = truncate_preview(cjk, 10);
         assert!(preview.ends_with("..."));
-        // The preview should have exactly 10 chars + "..."
-        assert_eq!(preview.chars().count(), 13); // 10 CJK chars + 3 dots
+        // Grapheme-aware: max_graphemes=10, reserve 3 for "..." → 7 graphemes + "..." = 10 chars total
+        assert_eq!(preview.chars().count(), 10); // 7 CJK chars + 3 dots
 
         // Short string: no truncation
         let short = "hello";
         assert_eq!(truncate_preview(short, 80), short);
 
-        // Emoji test: multi-byte chars should not panic
+        // Emoji test: multi-byte chars should not panic, and should not split graphemes
         let emoji = "";
         let preview = truncate_preview(emoji, 5);
         assert!(preview.ends_with("..."));
+        // max_graphemes=5, reserve 3 for "..." → 2 graphemes + "..." = 5 chars total
+        assert_eq!(preview.chars().count(), 5);
+
+        // ZWJ emoji sequence: should never be split mid-sequence
+        let family = "👨‍👩‍👧‍👦"; // 1 grapheme cluster, 7 codepoints
+        let preview = truncate_preview(family, 1);
+        assert_eq!(preview, family); // fits entirely, no truncation
+
+        let preview_one = truncate_preview(family, 0);
+        assert_eq!(preview_one, ""); // max=0 → empty string
     }
 
     #[test]

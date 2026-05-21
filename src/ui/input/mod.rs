@@ -220,7 +220,7 @@ impl InputState {
                 ..
             } => {
                 if self.cursor > 0 {
-                    self.cursor = self.prev_char_boundary();
+                    self.cursor = self.prev_grapheme_boundary();
                 }
                 self.update_popup();
                 true
@@ -231,7 +231,7 @@ impl InputState {
                 ..
             } => {
                 if self.cursor < self.text.len() {
-                    self.cursor = self.next_char_boundary();
+                    self.cursor = self.next_grapheme_boundary();
                 }
                 self.update_popup();
                 true
@@ -343,7 +343,7 @@ impl InputState {
                 ..
             } => {
                 if self.cursor > 0 {
-                    let prev = self.prev_char_boundary();
+                    let prev = self.prev_grapheme_boundary();
                     // If deleting an image marker, remove the corresponding image data
                     if self.text[prev..self.cursor] == *"\u{FFFC}" {
                         let idx = self.text[..prev]
@@ -386,7 +386,7 @@ impl InputState {
                             self.images.remove(idx);
                         }
                     }
-                    let next = self.next_char_boundary();
+                    let next = self.next_grapheme_boundary();
                     self.text.drain(self.cursor..next);
                 }
                 self.update_popup();
@@ -707,7 +707,7 @@ impl InputState {
             } => {
                 self.popup = None;
                 if self.cursor > 0 {
-                    let prev = self.prev_char_boundary();
+                    let prev = self.prev_grapheme_boundary();
                     self.text.drain(prev..self.cursor);
                     self.cursor = prev;
                 }
@@ -1143,7 +1143,7 @@ impl InputState {
 
     fn insert_char(&mut self, c: char) {
         self.text.insert(self.cursor, c);
-        self.cursor = self.next_char_boundary();
+        self.cursor = self.next_grapheme_boundary();
     }
 
     /// Insert an image marker at the cursor position.
@@ -1216,12 +1216,12 @@ impl InputState {
         self.sync_images();
     }
 
-    fn prev_char_boundary(&self) -> usize {
-        editor::prev_char_boundary(&self.text, self.cursor)
+    fn prev_grapheme_boundary(&self) -> usize {
+        editor::prev_grapheme_boundary(&self.text, self.cursor)
     }
 
-    fn next_char_boundary(&self) -> usize {
-        editor::next_char_boundary(&self.text, self.cursor)
+    fn next_grapheme_boundary(&self) -> usize {
+        editor::next_grapheme_boundary(&self.text, self.cursor)
     }
 
     /// Switch identity and reload history scope.

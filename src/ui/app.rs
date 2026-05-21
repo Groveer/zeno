@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use crate::engine::query_engine::steer_into_slot;
 use crate::gateway::UiCommand;
 use crate::tools::todo::TodoState;
-use crate::utils::truncate;
+use crate::utils::{padded_emoji, truncate};
 
 use super::component::Component as ComponentTrait;
 use super::component::safe_view;
@@ -30,88 +30,6 @@ use super::side_panel::SidePanel;
 use super::status_bar::{AppMode, StatusInfo};
 use super::theme;
 use super::title_bar::TitleBar;
-
-/// Word-wrap text to fit within `max_width` terminal columns, respecting
-/// multi-byte UTF-8 and emoji width. Breaks at word boundaries when possible.
-/// Returns a list of wrapped line strings.
-pub fn word_wrap(s: &str, max_width: usize) -> Vec<String> {
-    if max_width == 0 || s.is_empty() {
-        return if s.is_empty() {
-            vec![]
-        } else {
-            vec![String::new()]
-        };
-    }
-    let mut lines: Vec<String> = Vec::new();
-    for line in s.lines() {
-        wrap_single_line(line, max_width, &mut lines);
-    }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
-}
-
-/// Wrap a single logical line (no embedded newlines) into multiple physical lines.
-fn wrap_single_line(line: &str, max_width: usize, out: &mut Vec<String>) {
-    let mut current = String::new();
-    let mut current_width: usize = 0;
-
-    for word in line.split_whitespace() {
-        let word_w = crate::utils::display_width(word);
-
-        // If the word itself exceeds max_width, break it character-by-character
-        if word_w > max_width {
-            // Flush what we have so far
-            if !current.is_empty() {
-                out.push(std::mem::take(&mut current));
-                current_width = 0;
-            }
-            // Break the long word character by character
-            let mut chars = word.chars().peekable();
-            while let Some(ch) = chars.next() {
-                let next = chars.peek().copied();
-                let cw = crate::utils::char_width(ch, next);
-                if current_width + cw > max_width && !current.is_empty() {
-                    out.push(std::mem::take(&mut current));
-                    current_width = 0;
-                }
-                current.push(ch);
-                current_width += cw;
-                // Skip VS16 if consumed as part of emoji sequence
-                if next == Some('\u{FE0F}')
-                    && let Some(vs16) = chars.next()
-                {
-                    current.push(vs16);
-                }
-            }
-            continue;
-        }
-
-        // Factor in the space separator between words
-        let sep_w = if current.is_empty() { 0usize } else { 1 };
-        let new_width = current_width + sep_w + word_w;
-
-        if new_width <= max_width {
-            if !current.is_empty() {
-                current.push(' ');
-            }
-            current.push_str(word);
-            current_width = new_width;
-        } else {
-            // Word doesn't fit on current line — start a new line
-            if !current.is_empty() {
-                out.push(std::mem::take(&mut current));
-            }
-            current.push_str(word);
-            current_width = word_w;
-        }
-    }
-
-    if !current.is_empty() {
-        out.push(current);
-    }
-}
 
 /// The main TUI application state.
 pub struct App {
@@ -551,7 +469,8 @@ impl App {
                 self.steer_queue.push(text.clone());
                 self.status.steer_count = self.steer_queue.len();
                 self.output.push(OutputSegment::Status(format!(
-                    "\u{f054} Steered: {} (will be injected on next turn)",
+                    "{} Steered: {} (will be injected on next turn)",
+                    padded_emoji("\u{f054}"),
                     truncate(&text, 60)
                 )));
             }

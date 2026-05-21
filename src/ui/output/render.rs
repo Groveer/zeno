@@ -17,7 +17,7 @@ use crate::ui::theme;
 
 /// Render the output area.
 ///
-/// Uses a write-through cache: `segment_to_lines()` + `wrap_line()` are
+/// Uses a write-through cache: `segment_to_lines()` + `wrap::wrap_line()` are
 /// re-done only when segments change or the terminal width changes.
 pub fn render(frame: &mut Frame, area: Rect, state: &mut OutputState) {
     let visible_height = area.height as usize;

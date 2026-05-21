@@ -495,15 +495,14 @@ fn parse_openai_nonstreaming(
         None => return Box::pin(stream::iter(events)),
     };
 
-    // Reasoning content (Gemini proxy puts it in message, same as delta)
+    // Reasoning content (Gemini proxy puts it in message, same as delta).
+    // If `reasoning_content` is present and non-empty, emit it and skip `content`
+    // to avoid duplicating thinking text as normal output (see streaming path).
     if let Some(rc) = message.get("reasoning_content").and_then(|c| c.as_str())
         && !rc.is_empty()
     {
         events.push(Ok(StreamEvent::ReasoningDelta(rc.to_string())));
-    }
-
-    // Text content
-    if let Some(content) = message.get("content").and_then(|c| c.as_str())
+    } else if let Some(content) = message.get("content").and_then(|c| c.as_str())
         && !content.is_empty()
     {
         events.push(Ok(StreamEvent::TextDelta(content.to_string())));
@@ -757,19 +756,21 @@ fn parse_openai_chunk(
         }
     }
 
-    // Reasoning content (DeepSeek/Kimi/Gemini thinking mode) —
-    // check before text content so both are emitted when co-occurring
-    // in the same chunk (reasoning is logically first).
+    // Reasoning content (DeepSeek/Kimi/Gemini thinking mode).
+    // Some providers (e.g. certain DeepSeek proxies / OpenRouter) send the
+    // same thinking text in BOTH `reasoning_content` AND `content` in the
+    // same chunk for backward compatibility.  If `reasoning_content` is
+    // present, skip the `content` field to avoid duplicating thinking text
+    // as normal output (it will appear only as the dimmed rolling line).
     if let Some(rc) = delta.get("reasoning_content").and_then(|c| c.as_str())
         && !rc.is_empty()
     {
         events.push(Ok(StreamEvent::ReasoningDelta(rc.to_string())));
-    }
-
-    // Text content
-    if let Some(content) = delta.get("content").and_then(|c| c.as_str())
+    } else if let Some(content) = delta.get("content").and_then(|c| c.as_str())
         && !content.is_empty()
     {
+        // Normal text content — only emitted when there's no reasoning
+        // in this chunk, so thinking text is never duplicated as output.
         events.push(Ok(StreamEvent::TextDelta(content.to_string())));
     }
 

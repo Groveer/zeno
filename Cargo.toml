@@ -58,6 +58,7 @@ ratatui = "0.30"
 crossterm = "0.29"
 syntect = "5"
 unicode-width = "0.2"
+unicode-segmentation = "1"
 pulldown-cmark = "0.13"
 tokio-util = { version = "0.7.18", features = ["rt"] }
 

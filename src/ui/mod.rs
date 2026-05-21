@@ -8,3 +8,4 @@ pub mod side_panel;
 pub mod status_bar;
 pub mod theme;
 pub mod title_bar;
+pub mod wrap;
