@@ -34,6 +34,8 @@ pub struct OutputState {
     cache_gen: u64,
     /// Last width used to build cache; if width changes, we rebuild.
     cache_width: usize,
+    /// Per-agent current status line (task_index → latest activity).
+    sub_agent_lines: std::collections::BTreeMap<usize, String>,
 }
 
 impl OutputState {
@@ -45,6 +47,7 @@ impl OutputState {
             cached_lines: Vec::new(),
             cache_gen: 0,
             cache_width: 0,
+            sub_agent_lines: std::collections::BTreeMap::new(),
         }
     }
 
@@ -69,6 +72,7 @@ impl OutputState {
         self.scroll = 0;
         self.auto_scroll = true;
         self.cached_lines.clear();
+        self.sub_agent_lines.clear();
         self.bump_gen();
     }
 
@@ -175,22 +179,36 @@ impl Component for OutputState {
             }
             // Sub-agent events
             UiCommand::SubAgentStarted { summary } => {
+                // New batch — clear old rolling state for a fresh start
+                if !self.sub_agent_lines.is_empty() {
+                    self.sub_agent_lines.clear();
+                    self.segments
+                        .retain(|s| !matches!(s, OutputSegment::SubAgentProgress(_)));
+                }
                 self.push(OutputSegment::Status(summary));
             }
-            UiCommand::SubAgentThought(text) => {
-                self.push(OutputSegment::Status(format!(" sub-agent: {}", text)));
-            }
-            UiCommand::SubAgentToolStart { label } => {
-                self.push(OutputSegment::ToolExecuting(label));
-            }
-            UiCommand::SubAgentToolEnd { label } => {
-                self.push(OutputSegment::ToolComplete(label));
-            }
-            UiCommand::SubAgentStatus { message } => {
-                self.push(OutputSegment::Status(message));
-            }
-            UiCommand::SubAgentCompleted { summary } => {
-                self.push(OutputSegment::Status(summary));
+            UiCommand::SubAgentProgress { task_index, line } => {
+                // One line per agent — replace the latest activity
+                self.sub_agent_lines.insert(task_index, line);
+
+                // Rebuild segment: sorted by index, one line each
+                let all_lines: Vec<String> = self
+                    .sub_agent_lines
+                    .iter()
+                    .map(|(idx, l)| format!("#{}: {}", idx, l))
+                    .collect();
+
+                if let Some(OutputSegment::SubAgentProgress(buf)) = self
+                    .segments
+                    .iter_mut()
+                    .rev()
+                    .find(|s| matches!(s, OutputSegment::SubAgentProgress(_)))
+                {
+                    *buf = all_lines;
+                    self.mark_dirty();
+                } else {
+                    self.push(OutputSegment::SubAgentProgress(all_lines));
+                }
             }
             _ => {} // Non-output commands are ignored
         }

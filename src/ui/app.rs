@@ -610,11 +610,7 @@ impl App {
             | UiCommand::ScrollToBottom
             | UiCommand::ShowStatus(_)
             | UiCommand::SubAgentStarted { .. }
-            | UiCommand::SubAgentThought(_)
-            | UiCommand::SubAgentToolStart { .. }
-            | UiCommand::SubAgentToolEnd { .. }
-            | UiCommand::SubAgentStatus { .. }
-            | UiCommand::SubAgentCompleted { .. } => {
+            | UiCommand::SubAgentProgress { .. } => {
                 self.output.update(cmd);
             }
 

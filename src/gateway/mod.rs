@@ -119,22 +119,15 @@ pub enum UiCommand {
     SubAgentStarted {
         summary: String,
     },
-    SubAgentThought(String),
-    SubAgentToolStart {
-        label: String,
+    /// Rolling sub-agent progress line (replaces in-place, last 2 per agent).
+    SubAgentProgress {
+        task_index: usize,
+        line: String,
     },
-    SubAgentToolEnd {
-        label: String,
-    },
-    /// Steer slot update.
+
+    // ── Steer ────────────────────────────────────────────
     SteerSlot {
         steer_count: usize,
-    },
-    SubAgentStatus {
-        message: String,
-    },
-    SubAgentCompleted {
-        summary: String,
     },
 
     // ── InputPanel ───────────────────────────────────────

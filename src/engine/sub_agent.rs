@@ -166,7 +166,12 @@ pub async fn run_delegated_task(
         &deps.delegation_config.default_tools,
         &deps.delegation_config.blocked_tools,
     );
-    run_single_sub_agent(
+    let _ = progress_tx.send(SubAgentEvent::Started {
+        task_index: 0,
+        goal: goal.clone(),
+        tools: allowed_tools.clone(),
+    });
+    let result = run_single_sub_agent(
         deps,
         cwd,
         0,
@@ -176,7 +181,12 @@ pub async fn run_delegated_task(
         &cancel,
         &progress_tx,
     )
-    .await
+    .await;
+    let _ = progress_tx.send(SubAgentEvent::Completed {
+        task_index: 0,
+        result: result.clone(),
+    });
+    result
 }
 
 /// Run multiple delegated tasks in parallel (batch mode).
@@ -365,11 +375,6 @@ async fn run_single_sub_agent(
     progress_tx: &tokio::sync::mpsc::UnboundedSender<SubAgentEvent>,
 ) -> SubAgentResult {
     let start = std::time::Instant::now();
-
-    let _ = progress_tx.send(SubAgentEvent::Status {
-        task_index,
-        message: "Starting...".into(),
-    });
 
     // Build sub-agent system prompt
     let system_prompt = build_subagent_system_prompt(goal, context, allowed_tools);
@@ -757,11 +762,6 @@ async fn run_single_sub_agent(
     // Extract summary from the final assistant text
     let summary = extract_subagent_summary(&history);
     let duration = start.elapsed().as_secs_f64();
-
-    let _ = progress_tx.send(SubAgentEvent::Status {
-        task_index,
-        message: format!("Completed in {:.1}s, {} API calls", duration, turn),
-    });
 
     // Record sub-agent token usage into shared cost tracker
     if (total_input_tokens > 0 || total_output_tokens > 0)

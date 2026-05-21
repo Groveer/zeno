@@ -35,6 +35,8 @@ pub enum OutputSegment {
     Diff(String),
     /// Status message.
     Status(String),
+    /// Rolling sub-agent progress — shows current activity per agent, updates in-place.
+    SubAgentProgress(Vec<String>),
     /// Permission prompt — requires user confirmation (y/n/a).
     /// Rendered with distinct styling to stand out from normal output.
     PermissionPrompt {
@@ -300,6 +302,19 @@ pub fn segment_to_lines(seg: &OutputSegment) -> Vec<Line<'static>> {
                 )));
             }
             lines
+        }
+        OutputSegment::SubAgentProgress(activities) => {
+            // Rolling display: show the current activity per agent.
+            // Styled with a distinct dim accent to differentiate from regular status.
+            activities
+                .iter()
+                .map(|line| {
+                    Line::from(vec![
+                        Span::styled(" \u{F0DA} ", Style::new().fg(theme::ACCENT_DIM)),
+                        Span::styled(line.clone(), Style::new().fg(theme::TEXT_DIM)),
+                    ])
+                })
+                .collect()
         }
         OutputSegment::PermissionPrompt {
             tool_name,

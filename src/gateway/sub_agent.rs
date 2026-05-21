@@ -45,10 +45,10 @@ impl Gateway {
                 if short.trim().is_empty() {
                     vec![]
                 } else {
-                    vec![UiCommand::SubAgentThought(format!(
-                        "#{}: {}",
-                        task_index, short,
-                    ))]
+                    vec![UiCommand::SubAgentProgress {
+                        task_index,
+                        line: short.into_owned(),
+                    }]
                 }
             }
             SubAgentEvent::ToolStarted {
@@ -61,27 +61,34 @@ impl Gateway {
                 } else {
                     format!("{} ({})", tool, input_summary)
                 };
-                vec![UiCommand::SubAgentToolStart {
-                    label: format!("sub-agent #{}: {}", task_index, display),
+                vec![UiCommand::SubAgentProgress {
+                    task_index,
+                    line: display,
                 }]
             }
             SubAgentEvent::ToolCompleted {
                 task_index,
                 tool,
-                result_bytes,
                 is_error,
+                ..
             } => {
-                let icon = if is_error { "✗" } else { "✓" };
-                vec![UiCommand::SubAgentToolEnd {
-                    label: format!("#{} {} {} ({} bytes)", task_index, icon, tool, result_bytes),
-                }]
+                if is_error {
+                    vec![UiCommand::SubAgentProgress {
+                        task_index,
+                        line: format!("{} failed", tool),
+                    }]
+                } else {
+                    // Successful tool completion is too noisy — skip.
+                    vec![]
+                }
             }
             SubAgentEvent::Status {
                 task_index,
                 message,
             } => {
-                vec![UiCommand::SubAgentStatus {
-                    message: format!("sub-agent #{}: {}", task_index, message),
+                vec![UiCommand::SubAgentProgress {
+                    task_index,
+                    line: message,
                 }]
             }
             SubAgentEvent::Completed { task_index, result } => {
@@ -92,14 +99,11 @@ impl Gateway {
                 } else {
                     "completed"
                 };
-                vec![UiCommand::SubAgentCompleted {
-                    summary: format!(
-                        "sub-agent #{} {} ({} calls, {:.1}s, {} chars)",
-                        task_index,
-                        status,
-                        result.api_calls,
-                        result.duration_seconds,
-                        result.summary.len(),
+                vec![UiCommand::SubAgentProgress {
+                    task_index,
+                    line: format!(
+                        "{} ({} calls, {:.1}s)",
+                        status, result.api_calls, result.duration_seconds,
                     ),
                 }]
             }
