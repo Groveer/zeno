@@ -720,6 +720,81 @@ async fn main() -> anyhow::Result<()> {
 
             if summary != "No lifecycle transitions needed." {
                 tracing::info!(summary = %summary, "Curator lifecycle maintenance");
+
+                // ⚠️ Curator may have archived/moved skill directories on disk,
+                // but the in-memory registry still holds entries for them.
+                // Reload the registry to keep counts accurate.
+                let user_skills_dir = skills::loader::get_user_skills_dir();
+                let (new_skills, new_categories) =
+                    skills::loader::load_skills_from_dirs(&[user_skills_dir], "user");
+
+                let mut reg = skill_registry.lock().await;
+
+                // Keep bundled skills (non-user source) from current registry
+                let bundled: Vec<_> = reg
+                    .list_skills()
+                    .into_iter()
+                    .filter(|s| s.source != "user")
+                    .cloned()
+                    .collect();
+
+                // Rebuild: bundled skills + fresh user skills
+                let mut all_skills = bundled.clone();
+                all_skills.extend(new_skills);
+
+                // Start with fresh user categories, then merge bundled categories
+                let mut all_categories = new_categories.clone();
+                for (cat, info) in reg.categories() {
+                    // Only include bundled skill names from old registry categories
+                    let bundled_names: Vec<String> = info
+                        .skill_names
+                        .iter()
+                        .filter(|n| bundled.iter().any(|s| &s.name == *n))
+                        .cloned()
+                        .collect();
+                    if bundled_names.is_empty() {
+                        continue;
+                    }
+                    let entry = all_categories.entry(cat.clone()).or_insert_with(|| {
+                        skills::types::CategoryInfo {
+                            description: info.description.clone(),
+                            skill_names: Vec::new(),
+                        }
+                    });
+                    for name in bundled_names {
+                        if !entry.skill_names.contains(&name) {
+                            entry.skill_names.push(name);
+                        }
+                    }
+                }
+
+                *reg = skills::registry::SkillRegistry::from_parts(all_skills, all_categories);
+
+                // Update disk cache to match
+                if let Err(e) = skills::index_cache::write_cache(
+                    &skill_dirs,
+                    &reg.list_skills().into_iter().cloned().collect::<Vec<_>>(),
+                    reg.categories(),
+                ) {
+                    tracing::warn!(error = %e, "Failed to write skills cache after curator lifecycle");
+                }
+
+                // Update status bar with corrected count
+                let new_count = reg.len();
+                drop(reg);
+                app.set_status(ui::status_bar::StatusInfo {
+                    model: model.to_string(),
+                    provider: provider_name.to_string(),
+                    total_tokens: 0,
+                    context_window: 0,
+                    turn_count: 0,
+                    mcp_server_count,
+                    skill_count: new_count,
+                    mode: ui::status_bar::AppMode::Idle,
+                    steer_count: 0,
+                    active_identity: settings.active_identity.clone(),
+                    tick: 0,
+                });
             }
         }
 
