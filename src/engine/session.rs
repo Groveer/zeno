@@ -274,17 +274,15 @@ pub fn load_session_by_id(id: &str) -> Option<SessionData> {
     load_session_from_path(&path)
 }
 
-/// Load the most recent session from the sessions directory.
+/// Load the most recent session that matches the given identity.
 ///
-/// Loads the newest session by index, then falls back to the session file.
-pub fn load_latest_session() -> Option<SessionData> {
+/// When `identity` is `None`, returns the globally latest session.
+/// When set, filters the index by identity first.
+pub fn load_latest_session_for_identity(identity: Option<&str>) -> Option<SessionData> {
     let index = load_session_index();
-    if let Some(newest) = index.first()
-        && let Some(data) = load_session_by_id(&newest.id)
-    {
-        return Some(data);
-    }
-    None
+    let filtered = filter_index_by_identity(&index, identity);
+    let newest = filtered.first()?;
+    load_session_by_id(&newest.id)
 }
 
 /// Internal helper: deserialize a session from a file path.

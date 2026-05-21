@@ -550,8 +550,10 @@ async fn main() -> anyhow::Result<()> {
 
     let mut terminal = ui::app::init_terminal()?;
 
-    // Auto-detect saved session on startup
-    if let Some(saved) = engine::session::load_latest_session() {
+    // Auto-detect saved session on startup (filtered by active identity)
+    if let Some(saved) =
+        engine::session::load_latest_session_for_identity(settings.active_identity.as_deref())
+    {
         let one_liner = engine::session::build_one_liner(&saved);
         app.output.push(ui::output::OutputSegment::Status(
             "󰄘 Previous session found. Type `/restore` to restore it.".to_string(),
@@ -856,15 +858,16 @@ async fn main() -> anyhow::Result<()> {
     // Session persistence (after terminal restore)
     // Capture engine state for session persistence (with timeout).
     // If the engine is still busy, we proceed with whatever we can get.
-    let (entries, total_tokens, current_model) =
+    let (entries, total_tokens, current_model, saved_identity) =
         match tokio::time::timeout(std::time::Duration::from_secs(3), engine.lock()).await {
             Ok(eng) => {
                 let entries = eng.history.entries_raw().to_vec();
                 let tokens = eng.cost_tracker.total_tokens();
                 let m = eng.model.clone();
-                (entries, tokens, m)
+                let id = eng.active_identity.clone();
+                (entries, tokens, m, id)
             }
-            Err(_) => (Vec::new(), 0, String::new()),
+            Err(_) => (Vec::new(), 0, String::new(), None),
         };
 
     // Notify memory provider of session end (with timeout)
@@ -910,7 +913,7 @@ async fn main() -> anyhow::Result<()> {
             summary,
             final_response,
             title,
-            identity: settings.active_identity.clone(),
+            identity: saved_identity,
         };
         engine::session::save_session(&data);
     } else {
