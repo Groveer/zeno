@@ -56,7 +56,7 @@ pub fn build(
     };
 
     let mut parts = vec![
-        core_identity(&effective_role),
+        core_identity(&effective_role, !skill_registry.is_empty()),
         guidelines(&effective_role),
         tools_block(&tool_registry.names()),
     ];
@@ -95,7 +95,7 @@ pub fn build(
 /// When the user provides a custom identity, it replaces the *identity portion*
 /// (who you are), but the functional guidance (how to use Tools & Skills) is always
 /// appended so the model never loses awareness of its capabilities.
-fn core_identity(role: &RoleConfig) -> String {
+fn core_identity(role: &RoleConfig, has_skills: bool) -> String {
     let identity_text = match role.identity {
         Some(ref custom) => custom.trim().to_string(),
         None => "You are zeno (zn), a helpful AI assistant.\n\n\
@@ -105,10 +105,16 @@ analyzing information, and more. When tools are available, use them proactively 
     };
 
     // Functional guidance is always present — never overridden by custom identity.
-    let functional = "\
-**Tools** are executable capabilities (bash, read, etc.) that you call via function calling.\n\
+    let mut functional = "\
+**Tools** are executable capabilities (bash, read, etc.) that you call via function calling."
+        .to_string();
+    if has_skills {
+        functional.push_str(
+            "\n\
 **Skills** are knowledge guides organized by category. Use `skill_list` to browse a category\n\
-and `skill_view` to load a specific skill's full instructions.";
+and `skill_view` to load a specific skill's full instructions.",
+        );
+    }
 
     format!("{}\n\n{}", identity_text.trim(), functional)
 }
@@ -255,13 +261,10 @@ fn tools_block(names: &[&str]) -> String {
 // Skill loading workflow — the driver for 3-tier progressive disclosure
 // ---------------------------------------------------------------------------
 
-/// Skill loading workflow for categorized (multi-category) skill layouts.
-///
-/// This is the Tier 0 "driver" that tells the LLM how to use the progressive
-/// disclosure system. It replaces the old `always_inject` mechanism where a
-/// `skill-usage-workflow` skill was injected in full. The key behavioral
-/// instructions are preserved but inlined directly into Tier 0.
-const SKILL_LOADING_WORKFLOW_CATEGORIZED: &str = "\
+/// Single template for the 3-tier progressive disclosure workflow.
+/// Three placeholders ({tier0}, {tier1}, {if_unsure}) are filled based on
+/// whether skills are organized into categories or flat.
+const SKILL_LOADING_WORKFLOW: &str = "\
 ### Loading Workflow (MANDATORY)
 
 You **MUST** load relevant skills before attempting non-trivial tasks.
@@ -272,32 +275,15 @@ skill_view(name=\"<skill-name>\")\
 ```\
 Then follow the loaded instructions before proceeding. Do NOT start the task without loading the skill — skills contain critical steps, pitfalls, and established workflows that prevent mistakes.
 
-**3-Tier Progressive Disclosure** — When the matching skill is not obvious:\
-1. **Tier 0** — Scan the category list above. Identify the most relevant category.\
-2. **Tier 1** — Call `skill_list(category=<cat>)` to browse skills in that category.\
-3. **Tier 2** — Call `skill_view(name=<skill>)` to load the full instructions. Follow them.\
-If unsure which category fits, call `skill_list` on multiple candidates.
+**3-Tier Progressive Disclosure** — When no skill name directly matches the task (most cases), you **MUST** follow these steps before starting any work:\
+1. **Tier 0** — {tier0}\
+2. **Tier 1** — {tier1}\
+3. **Tier 2** — Call `skill_view(name=<skill>)` to load the selected skill's full instructions.\
+Do NOT start the task until you have loaded the relevant skill. Skill names alone are NOT enough to determine relevance — descriptions are required for informed selection.\
+{if_unsure}
 
-**When to skip** — Only for trivial tasks (greetings, simple questions, connectivity tests).\
-For any coding task — even if it seems simple — load the relevant skill first.\
-Err on the side of loading — it is always better to have context you don't need than to miss critical steps, pitfalls, or established workflows.";
-
-/// Skill loading workflow for flat (single-category) skill layouts.
-const SKILL_LOADING_WORKFLOW_FLAT: &str = "\
-### Loading Workflow (MANDATORY)
-
-You **MUST** load relevant skills before attempting non-trivial tasks.
-
-**Direct match** — When the task clearly matches a skill name listed above:\
-```\
-skill_view(name=\"<skill-name>\")\
-```\
-Then follow the loaded instructions before proceeding.
-
-**If unsure** — Call `skill_list` to browse, then `skill_view(name=...)` to load.
-
-**When to skip** — Only for trivial tasks (greetings, simple questions, connectivity tests).\
-For any coding task — even if it seems simple — load the relevant skill first.\
+**When to skip** — Only for trivial interactions (greetings, simple questions, connectivity tests).\
+For everything else — even tasks that seem simple — follow the 3-Tier process above to load the relevant skill first.\
 Err on the side of loading — it is always better to have context you don't need than to miss critical steps, pitfalls, or established workflows.";
 
 /// Format the skills section for the system prompt.
@@ -324,7 +310,10 @@ fn skills_block(registry: &SkillRegistry) -> String {
             lines.push(format!("- **{}**: {}", s.name, desc));
         }
         parts.push(lines.join("\n"));
-        parts.push(SKILL_LOADING_WORKFLOW_FLAT.to_string());
+        parts.push(SKILL_LOADING_WORKFLOW
+            .replace("{tier0}", "Scan the skill list above. Identify potentially relevant skills.")
+            .replace("{tier1}", "Call `skill_list` to see full descriptions of relevant skills and narrow down to the best match.")
+            .replace("{if_unsure}", "If still unsure, call `skill_list` again to compare descriptions of other skills."));
         return parts.join("\n\n");
     }
 
@@ -352,7 +341,10 @@ fn skills_block(registry: &SkillRegistry) -> String {
     }
 
     parts.push(lines.join("\n"));
-    parts.push(SKILL_LOADING_WORKFLOW_CATEGORIZED.to_string());
+    parts.push(SKILL_LOADING_WORKFLOW
+        .replace("{tier0}", "Scan the category list above. Identify the most relevant category.")
+        .replace("{tier1}", "Call `skill_list(category=<cat>)` to see each skill's full description within that category.")
+        .replace("{if_unsure}", "If unsure which category fits, call `skill_list` on multiple candidates."));
 
     parts.join("\n\n")
 }
@@ -553,7 +545,7 @@ mod tests {
 
     #[test]
     fn test_core_identity_no_skill_usage() {
-        let id = core_identity(&RoleConfig::default());
+        let id = core_identity(&RoleConfig::default(), false);
         assert!(id.contains("zeno"));
         // Skill usage workflow should NOT be in core identity
         assert!(!id.contains("MANDATORY"));
@@ -562,7 +554,7 @@ mod tests {
 
     #[test]
     fn test_core_identity_no_reading() {
-        let id = core_identity(&RoleConfig::default());
+        let id = core_identity(&RoleConfig::default(), false);
         // File reading strategy should NOT be in core identity
         assert!(!id.contains("File Reading Strategy"));
         assert!(!id.contains("offset"));
@@ -574,7 +566,7 @@ mod tests {
             identity: Some("You are Alice, a helpful research assistant.".into()),
             guidelines: None,
         };
-        let id = core_identity(&role);
+        let id = core_identity(&role, true);
         assert!(id.contains("Alice"));
         assert!(!id.contains("zeno"));
         // Functional guidance must always be present, even with custom identity
@@ -606,7 +598,7 @@ mod tests {
     #[test]
     fn test_default_role_uses_builtin() {
         let role = RoleConfig::default();
-        assert!(core_identity(&role).contains("zeno"));
+        assert!(core_identity(&role, false).contains("zeno"));
         assert!(guidelines(&role).contains("Be concise"));
     }
 
