@@ -4260,6 +4260,28 @@ dependencies = [
  "urlencoding",
  "walkdir",
  "which 7.0.3",
+ "zeno-protocol",
+ "zeno-tools",
+]
+
+[[package]]
+name = "zeno-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "zeno-tools"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

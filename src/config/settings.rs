@@ -4,6 +4,9 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::permissions::execpolicy::ExecRule;
+use crate::sandbox::SandboxConfig;
+
 // ---------------------------------------------------------------------------
 // Top-level settings
 // ---------------------------------------------------------------------------
@@ -66,6 +69,18 @@ pub struct Settings {
     /// Set via `zn.set_identity("name")` or `ZENO_IDENTITY` env var.
     #[serde(default)]
     pub active_identity: Option<String>,
+    /// Sandbox configuration for secure command execution.
+    /// Default: no sandbox (SandboxMode::None).
+    /// Configured via `zn.sandbox({ mode = "workspace_write" })` in init.lua.
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
+    /// Execution policy rules for bash command authorization.
+    /// Rules are evaluated in order — first match wins.
+    /// Configured per-rule in init.lua:
+    ///   zn.exec_policy({ pattern = "^git push", action = "ask",
+    ///                     reason = "Confirm pushes" })
+    #[serde(default)]
+    pub exec_policy_rules: Vec<ExecRule>,
 }
 
 impl Default for Settings {
@@ -95,6 +110,8 @@ impl Default for Settings {
             safe_paths: Vec::new(),
             identities: HashMap::new(),
             active_identity: None,
+            sandbox: SandboxConfig::default(),
+            exec_policy_rules: Vec::new(),
         }
     }
 }

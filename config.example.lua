@@ -133,35 +133,55 @@ zn.tools({
 })
 
 -- ═══════════════════════════════════════════════
--- Commands
+-- Execution Policy (Command-level Permissions)
 -- ═══════════════════════════════════════════════
 --
--- Command permission rules (merged with built-in defaults).
--- Uses `zn.commands()` — separate from `zn.tools()` for cleaner semantics.
+-- Fine-grained rule-based authorization for bash commands.
+-- Each rule matches the command text via prefix matching (or regex when
+-- `is_regex = true`). Rules are evaluated first-match-wins.
 --
---   allow  — auto-allowed without permission prompt (read-only commands)
---   ask    — always require user confirmation in "ask" mode (destructive)
---   deny   — always blocked, even in "allow" mode
+-- Actions:
+--   Auto  — auto-allowed, no permission prompt
+--   Ask   — requires user confirmation in "ask" permission mode
+--   Deny  — blocked unconditionally, even in "allow" mode
 --
--- All use **substring matching** (like wildcards), so:
---   "terraform"     → matches any command with "terraform" anywhere
---   "git rebase"    → matches "git rebase -i", "git rebase --continue", etc.
---   "kubectl"       → matches "kubectl delete pod", "kubectl drain node", etc.
+-- Built-in rules cover ~90 common commands (ls, cat, git status → Auto;
+-- rm, sudo, dd → Ask; rm -rf / → Deny). User rules are evaluated first,
+-- so they can override any built-in rule.
 --
--- zn.commands({
---   allow = {
---     "pnpm list",
---     "just --list",
---     "make -n",
---     "docker ps",
---   },
---   ask = {
---     "git checkout",
---     "git restore",
---     "git commit",
---   },
---   -- deny = { "some-dangerous-cmd" },
--- })
+-- For regex rules, prefix matching with ^ ensures full command match:
+--   { pattern = "^cargo publish", action = "ask", is_regex = true }
+--
+-- zn.exec_policy({ pattern = "^git push", action = "ask",
+--                  reason = "Confirm pushes to remote" })
+-- zn.exec_policy({ pattern = "cargo test", action = "auto",
+--                  reason = "Running tests is safe" })
+-- zn.exec_policy({ pattern = "^sudo rm", action = "deny",
+--                  reason = "No sudo rm allowed" })
+-- zn.exec_policy({ pattern = "docker compose up", action = "ask",
+--                  reason = "Starting containers needs confirmation",
+--                  is_regex = true })
+
+-- ═══════════════════════════════════════════════
+-- Sandbox (Secure Command Execution)
+-- ═══════════════════════════════════════════════
+--
+-- Sandbox provides process-level isolation for bash commands using
+-- Bubblewrap (bwrap) on Linux. Commands are wrapped with filesystem
+-- and network restrictions.
+--
+-- Modes:
+--   "none" (default)      — no isolation, commands run normally
+--   "workspace_write"     — root filesystem read-only, cwd + /tmp writable
+--   "strict"              — only explicitly allowed paths, network disabled
+--
+-- Additional paths that should be writable/readable when sandboxed:
+--   writable_paths = { "/data" }
+--   readable_paths = { "/usr/local/share" }
+--
+-- zn.sandbox({ mode = "workspace_write" })
+-- zn.sandbox({ mode = "strict", writable_paths = { "/workspace" },
+--              readable_paths = { "/data/reference" } })
 
 -- ═══════════════════════════════════════════════
 -- Web Search

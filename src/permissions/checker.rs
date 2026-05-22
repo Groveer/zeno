@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::permissions::execpolicy::ExecPolicy;
+
 use crate::config::settings::PermissionMode;
 
 // ---------------------------------------------------------------------------
@@ -139,108 +141,6 @@ fn is_in_safe_zone(path: &Path, cwd: &Path, extra_safe_paths: &[String]) -> bool
     is_in_tmp_dir(path, extra_safe_paths)
 }
 
-/// Destructive shell commands that require user confirmation.
-/// These are operations that can cause irreversible data loss.
-const DESTRUCTIVE_PREFIXES: &[&str] = &[
-    "rm ",
-    "rm\t",
-    "rm -", // rm with any flags (including -r, -f, -rf, etc.)
-    "rmdir ",
-    "mkfs.",
-    "dd ",
-    "fdisk ",
-    "sudo ",
-    "doas ",
-    "su ",
-    "chmod ",
-    "chown ",
-    "chgrp ",
-    "kill ",
-    "pkill ",
-    "killall ",
-    "shutdown",
-    "reboot",
-    "halt ",
-    "poweroff",
-    "init ",
-    "systemctl stop",
-    "systemctl disable",
-    "systemctl mask",
-    "apt remove",
-    "apt purge",
-    "apt autoremove",
-    "yum remove",
-    "yum erase",
-    "dnf remove",
-    "pacman -R",
-    "brew uninstall",
-    "brew remove",
-    "pip uninstall",
-    "pip remove",
-    "npm uninstall",
-    "cargo uninstall",
-];
-
-/// Dangerous git subcommands that can cause data loss.
-const DESTRUCTIVE_GIT_PATTERNS: &[&str] = &[
-    "git reset --hard",
-    "git push --force",
-    "git push -f ",
-    "git push --delete",
-    "git clean -f",
-    "git checkout -- ", // discard unstaged changes
-    "git restore .",    // discard all unstaged changes
-    "git branch -D",    // force delete branch
-    "git tag -d",       // delete tag
-    "git submodule deinit",
-];
-
-/// Check if a bash command is destructive (irreversible / dangerous).
-/// Returns true only for commands that can cause data loss or system damage.
-/// Handles compound commands (e.g. `git status && rm file`) by splitting on
-/// shell operators and checking each sub-command.
-///
-/// Built-in `DESTRUCTIVE_PREFIXES` are matched with `starts_with` (safe for
-/// `rm`, `sudo`, etc.). Built-in `DESTRUCTIVE_GIT_PATTERNS` and user
-/// `extra_commands` are matched with `contains`, giving a wildcard-like effect
-/// — any substring match triggers the destructive check.
-fn is_destructive_command(cmd: &str, extra_commands: &[String]) -> bool {
-    let trimmed = cmd.trim();
-
-    // Split on shell operators to handle compound commands
-    // e.g. `git status && rm file.txt` → ["git status ", "rm file.txt"]
-    let sub_commands = split_shell_operators(trimmed);
-
-    for sub_cmd in &sub_commands {
-        let sub = sub_cmd.trim();
-        if sub.is_empty() {
-            continue;
-        }
-
-        // Check built-in destructive prefixes (starts_with — precise match)
-        for prefix in DESTRUCTIVE_PREFIXES.iter().copied() {
-            if sub.starts_with(prefix) {
-                return true;
-            }
-        }
-
-        // Check built-in destructive git patterns + user extra commands
-        // (contains — substring/wildcard match, so "git reset --hard"
-        //  matches any git command involving a hard reset)
-        for pattern in DESTRUCTIVE_GIT_PATTERNS
-            .iter()
-            .copied()
-            .chain(extra_commands.iter().map(|s| s.as_str()))
-        {
-            if sub.contains(pattern) {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
 /// Recursively extract sub-commands from shell command substitution constructs.
 ///
 /// Handles:
@@ -307,42 +207,6 @@ fn extract_subshell_commands(cmd: &str) -> Vec<String> {
 
     result
 }
-/// Split a shell command on common operators: &&, ||, ;, |
-/// Returns the sub-command strings (preserving original spacing).
-fn split_shell_operators(cmd: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let chars: Vec<char> = cmd.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
-
-    while i < len {
-        if i + 1 < len {
-            let two = format!("{}{}", chars[i], chars[i + 1]);
-            if two == "&&" || two == "||" {
-                parts.push(current.clone());
-                current.clear();
-                i += 2;
-                continue;
-            }
-        }
-        match chars[i] {
-            ';' | '|' => {
-                parts.push(current.clone());
-                current.clear();
-            }
-            _ => {
-                current.push(chars[i]);
-            }
-        }
-        i += 1;
-    }
-    if !current.trim().is_empty() {
-        parts.push(current);
-    }
-
-    parts
-}
 fn extract_command(tool_input: &Value) -> Option<String> {
     tool_input
         .as_object()
@@ -374,9 +238,9 @@ pub fn evaluate_permission(
     file_path: Option<&Path>,
     command: Option<&str>,
     cwd: &Path,
-    extra_destructive_commands: &[String],
     safe_paths: &[String],
     denied_commands: &[String],
+    exec_policy: Option<&ExecPolicy>,
 ) -> PermissionDecision {
     // 0. Trusted path check — bypasses all other checks
     if let Some(path) = file_path
@@ -486,36 +350,19 @@ pub fn evaluate_permission(
                 };
             }
 
-            // --- Bash commands: relaxed check ---
+            // --- Bash commands: security check + ExecPolicy ---
             if tool_name == "bash"
                 && let Some(cmd) = command
             {
-                // Check for shell injection / expansion that could bypass checks nested sub-commands
+                // ── Security layer: shell expansion / path traversal ──────────
+                // These are semantic analyses that simple pattern matching can't replace.
+                // ExecPolicy prefix matching would miss `ls $(rm -rf /)`, so we check
+                // shell expansion first, then delegate to ExecPolicy for the sub-commands.
                 let has_shell_expansion = cmd.contains('$') || cmd.contains('`');
                 let has_path_traversal = cmd.contains("../")
                     || cmd.contains("/..")
                     || cmd.ends_with("..")
                     || cmd.contains("..\\");
-
-                // Destructive commands always require confirmation
-                if is_destructive_command(cmd, extra_destructive_commands) {
-                    tracing::info!(
-                        tool_name = "bash",
-                        permission_decision = "requires_confirmation",
-                        mode = "ask",
-                        reason = "destructive_command",
-                        command = %cmd,
-                        "Destructive bash command requires confirmation"
-                    );
-                    return PermissionDecision {
-                        allowed: false,
-                        requires_confirmation: true,
-                        reason: format!(
-                            "Destructive command requires confirmation: {}",
-                            cmd.chars().take(80).collect::<String>()
-                        ),
-                    };
-                }
 
                 // Path traversal: requires confirmation (can't safely resolve statically)
                 if has_path_traversal {
@@ -534,35 +381,46 @@ pub fn evaluate_permission(
                     };
                 }
 
-                // Shell expansion: parse and check $(...) / `...` sub-commands
+                // Shell expansion: extract and check $(...) / `...` sub-commands
                 if has_shell_expansion {
                     let subcommands = extract_subshell_commands(cmd);
-                    // Check each subshell sub-command for destructive/sensitive operations
                     for sub in &subcommands {
                         let sub_trimmed = sub.trim();
                         if sub_trimmed.is_empty() {
                             continue;
                         }
-                        // Run the same destructive check on the sub-command
-                        if is_destructive_command(sub_trimmed, extra_destructive_commands) {
-                            tracing::info!(
-                                tool_name = "bash",
-                                permission_decision = "requires_confirmation",
-                                mode = "ask",
-                                reason = "destructive_in_subshell",
-                                command = %cmd,
-                                subshell_cmd = %sub_trimmed,
-                                "Subshell sub-command is destructive"
-                            );
-                            return PermissionDecision {
-                                allowed: false,
-                                requires_confirmation: true,
-                                reason: format!(
-                                    "Subshell sub-command '{}' is destructive",
-                                    sub_trimmed.chars().take(60).collect::<String>()
-                                ),
-                            };
+
+                        // Check sub-command against ExecPolicy first
+                        if let Some(policy) = exec_policy
+                            && let Some(decision) = policy.evaluate(sub_trimmed)
+                        {
+                            match decision.action {
+                                // Deny in a subshell → Ask for confirmation (can't be
+                                // 100% sure the sub-command actually runs)
+                                crate::permissions::execpolicy::PolicyAction::Deny
+                                | crate::permissions::execpolicy::PolicyAction::Ask => {
+                                    tracing::info!(
+                                        tool_name = "bash",
+                                        permission_decision = "requires_confirmation",
+                                        reason = "destructive_in_subshell",
+                                        command = %cmd,
+                                        subshell_cmd = %sub_trimmed,
+                                        "Subshell sub-command is destructive"
+                                    );
+                                    return PermissionDecision {
+                                        allowed: false,
+                                        requires_confirmation: true,
+                                        reason: format!(
+                                            "Subshell sub-command '{}' is destructive",
+                                            sub_trimmed.chars().take(60).collect::<String>()
+                                        ),
+                                    };
+                                }
+                                // Auto → sub-command is safe, continue checking
+                                crate::permissions::execpolicy::PolicyAction::Auto => {}
+                            }
                         }
+
                         // Check sensitive paths in the sub-command
                         let sensitive_prefixes = [
                             "/etc/",
@@ -631,7 +489,7 @@ pub fn evaluate_permission(
                         }
                     }
 
-                    // All sub-commands are safe — log and continue to check the main command
+                    // All sub-commands are safe
                     tracing::debug!(
                         tool_name = "bash",
                         permission_decision = "allowed_after_subshell_check",
@@ -680,7 +538,69 @@ pub fn evaluate_permission(
                     };
                 }
 
-                // Non-destructive command, no expansion, no sensitive paths → auto-allow
+                // ── ExecPolicy: rule-based command authorization ──────────────
+                // After security checks pass, apply ExecPolicy rules.
+                // This replaces the legacy hardcoded destructive/read-only prefix arrays.
+                if let Some(policy) = exec_policy
+                    && let Some(decision) = policy.evaluate(cmd)
+                {
+                    use crate::permissions::execpolicy::PolicyAction;
+                    match decision.action {
+                        PolicyAction::Auto => {
+                            tracing::debug!(
+                                tool_name = "bash",
+                                permission_decision = "allowed",
+                                reason = "exec_policy_auto",
+                                command = %cmd,
+                                rule = %decision.reason,
+                                "Command auto-allowed by exec_policy"
+                            );
+                            return PermissionDecision {
+                                allowed: true,
+                                requires_confirmation: false,
+                                reason: format!(
+                                    "Command auto-allowed by policy: {}",
+                                    decision.reason
+                                ),
+                            };
+                        }
+                        PolicyAction::Ask => {
+                            tracing::info!(
+                                tool_name = "bash",
+                                permission_decision = "requires_confirmation",
+                                reason = "exec_policy_ask",
+                                command = %cmd,
+                                rule = %decision.reason,
+                                "Command requires confirmation by exec_policy"
+                            );
+                            return PermissionDecision {
+                                allowed: false,
+                                requires_confirmation: true,
+                                reason: format!(
+                                    "Policy requires confirmation: {}",
+                                    decision.reason
+                                ),
+                            };
+                        }
+                        PolicyAction::Deny => {
+                            tracing::warn!(
+                                tool_name = "bash",
+                                permission_decision = "denied",
+                                reason = "exec_policy_deny",
+                                command = %cmd,
+                                rule = %decision.reason,
+                                "Command denied by exec_policy"
+                            );
+                            return PermissionDecision {
+                                allowed: false,
+                                requires_confirmation: false,
+                                reason: format!("Command denied by policy: {}", decision.reason),
+                            };
+                        }
+                    }
+                }
+
+                // No ExecPolicy rule matched — safe command, auto-allow
                 tracing::debug!(
                     tool_name = "bash",
                     permission_decision = "allowed",
@@ -792,10 +712,16 @@ pub fn evaluate_permission(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::permissions::execpolicy::{PolicyAction, builtin_rules};
 
     const ASK: PermissionMode = PermissionMode::Ask;
     const ALLOW: PermissionMode = PermissionMode::Allow;
     const DENY: PermissionMode = PermissionMode::Deny;
+
+    /// Create an ExecPolicy with builtin rules for tests.
+    fn test_policy() -> Option<ExecPolicy> {
+        Some(ExecPolicy::from_rules(builtin_rules()))
+    }
 
     /// Helper: evaluate with no trusted paths and no file/command.
     fn eval_simple(mode: &PermissionMode, tool: &str, ro: bool) -> PermissionDecision {
@@ -809,11 +735,11 @@ mod tests {
             Path::new("/tmp/work"),
             &[],
             &[],
-            &[],
+            None,
         )
     }
 
-    /// Helper: evaluate bash command in CWD.
+    /// Helper: evaluate bash command in CWD with ExecPolicy.
     fn eval_bash(mode: &PermissionMode, cmd: &str, cwd: &str) -> PermissionDecision {
         evaluate_permission(
             mode,
@@ -825,7 +751,7 @@ mod tests {
             Path::new(cwd),
             &[],
             &[],
-            &[],
+            test_policy().as_ref(),
         )
     }
 
@@ -841,7 +767,7 @@ mod tests {
             Path::new(cwd),
             &[],
             &[],
-            &[],
+            None,
         )
     }
 
@@ -1184,7 +1110,7 @@ mod tests {
             Path::new("/home/user/proj"),
             &[],
             &[],
-            &[],
+            None,
         );
         assert!(d.allowed);
         assert!(!d.requires_confirmation);
@@ -1229,40 +1155,62 @@ mod tests {
         assert!(d.allowed);
     }
 
-    // -- is_destructive_command --
+    // -- ExecPolicy destructive detection (replaces is_destructive_command) --
 
     #[test]
     fn destructive_rm() {
-        assert!(is_destructive_command("rm -rf /", &[]));
-        assert!(is_destructive_command("rm file.txt", &[]));
+        let p = test_policy().unwrap();
+        let r = p.evaluate("rm -rf /").unwrap();
+        assert_eq!(r.action, PolicyAction::Deny, "rm -rf / should be Deny");
+        let r = p.evaluate("rm file.txt").unwrap();
+        assert_eq!(r.action, PolicyAction::Ask, "rm should be Ask");
     }
 
     #[test]
     fn destructive_sudo() {
-        assert!(is_destructive_command("sudo apt install vim", &[]));
+        let p = test_policy().unwrap();
+        let r = p.evaluate("sudo apt install vim").unwrap();
+        assert_eq!(r.action, PolicyAction::Ask, "sudo should be Ask");
     }
 
     #[test]
     fn not_destructive_cargo() {
-        assert!(!is_destructive_command("cargo build", &[]));
-        assert!(!is_destructive_command("cargo test", &[]));
+        let p = test_policy().unwrap();
+        let r = p.evaluate("cargo build");
+        assert!(r.is_none(), "cargo build should have no rule match");
     }
 
     #[test]
     fn not_destructive_git_add() {
-        assert!(!is_destructive_command("git add .", &[]));
-        assert!(!is_destructive_command("git commit -m \"msg\"", &[]));
+        let p = test_policy().unwrap();
+        let r = p.evaluate("git add .");
+        assert!(r.is_none(), "git add should have no rule match");
+        let r = p.evaluate("git commit -m \"msg\"");
+        assert!(r.is_none(), "git commit should have no rule match");
     }
 
     #[test]
     fn destructive_git_push_force() {
-        assert!(is_destructive_command("git push --force origin main", &[]));
-        assert!(is_destructive_command("git push -f origin main", &[]));
+        let p = test_policy().unwrap();
+        let r = p.evaluate("git push --force origin main").unwrap();
+        assert_eq!(
+            r.action,
+            PolicyAction::Ask,
+            "git push --force should be Ask"
+        );
+        let r = p.evaluate("git push -f origin main").unwrap();
+        assert_eq!(r.action, PolicyAction::Ask, "git push -f should be Ask");
     }
 
     #[test]
     fn destructive_git_reset_hard() {
-        assert!(is_destructive_command("git reset --hard HEAD~3", &[]));
+        let p = test_policy().unwrap();
+        let r = p.evaluate("git reset --hard HEAD~3").unwrap();
+        assert_eq!(
+            r.action,
+            PolicyAction::Ask,
+            "git reset --hard should be Ask"
+        );
     }
 
     // -- File operations: outside CWD → always requires confirmation --

@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::base::{Tool, ToolContext, ToolError};
+use crate::sandbox::Sandbox;
 
 /// Commands that are known to be read-only (no side effects).
 /// Used by `is_read_only` to skip unnecessary permission confirmations
@@ -77,6 +78,9 @@ pub struct BashTool {
     ask_commands: Vec<String>,
     /// Commands always denied (blocked unconditionally).
     denied_commands: Vec<String>,
+    /// Sandbox for secure command execution (optional).
+    /// When set, commands are wrapped with isolation (bwrap, nsjail, etc.).
+    sandbox: Box<dyn Sandbox>,
 }
 
 impl BashTool {
@@ -86,6 +90,7 @@ impl BashTool {
         allowed_commands: Vec<String>,
         ask_commands: Vec<String>,
         denied_commands: Vec<String>,
+        sandbox: Box<dyn Sandbox>,
     ) -> Self {
         Self {
             use_rtk,
@@ -94,6 +99,7 @@ impl BashTool {
             allowed_commands,
             ask_commands,
             denied_commands,
+            sandbox,
         }
     }
 
@@ -145,6 +151,39 @@ impl BashTool {
             }
         }
         None
+    }
+
+    /// Build a `tokio::process::Command` for executing the given shell command,
+    /// optionally wrapping it with sandbox isolation.
+    ///
+    /// If the sandbox is active (not NoSandbox), the command is wrapped with
+    /// bwrap/nsjail args. Otherwise, it runs as `bash -c <cmd>`.
+    fn build_command<'a>(
+        &'a self,
+        cmd: &'a str,
+        cwd: &'a std::path::Path,
+    ) -> tokio::process::Command {
+        let sandbox_args = self.sandbox.wrap_command(cmd, cwd);
+        let mut cmd_obj = if sandbox_args.is_empty() {
+            // No sandbox — run directly
+            let mut c = tokio::process::Command::new("bash");
+            c.arg("-c").arg(cmd);
+            c
+        } else {
+            // Sandboxed — first arg is program, rest are args
+            let mut c = tokio::process::Command::new(&sandbox_args[0]);
+            c.args(&sandbox_args[1..]);
+            c
+        };
+        cmd_obj.current_dir(cwd);
+        for (k, v) in &self.env {
+            cmd_obj.env(k, v);
+        }
+        cmd_obj
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        cmd_obj
     }
 
     /// Strip a leading `cd <dir> &&` or `cd <dir>;` prefix from a command.
@@ -325,17 +364,9 @@ impl Tool for BashTool {
         if let Some((rtk_cmd_str, cd_override)) = self.maybe_rtk_route(cmd).await {
             tracing::debug!(rtk_command = %rtk_cmd_str, "Routing through rtk");
             // rtk rewritten command may contain shell syntax (|, &&, ||, redirects),
-            // so execute via bash -c with the cd directory as working directory
-            let mut bash_cmd = tokio::process::Command::new("bash");
+            // so execute via bash -c (or sandbox wrapper) with the cd directory as working directory
             let cwd = cd_override.clone().unwrap_or_else(|| ctx.get_cwd());
-            bash_cmd.arg("-c").arg(&rtk_cmd_str).current_dir(&cwd);
-            for (k, v) in &self.env {
-                bash_cmd.env(k, v);
-            }
-            bash_cmd
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .kill_on_drop(true);
+            let mut bash_cmd = self.build_command(&rtk_cmd_str, &cwd);
             let child = bash_cmd.spawn().map_err(ToolError::Io)?;
             let output = tokio::time::timeout(
                 std::time::Duration::from_secs(timeout),
@@ -364,20 +395,12 @@ impl Tool for BashTool {
             );
         }
 
-        // Normal execution via bash
+        // Normal execution via bash (or sandbox wrapper)
         // Use spawn() + kill_on_drop(true) so that if this future is
         // cancelled (e.g. by tokio::select! on Ctrl+C), the child process
         // is killed immediately instead of becoming an orphan.
-        let mut bash_cmd = tokio::process::Command::new("bash");
         let cwd = ctx.get_cwd();
-        bash_cmd.arg("-c").arg(cmd).current_dir(&cwd);
-        for (k, v) in &self.env {
-            bash_cmd.env(k, v);
-        }
-        bash_cmd
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
+        let mut bash_cmd = self.build_command(cmd, &cwd);
         let child = bash_cmd.spawn().map_err(ToolError::Io)?;
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(timeout),
@@ -482,14 +505,16 @@ mod rtk_tests {
 
     #[tokio::test]
     async fn test_rtk_route_with_redirect_stripped() {
-        let tool = BashTool::new(true, HashMap::new(), vec![], vec![], vec![]);
+        let nosb = Box::new(crate::sandbox::NoSandbox);
+        let tool = BashTool::new(true, HashMap::new(), vec![], vec![], vec![], nosb);
         let result = tool.maybe_rtk_route("git status 2>&1").await;
         assert!(result.is_some(), "rtk should route despite 2>&1 redirect");
     }
 
     #[tokio::test]
     async fn test_rtk_route_with_pipe_and_redirect() {
-        let tool = BashTool::new(true, HashMap::new(), vec![], vec![], vec![]);
+        let nosb = Box::new(crate::sandbox::NoSandbox);
+        let tool = BashTool::new(true, HashMap::new(), vec![], vec![], vec![], nosb);
         // rtk natively handles pipes — it rewrites the left side and preserves
         // shell operators, so compound commands should route through rtk.
         let result = tool.maybe_rtk_route("cargo test 2>&1 | grep error").await;
@@ -506,7 +531,8 @@ mod rtk_tests {
 
     #[tokio::test]
     async fn test_rtk_route_unsupported_returns_none() {
-        let tool = BashTool::new(true, HashMap::new(), vec![], vec![], vec![]);
+        let nosb = Box::new(crate::sandbox::NoSandbox);
+        let tool = BashTool::new(true, HashMap::new(), vec![], vec![], vec![], nosb);
         let result = tool.maybe_rtk_route("foobar xyz").await;
         assert!(
             result.is_none(),

@@ -28,10 +28,12 @@ pub(crate) fn tool_kind(name: &str) -> &'static str {
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
+use zeno_tools::ToolDefinition;
 
 use crate::config::settings::{DelegationConfig, ProviderConfig, Settings};
 use crate::engine::cost_tracker::CostTracker;
 use crate::engine::sub_agent::SubAgentEvent;
+use crate::permissions::execpolicy::ExecPolicy;
 
 // ---------------------------------------------------------------------------
 // Tool Error
@@ -92,6 +94,9 @@ pub struct SubAgentDeps {
     /// "allow all" (y/a) to a permission prompt, this flag is set so subsequent
     /// tools in both the main agent AND sub-agents are auto-approved.
     pub permission_allow_all: Option<Arc<Mutex<bool>>>,
+    /// Execution policy for rule-based command authorization.
+    /// Shared with sub-agents so they respect the same exec_policy rules.
+    pub exec_policy: Option<Arc<ExecPolicy>>,
 }
 
 impl std::fmt::Debug for SubAgentDeps {
@@ -104,6 +109,7 @@ impl std::fmt::Debug for SubAgentDeps {
                 "has_permission_allow_all",
                 &self.permission_allow_all.is_some(),
             )
+            .field("has_exec_policy", &self.exec_policy.is_some())
             .finish()
     }
 }
@@ -132,6 +138,7 @@ impl SubAgentDeps {
             write_origin: String::from("foreground"),
             tui_event_sender: None,
             permission_allow_all: None,
+            exec_policy: None,
         }
     }
 
@@ -157,6 +164,13 @@ impl SubAgentDeps {
     /// the user's session-wide blanket permission.
     pub fn with_permission_allow_all(mut self, flag: Arc<Mutex<bool>>) -> Self {
         self.permission_allow_all = Some(flag);
+        self
+    }
+
+    /// Attach the execution policy so sub-agents respect the same
+    /// rule-based command authorization as the main engine.
+    pub fn with_exec_policy(mut self, policy: Arc<ExecPolicy>) -> Self {
+        self.exec_policy = Some(policy);
         self
     }
 }
@@ -303,6 +317,37 @@ pub trait Tool: Send + Sync {
     /// JSON Schema describing the tool's parameters.
     fn schema(&self) -> Value;
 
+    /// Structured definition of this tool (name, description, schemas, metadata).
+    ///
+    /// Default implementation extracts from `schema()` and `name()`.
+    /// Override to provide additional metadata like `output_schema`,
+    /// `exposure`, `supports_parallel`, or `category`.
+    fn definition(&self) -> ToolDefinition {
+        let schema = self.schema();
+        let name = self.name().to_string();
+        let description = schema
+            .get("function")
+            .and_then(|f| f.get("description"))
+            .and_then(|d| d.as_str())
+            .unwrap_or("")
+            .to_string();
+        let input_schema = schema
+            .get("function")
+            .and_then(|f| f.get("parameters"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        ToolDefinition {
+            name,
+            description,
+            input_schema,
+            output_schema: None,
+            exposure: zeno_tools::ToolExposure::Explicit,
+            supports_parallel: false,
+            read_only: false,
+            category: None,
+        }
+    }
+
     /// Execute the tool with the given arguments.
     async fn execute(&self, arguments: Value, ctx: &ToolContext) -> Result<String, ToolError>;
 
@@ -430,8 +475,14 @@ impl ToolRegistry {
     }
 
     /// Get all tool schemas for the LLM — sorted with MCP tools first.
+    /// Uses `ToolDefinition::to_function_schema()` which includes `output_schema`
+    /// if the tool provides one via `definition()`.
     pub fn schemas(&self) -> Vec<Value> {
-        let mut result: Vec<Value> = self.tools.values().map(|t| t.schema()).collect();
+        let mut result: Vec<Value> = self
+            .tools
+            .values()
+            .map(|t| t.definition().to_function_schema())
+            .collect();
         result.sort_by(|a, b| {
             let a_name = a["function"]["name"].as_str().unwrap_or("");
             let b_name = b["function"]["name"].as_str().unwrap_or("");
@@ -446,7 +497,7 @@ impl ToolRegistry {
         names
             .iter()
             .filter_map(|n| self.tools.get(n.as_str()))
-            .map(|t| t.schema())
+            .map(|t| t.definition().to_function_schema())
             .collect()
     }
 

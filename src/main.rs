@@ -9,6 +9,7 @@ mod memory;
 mod permissions;
 mod plugin;
 mod prompts;
+mod sandbox;
 mod skills;
 mod tools;
 mod ui;
@@ -150,12 +151,14 @@ async fn main() -> anyhow::Result<()> {
     let mut registry = ToolRegistry::new();
     let tc = &settings.tools;
     if tc.bash {
+        let bash_sandbox = crate::sandbox::create_sandbox(&settings.sandbox);
         registry.register(Box::new(tools::bash::BashTool::new(
             tc.use_rtk,
             tc.bash_env.clone(),
             tc.allowed_commands.clone(),
             tc.ask_commands.clone(),
             tc.denied_commands.clone(),
+            bash_sandbox,
         )))?;
     }
     if tc.read {

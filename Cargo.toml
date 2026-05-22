@@ -1,9 +1,17 @@
+[workspace]
+members = [".", "crates/zeno-protocol", "crates/zeno-tools"]
+resolver = "3"
+
 [package]
 name = "zeno"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# Workspace crates
+zeno-protocol = { path = "crates/zeno-protocol" }
+zeno-tools = { path = "crates/zeno-tools" }
+
 # 异步运行时
 tokio = { version = "1", features = ["full"] }
 

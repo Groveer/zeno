@@ -8,6 +8,7 @@ use crate::engine::cost_tracker::CostTracker;
 use crate::engine::messages::{ConversationEntry, ConversationHistory};
 use crate::hooks::executor::HookExecutor;
 use crate::memory::manager::SharedMemoryManager;
+use crate::permissions::execpolicy::ExecPolicy;
 use crate::tools::base::ToolRegistry;
 use std::sync::{Arc, Mutex};
 
@@ -81,6 +82,9 @@ pub struct QueryEngine {
     /// Currently active identity name (if any). Used for runtime identity
     /// switching via `/identity` command. When set, overrides settings.role.
     pub active_identity: Option<String>,
+    /// Execution policy for rule-based command authorization.
+    /// Constructed from built-in rules + user-configured rules at startup.
+    pub exec_policy: Arc<ExecPolicy>,
 }
 
 /// Inject user text into a steer slot without interrupting the agent.
@@ -127,6 +131,23 @@ impl QueryEngine {
             enabled: settings.llm.compact_threshold > 0.0,
             ..CompactConfig::default()
         };
+
+        // Merge built-in exec policy rules with user-configured ones.
+        // User rules are placed FIRST so they match before built-in rules
+        // (first-match-wins evaluation).
+        let mut merged_rules = settings.exec_policy_rules.clone();
+        // Legacy `zn.commands({ ask = {...} })` commands — convert to Ask rules.
+        for cmd in &settings.tools.ask_commands {
+            merged_rules.push(crate::permissions::execpolicy::ExecRule {
+                pattern: cmd.clone(),
+                action: crate::permissions::execpolicy::PolicyAction::Ask,
+                reason: "User-configured ask command".into(),
+                is_regex: false,
+            });
+        }
+        merged_rules.extend(crate::permissions::execpolicy::builtin_rules());
+        let exec_policy = Arc::new(ExecPolicy::from_rules(merged_rules));
+
         Self {
             client,
             model,
@@ -156,6 +177,7 @@ impl QueryEngine {
             rate_limiter: crate::tools::rate_limiter::new_shared(),
             tool_stats: crate::tools::tool_stats::new_shared(),
             active_identity: None,
+            exec_policy,
         }
     }
 
