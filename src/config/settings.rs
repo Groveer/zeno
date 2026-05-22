@@ -210,6 +210,14 @@ pub struct ToolsConfig {
     /// Key-value pairs like `{"NODE_ENV": "development"}`.
     #[serde(default)]
     pub bash_env: HashMap<String, String>,
+    /// Maximum lines in bash tool output before head/tail truncation.
+    /// When exceeded, keeps the first ~30% and last ~70% of lines with
+    /// a `[truncated — omitted N lines]` marker. Set to 0 to disable.
+    ///
+    /// NOTE: No field-level `#[serde(default)]` here — the struct-level
+    /// `#[serde(default)]` uses `ToolsConfig::default()` which sets 500.
+    /// A field-level default would override that with `usize::default()` (0).
+    pub bash_max_lines: usize,
     pub read: bool,
     pub write: bool,
     pub edit: bool,
@@ -242,6 +250,7 @@ impl Default for ToolsConfig {
             bash: true,
             use_rtk: true,
             bash_env: HashMap::new(),
+            bash_max_lines: 500,
             read: true,
             write: true,
             edit: true,

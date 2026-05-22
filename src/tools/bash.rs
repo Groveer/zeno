@@ -72,6 +72,9 @@ pub struct BashTool {
     timeout_secs: u64,
     /// Extra environment variables injected into every bash command execution.
     env: HashMap<String, String>,
+    /// Maximum output lines before head/tail truncation.
+    /// 0 = no truncation.
+    max_output_lines: usize,
     /// Commands always allowed (merged with built-in read-only prefixes).
     allowed_commands: Vec<String>,
     /// Commands requiring confirmation (merged with built-in destructive prefixes).
@@ -87,6 +90,7 @@ impl BashTool {
     pub fn new(
         use_rtk: bool,
         env: HashMap<String, String>,
+        max_output_lines: usize,
         allowed_commands: Vec<String>,
         ask_commands: Vec<String>,
         denied_commands: Vec<String>,
@@ -96,6 +100,7 @@ impl BashTool {
             use_rtk,
             timeout_secs: 120,
             env,
+            max_output_lines,
             allowed_commands,
             ask_commands,
             denied_commands,
@@ -436,6 +441,11 @@ impl Tool for BashTool {
             result = "(no output)".into();
         }
 
+        // --- Head/tail truncation for long output ---
+        if self.max_output_lines > 0 {
+            result = truncate_head_tail_lines(&result, self.max_output_lines);
+        }
+
         // CWD tracking: detect standalone `cd <dir>` commands and update the
         // shared context so subsequent tool calls use the new directory.
         let trimmed_cmd = cmd.trim();
@@ -472,6 +482,68 @@ impl Tool for BashTool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Head/tail truncation
+// ---------------------------------------------------------------------------
+
+/// Truncate multi-line text by keeping the first ~30% and last ~70% of lines,
+/// replacing the middle with a marker.
+///
+/// Only truncates when line count exceeds `max_lines`. The marker shows how
+/// many lines were omitted and the original total.
+fn truncate_head_tail_lines(text: &str, max_lines: usize) -> String {
+    if max_lines == 0 {
+        return text.to_string();
+    }
+
+    let lines: Vec<&str> = text.lines().collect();
+    let total_lines = lines.len();
+    if total_lines <= max_lines {
+        return text.to_string();
+    }
+
+    // Keep the first 30% and last 70% of the limit, leaving 0% for the marker.
+    // Tail gets more weight because the end of output (errors, build summary)
+    // is usually more important than the beginning.
+    let head_lines = ((max_lines as f64) * 0.30) as usize;
+    let head_lines = head_lines.max(1);
+    let tail_lines = max_lines - head_lines;
+
+    let head: Vec<&str> = lines.iter().take(head_lines).copied().collect();
+    let tail: Vec<&str> = lines.iter().rev().take(tail_lines).rev().copied().collect();
+
+    // If the marker takes up a line without reducing total lines, skip truncation.
+    // This happens when total_lines == max_lines + 1 (head + tail + marker = original size).
+    if head.len() + tail.len() + 1 >= total_lines {
+        return text.to_string();
+    }
+
+    let omitted = total_lines - head.len() - tail.len();
+
+    let mut result = String::with_capacity(text.len() / 2);
+    for line in &head {
+        result.push_str(line);
+        result.push('\n');
+    }
+    result.push_str(&format!(
+        "··· [truncated — omitted {} lines, original was {} lines] ···\n",
+        omitted, total_lines
+    ));
+    for line in &tail {
+        result.push_str(line);
+        result.push('\n');
+    }
+
+    // Preserve original trailing newline semantics: `text.lines()` strips the
+    // trailing newline, and we always append `\n` after each line during rebuild,
+    // so inputs without a trailing `\n` would gain one. Restore the original state.
+    if !text.ends_with('\n') {
+        result.pop();
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod rtk_tests {
     use super::*;
@@ -506,7 +578,7 @@ mod rtk_tests {
     #[tokio::test]
     async fn test_rtk_route_with_redirect_stripped() {
         let nosb = Box::new(crate::sandbox::NoSandbox);
-        let tool = BashTool::new(true, HashMap::new(), vec![], vec![], vec![], nosb);
+        let tool = BashTool::new(true, HashMap::new(), 0, vec![], vec![], vec![], nosb);
         let result = tool.maybe_rtk_route("git status 2>&1").await;
         assert!(result.is_some(), "rtk should route despite 2>&1 redirect");
     }
@@ -514,7 +586,7 @@ mod rtk_tests {
     #[tokio::test]
     async fn test_rtk_route_with_pipe_and_redirect() {
         let nosb = Box::new(crate::sandbox::NoSandbox);
-        let tool = BashTool::new(true, HashMap::new(), vec![], vec![], vec![], nosb);
+        let tool = BashTool::new(true, HashMap::new(), 0, vec![], vec![], vec![], nosb);
         // rtk natively handles pipes — it rewrites the left side and preserves
         // shell operators, so compound commands should route through rtk.
         let result = tool.maybe_rtk_route("cargo test 2>&1 | grep error").await;
@@ -532,11 +604,111 @@ mod rtk_tests {
     #[tokio::test]
     async fn test_rtk_route_unsupported_returns_none() {
         let nosb = Box::new(crate::sandbox::NoSandbox);
-        let tool = BashTool::new(true, HashMap::new(), vec![], vec![], vec![], nosb);
+        let tool = BashTool::new(true, HashMap::new(), 0, vec![], vec![], vec![], nosb);
         let result = tool.maybe_rtk_route("foobar xyz").await;
         assert!(
             result.is_none(),
             "unsupported commands should not route through rtk"
+        );
+    }
+}
+
+#[cfg(test)]
+mod truncation_tests {
+    use super::*;
+
+    #[test]
+    fn test_no_truncation_below_limit() {
+        let input = "line1\nline2\nline3\n";
+        let result = truncate_head_tail_lines(input, 10);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_no_truncation_at_limit() {
+        let input = "line1\nline2\nline3\nline4\nline5\n";
+        let result = truncate_head_tail_lines(input, 5);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_basic_truncation() {
+        // Build 20 lines of output
+        let lines: Vec<String> = (1..=20).map(|i| format!("line{}", i)).collect();
+        let input = lines.join("\n");
+
+        // max_lines=8: head = max(1, floor(8*0.3)=2) = 2, tail = 8-2 = 6
+        // Shows 2 head + marker + 6 tail = 9 lines (8 content + 1 marker)
+        // omitted = 20 - 2 - 6 = 12
+        let result = truncate_head_tail_lines(&input, 8);
+        assert!(
+            result.starts_with("line1\n"),
+            "should start with first line"
+        );
+        assert!(
+            result.contains("··· [truncated — omitted 12 lines, original was 20 lines] ···"),
+            "should contain correct marker"
+        );
+        assert!(result.contains("line19"), "should include near-tail");
+        assert!(result.contains("line20"), "should include last line");
+        assert!(!result.contains("line3"), "should omit early middle lines");
+        assert!(!result.contains("line10"), "should omit middle lines");
+    }
+
+    #[test]
+    fn test_max_lines_one() {
+        let input = "a\nb\nc\nd\ne\n";
+        let result = truncate_head_tail_lines(input, 1);
+        // head = max(1, floor(1*0.3)) = 1, tail = 0
+        // Output: "a\n" + marker
+        assert!(result.starts_with("a\n"), "should keep first line");
+        assert!(
+            result.contains("omitted 4 lines"),
+            "should report omitted count"
+        );
+    }
+
+    #[test]
+    fn test_empty_input() {
+        let result = truncate_head_tail_lines("", 5);
+        assert_eq!(result, "", "empty input should return empty");
+    }
+
+    #[test]
+    fn test_single_line_no_truncation() {
+        let result = truncate_head_tail_lines("hello", 1);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_input_without_trailing_newline() {
+        let result = truncate_head_tail_lines("hello", 5);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_exactly_max_lines_plus_one() {
+        // total = max_lines + 1: head + tail + marker = original size
+        // Guard should detect no savings and return original text.
+        let lines: Vec<String> = (1..=6).map(|i| format!("line{}", i)).collect();
+        let input = lines.join("\n");
+        let result = truncate_head_tail_lines(&input, 5);
+        assert_eq!(result, input, "should skip truncation when no savings");
+    }
+
+    #[test]
+    fn test_omitted_count_accuracy() {
+        let lines: Vec<String> = (1..=100).map(|i| format!("line{}", i)).collect();
+        let input = lines.join("\n");
+        let result = truncate_head_tail_lines(&input, 20);
+        // max_lines=20: head=6, tail=14 → omitted = 100-6-14 = 80
+        assert!(
+            result.contains("omitted 80 lines"),
+            "should accurately count omitted lines"
+        );
+        assert!(
+            result.contains("original was 100 lines"),
+            "should show original total"
         );
     }
 }
