@@ -31,17 +31,17 @@ $ zeno    # 瞬间进入全屏 TUI
 
 LLM 可直接调用的内置工具，覆盖开发全流程：
 
-| 工具 | 能力 |
-| ---- | ---- |
-| `bash` | 执行 shell 命令，自动检测 [rtk](https://github.com/rtk-ai/rtk) 压缩输出 |
-| `read` / `write` / `edit` | 文件读写 + **9 策略模糊匹配** find-and-replace |
-| `glob` / `grep` | 文件查找 + 内容搜索（gitignore 感知） |
-| `web_search` / `web_fetch` | 网络搜索（SearXNG / Brave / Tavily / DuckDuckGo）+ 网页提取 |
-| `ask_user` | 向用户提问获取澄清 |
-| `todo` | 任务规划与进度追踪 |
-| `delegate_task` | **子代理并行执行**独立子任务 |
-| `memory` | 持久化记忆读写（MEMORY.md / USER.md）|
-| `skill_list` / `skill_view` / `skill_manage` | Skill 检索、加载、创建与管理 |
+| 工具                                         | 能力                                                                    |
+| -------------------------------------------- | ----------------------------------------------------------------------- |
+| `bash`                                       | 执行 shell 命令，自动检测 [rtk](https://github.com/rtk-ai/rtk) 压缩输出 |
+| `read` / `write` / `edit`                    | 文件读写 + **9 策略模糊匹配** find-and-replace                          |
+| `glob` / `grep`                              | 文件查找 + 内容搜索（gitignore 感知）                                   |
+| `web_search` / `web_fetch`                   | 网络搜索（SearXNG / Brave / Tavily / DuckDuckGo）+ 网页提取             |
+| `ask_user`                                   | 向用户提问获取澄清                                                      |
+| `todo`                                       | 任务规划与进度追踪                                                      |
+| `delegate_task`                              | **子代理并行执行**独立子任务                                            |
+| `memory`                                     | 持久化记忆读写（MEMORY.md / USER.md）                                   |
+| `skill_list` / `skill_view` / `skill_manage` | Skill 检索、加载、创建与管理                                            |
 
 ### 🔌 MCP 协议支持
 
@@ -73,15 +73,14 @@ zn.mcp_servers({
 
 受 Hermes Agent 启发，**不同任务用不同模型**，省钱省时间：
 
-| 任务 | 用途 |
-| ---- | ---- |
-| `compression` | 对话历史压缩为摘要 |
-| `vision` | 图像分析（截图/CAPTCHA） |
-| `web_extract` | 网页内容提取摘要 |
-| `title_generation` | 会话标题生成 |
-| `session_search` | 历史会话搜索摘要 |
-|  索摘要 |
-| `delegation` | 子代理模型路由 |
+| 任务               | 用途                     |
+| ------------------ | ------------------------ |
+| `compression`      | 对话历史压缩为摘要       |
+| `vision`           | 图像分析（截图/CAPTCHA） |
+| `web_extract`      | 网页内容提取摘要         |
+| `title_generation` | 会话标题生成             |
+| `session_search`   | 历史会话搜索摘要         |
+| `delegation`       | 子代理模型路由           |
 
 **自动降级链**：主 provider → 备选 provider → 跳过（不阻塞主流程）。402/401/403/429/5xx 自动重试下一个 provider，对用户透明。支持 temperature/max_tokens 兼容重试。
 
@@ -180,11 +179,11 @@ return zn.config()
 
 三层权限模式，兼顾安全与效率：
 
-| 模式 | 行为 |
-| ---- | ---- |
-| `allow` | 自动放行所有操作 |
+| 模式          | 行为                                                                     |
+| ------------- | ------------------------------------------------------------------------ |
+| `allow`       | 自动放行所有操作                                                         |
 | `ask`（默认） | 只读工具自动放行；CWD 内文件操作自动放行；破坏性命令（rm/sudo/dd）需确认 |
-| `deny` | 禁止所有写操作 |
+| `deny`        | 禁止所有写操作                                                           |
 
 - Git 仓库 CWD 自动信任（可回滚）
 - `/tmp` 和 `/var/tmp` 始终自动放行
@@ -234,25 +233,25 @@ zeno
 
 ### 斜杠命令
 
-| 命令 | 用途 |
-| ---- | ---- |
-| `/help` | 显示帮助 |
-| `/model [name]` | 查看/切换模型 |
-| `/cost` | 查看 token 用量 |
-| `/compact` | 手动压缩对话历史 |
-| `/clear` | 清空对话历史 |
-| `/goal <text>` | 设置自动续写目标 |
-| `/identity` | 查看当前身份 |
-| `/identity <name>` | 切换到指定身份 |
-| `/identity clear` | 恢复默认身份 |
-| `/restore [N]` | 恢复会话 |
-| `/search [query]` | 搜索历史会话 |
-| `/tools` | 列出内置工具 |
-| `/mcp` | 列出 MCP 服务器和工具 |
-| `/skills` | 列出已加载 Skill |
-| `/memory` | 查看记忆文件 |
-| `/hooks` | 列出已注册 Hook |
-| `/exit` `/quit` | 退出 |
+| 命令               | 用途                  |
+| ------------------ | --------------------- |
+| `/help`            | 显示帮助              |
+| `/model [name]`    | 查看/切换模型         |
+| `/cost`            | 查看 token 用量       |
+| `/compact`         | 手动压缩对话历史      |
+| `/clear`           | 清空对话历史          |
+| `/goal <text>`     | 设置自动续写目标      |
+| `/identity`        | 查看当前身份          |
+| `/identity <name>` | 切换到指定身份        |
+| `/identity clear`  | 恢复默认身份          |
+| `/restore [N]`     | 恢复会话              |
+| `/search [query]`  | 搜索历史会话          |
+| `/tools`           | 列出内置工具          |
+| `/mcp`             | 列出 MCP 服务器和工具 |
+| `/skills`          | 列出已加载 Skill      |
+| `/memory`          | 查看记忆文件          |
+| `/hooks`           | 列出已注册 Hook       |
+| `/exit` `/quit`    | 退出                  |
 
 ---
 
@@ -298,18 +297,18 @@ zeno
 
 ## 📦 技术栈
 
-| 类别 | 技术 |
-| ---- | ---- |
-| 语言 | Rust (edition 2024) |
-| 异步 | tokio + futures + tokio-stream |
-| TUI | ratatui + crossterm + syntect + pulldown-cmark |
-| LLM API | reqwest + eventsource-stream (SSE) |
-| 配置 | mlua (Lua 5.4, vendored) |
-| MCP | rmcp (stdio + HTTP Streamable) |
-| 序列化 | serde + serde_json + serde_yaml |
-| 日志 | tracing + tracing-subscriber (JSON) |
-| 文件监控 | notify（配置热加载） |
-| Diff | similar（edit tool diff 生成） |
+| 类别     | 技术                                           |
+| -------- | ---------------------------------------------- |
+| 语言     | Rust (edition 2024)                            |
+| 异步     | tokio + futures + tokio-stream                 |
+| TUI      | ratatui + crossterm + syntect + pulldown-cmark |
+| LLM API  | reqwest + eventsource-stream (SSE)             |
+| 配置     | mlua (Lua 5.4, vendored)                       |
+| MCP      | rmcp (stdio + HTTP Streamable)                 |
+| 序列化   | serde + serde_json + serde_yaml                |
+| 日志     | tracing + tracing-subscriber (JSON)            |
+| 文件监控 | notify（配置热加载）                           |
+| Diff     | similar（edit tool diff 生成）                 |
 
 ---
 
@@ -324,3 +323,4 @@ zeno
 ## 📄 许可
 
 MIT
+
