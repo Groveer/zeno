@@ -132,6 +132,26 @@ Do NOT save task progress, session outcomes, or anything that will be stale in a
 Write declarative facts, not instructions — 'User prefers concise responses' ✓, \
 'Always respond concisely' ✗.";
 
+/// Format the "Session Files Already Read" context block for the system prompt.
+///
+/// This block is injected each turn so the LLM knows what files it has already
+/// seen in this session. The goal is to prevent redundant `read` calls for files
+/// the LLM already has in its context window.
+///
+/// Caller guarantees `summary` is non-empty (checked by `read_files_summary()`).
+pub fn session_files_block(summary: &str) -> String {
+    format!(
+        "## Session Files Already Read\n\n\
+The following files have been returned to you in this session. \
+If you need information from one of them, use `grep` for targeted \
+queries instead of re-reading the full file.\n\n\
+{}\n\n\
+> Use `grep pattern --include=\"*.rs\" path=\"src\"` to search within \
+a specific directory rather than re-reading entire files.",
+        summary
+    )
+}
+
 /// Built-in guidelines — always present in the system prompt body.
 fn builtin_guidelines() -> String {
     r#"
@@ -161,6 +181,11 @@ fn builtin_guidelines() -> String {
 - **Prefer grep before read**: Before calling `read`, first use `grep` to locate the
   exact lines you need. Only call `read` when you know the specific file and line range.
   This avoids reading large files unnecessarily.
+- **Avoid redundant re-reads**: Before reading a file, check the "Session Files Already Read"
+  section below — if you already have the file in context, use `grep` for targeted queries
+  instead of re-reading. Redundant reads waste tokens and context window space.
+  The system tracks your reads and reports overlap in read output as
+  `[Note: lines ... were already returned]`.
 - **Read minimum range**: Always specify `offset` + `limit` (or `offset` + `context`)
   to read the smallest possible range. Never read an entire file when you only need
   a few lines. Exception: files ≤500 lines where you need the full context.

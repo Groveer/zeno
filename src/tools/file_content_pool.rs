@@ -18,6 +18,10 @@ use std::collections::{HashMap, VecDeque};
 /// Maximum files to keep in the pool.
 const MAX_FILES: usize = 30;
 
+/// Maximum files to include in the read-files summary injected into the prompt.
+/// Keeps the system prompt concise — beyond this, just say "and N more files".
+const MAX_SUMMARY_FILES: usize = 8;
+
 /// Maximum total bytes across all cached files (50 MB).
 const MAX_TOTAL_BYTES: usize = 50 * 1024 * 1024;
 
@@ -227,6 +231,119 @@ impl FileContentPool {
     #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.files.len()
+    }
+
+    /// Build a concise summary of all files that have been read in this session.
+    ///
+    /// Returns `None` when no files have read ranges (pool empty or nothing read).
+    /// The output is formatted as a compact list suitable for injecting into the
+    /// system prompt, so the LLM knows what it already has in context and can
+    /// avoid redundant re-reads.
+    ///
+    /// Format per entry:
+    /// ```
+    /// - path/to/file.rs (fully read, Z lines)
+    /// - path/to/file.rs (lines 5-30 of Z, P% read)
+    /// - path/to/file.rs (lines 5-100 of Z, P% read, 60 of Z unique lines)
+    /// ```
+    /// When coverage is contiguous: shows exact range + percentage.
+    /// When coverage has gaps (multiple segments): shows span + unique lines count.
+    /// When only a small portion: shows approximate line count.
+    /// Capped at `MAX_SUMMARY_FILES` entries; excess shown as "and N more files".
+    pub fn read_files_summary(&self) -> Option<String> {
+        if self.files.is_empty() {
+            return None;
+        }
+
+        // Collect files that have at least one read_range (files inserted but
+        // never read via read_range() have empty ranges and are excluded).
+        let mut entries: Vec<(
+            /*path*/ &str,
+            /*total*/ usize,
+            /*covered*/ usize,
+            /*min_start*/ usize,
+            /*max_end*/ usize,
+            /*range_count*/ usize,
+        )> = self
+            .files
+            .iter()
+            .filter_map(|(path, f)| {
+                if f.read_ranges.is_empty() {
+                    return None;
+                }
+                // Ranges are already merged by mark_range_read — sorted,
+                // non-overlapping, non-adjacent. Sum for unique line coverage.
+                let mut covered = 0usize;
+                let mut min_start = usize::MAX;
+                let mut max_end = 0usize;
+                for &(s, e) in &f.read_ranges {
+                    covered += e.saturating_sub(s);
+                    min_start = min_start.min(s);
+                    max_end = max_end.max(e);
+                }
+                if covered == 0 {
+                    return None;
+                }
+                Some((
+                    path.as_str(),
+                    f.lines.len(),
+                    covered,
+                    min_start,
+                    max_end,
+                    f.read_ranges.len(),
+                ))
+            })
+            .collect();
+
+        if entries.is_empty() {
+            return None;
+        }
+
+        // Sort by most-covered first (the most context-dominant files are most relevant)
+        entries.sort_by(|a, b| b.2.cmp(&a.2));
+
+        let mut lines: Vec<String> = Vec::new();
+        let total = entries.len();
+        let display_count = total.min(MAX_SUMMARY_FILES);
+
+        for &(path, total_lines, covered, min_start, max_end, range_count) in
+            entries.iter().take(display_count)
+        {
+            let pct = (covered as f64 / total_lines as f64 * 100.0).round() as u8;
+            let line_info = if covered >= total_lines {
+                format!("fully read, {} lines", total_lines)
+            } else if covered <= 200 {
+                // Small range — show approximate line count instead of percentage
+                // to avoid misleading percentages (e.g. "10 of 200 = 5%").
+                format!("~{} lines of {}", covered, total_lines)
+            } else if range_count == 1 {
+                // Single contiguous segment — show exact 1-indexed range
+                format!(
+                    "lines {}-{} of {} ({}%)",
+                    min_start + 1,
+                    max_end,
+                    total_lines,
+                    pct
+                )
+            } else {
+                // Multiple segments — show span and unique count so LLM knows there are gaps
+                format!(
+                    "lines {}-{} ({} of {} unique lines, {}%)",
+                    min_start + 1,
+                    max_end,
+                    covered,
+                    total_lines,
+                    pct
+                )
+            };
+            lines.push(format!("- {} ({})", path, line_info));
+        }
+
+        if total > display_count {
+            lines.push(format!("- ... and {} more files", total - display_count));
+        }
+
+        Some(lines.join("\n"))
     }
 
     // --- Internal helpers ---
@@ -496,5 +613,53 @@ mod tests {
             }
             _ => panic!("expected hit"),
         }
+    }
+
+    #[test]
+    fn test_read_files_summary_empty_pool() {
+        let pool = FileContentPool::new();
+        assert!(pool.read_files_summary().is_none());
+
+        // Insert a file but never read it — should still be None
+        let mut pool = FileContentPool::new();
+        pool.insert("/empty.rs", "a\nb\nc\n");
+        assert!(pool.read_files_summary().is_none());
+    }
+
+    #[test]
+    fn test_read_files_summary_fully_read() {
+        let mut pool = FileContentPool::new();
+        let content = "aaa\nbbb\nccc\nddd\neee\n";
+        pool.insert("/test.rs", content);
+        pool.read_range("/test.rs", 0, 5);
+
+        let summary = pool.read_files_summary().unwrap();
+        assert!(summary.contains("/test.rs"));
+        assert!(summary.contains("fully read, 5 lines"));
+    }
+
+    #[test]
+    fn test_read_files_summary_partial_read() {
+        let mut pool = FileContentPool::new();
+        let content = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n";
+        pool.insert("/partial.rs", content);
+        // Read only first 3 lines
+        pool.read_range("/partial.rs", 0, 3);
+
+        let summary = pool.read_files_summary().unwrap();
+        assert!(summary.contains("/partial.rs"));
+    }
+
+    #[test]
+    fn test_read_files_summary_multiple_files() {
+        let mut pool = FileContentPool::new();
+        pool.insert("/a.rs", "1\n2\n3\n");
+        pool.insert("/b.rs", "x\ny\nz\n");
+        pool.read_range("/a.rs", 0, 3);
+        pool.read_range("/b.rs", 0, 3);
+
+        let summary = pool.read_files_summary().unwrap();
+        assert!(summary.contains("/a.rs"));
+        assert!(summary.contains("/b.rs"));
     }
 }

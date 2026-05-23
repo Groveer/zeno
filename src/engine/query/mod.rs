@@ -23,7 +23,7 @@ use crate::engine::compact::{auto_compact_if_needed, is_prompt_too_long_error};
 use crate::engine::query_engine::QueryEngine;
 use crate::engine::tui_events::EngineEvent;
 use crate::hooks::types::HookEvent;
-use crate::prompts::system_prompt::MEMORY_GUIDANCE;
+use crate::prompts::system_prompt::{MEMORY_GUIDANCE, session_files_block};
 use crate::tools::base::{SubAgentDeps, ToolContext};
 use tokio_util::sync::CancellationToken;
 
@@ -237,6 +237,17 @@ impl QueryEngine {
                 let mut effective_system_prompt = self.system_prompt.clone();
                 if !vision_context.is_empty() {
                     effective_system_prompt.push_str(&vision_context);
+                }
+
+                // --- Inject session files already read context ---
+                // Tells the LLM which files it has already seen, reducing redundant reads.
+                {
+                    let pool = self.file_content_pool.lock().await;
+                    if let Some(summary) = pool.read_files_summary() {
+                        let block = session_files_block(&summary);
+                        effective_system_prompt.push_str("\n\n");
+                        effective_system_prompt.push_str(&block);
+                    }
                 }
                 if let Some(he) = &self.hook_executor
                     && he.has_hooks_for(HookEvent::PreLlmCall)
