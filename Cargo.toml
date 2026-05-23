@@ -78,6 +78,8 @@ similar = "2"
 
 # File watcher for config hot-reload
 notify = { version = "8", default-features = false, features = ["macos_kqueue"] }
+agent-client-protocol = "0.12.1"
+uuid = "1.23.1"
 
 [dev-dependencies]
 tempfile = "3"

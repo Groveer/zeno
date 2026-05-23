@@ -60,6 +60,20 @@ zn.mcp_servers({
 })
 ```
 
+### 🔌 ACP 协议支持
+
+原生支持 [Agent Client Protocol](https://github.com/nicholasgasior/agent-client-protocol)，通过 `agent-client-protocol` SDK 实现 stdio 传输层：
+
+- **无头模式** — `zeno --acp` 以 headless 模式启动，通过 stdin/stdout 提供 JSON-RPC 2.0 接口
+- **完整协议实现**：`initialize`（版本协商）→ `session/new`（创建引擎）→ `session/prompt`（流式处理）→ `session/cancel`（取消）→ `session/close`（销毁会话）
+- **流式推送** — LLM 输出逐 token 实时推送为 `session/update` notification，包含 text delta、thinking、tool 开始/结果/diff 等事件
+- **IDE 集成** — 支持 VS Code、Neovim 等支持 ACP 的编辑器直连，替代内置 TUI
+- **共享基础设施** — ACP 模式复用完整的 Tool Registry、MCP Manager、Memory Manager、Hook 系统
+
+```bash
+zeno --acp
+```
+
 ### 🧠 智能上下文管理
 
 对话历史过长时自动压缩，永不丢失关键信息：
@@ -227,8 +241,11 @@ cp config.example.lua ~/.config/zeno/init.lua
 # 3. 安装 rtk（可选）
 cargo install --git https://github.com/rtk-ai/rtk
 
-# 4. 启动
+# 4. 启动（TUI 交互模式）
 zeno
+
+# 或启动 ACP 无头模式（IDE 集成）
+zeno --acp
 ```
 
 ### 斜杠命令
@@ -258,39 +275,42 @@ zeno
 ## 🏗️ 架构概览
 
 ```
-┌──────────────────────────────────────────┐
-│              ratatui TUI                  │
-│  输入区 / 流式输出 / Tool 结果渲染        │
-│  斜杠命令 dispatch (CommandAction)       │
-├──────────────────────────────────────────┤
-│       Engine (核心对话循环)               │
-│  query loop → API client → tool exec     │
-│  SSE stream → event → TUI render         │
-│  auto-continue · ToolCarryover ·         │
-│  session mgmt · sub-agent · curator      │
-├──────────────┬───────────────────────────┤
-│  Tool Registry (24 tools)                │
-│  bash / read / write / edit / ...        │
-│  todo / delegate_task / skill_manage     │
-├──────────────┴───────────────────────────┤
-│  API Clients (reqwest + SSE)             │
-│  Anthropic / OpenAI Chat / OpenAI Responses │
-├──────────────────────────────────────────┤
-│  Auxiliary Router (6 辅助任务)            │
-│  按任务分派 provider/model               │
-│  402 自动降级 · provider chain           │
-├──────────────────────────────────────────┤
-│  Prompts                                 │
-│  system_prompt build · context inject    │
-│  CLAUDE.md / AGENTS.md parser            │
-├──────────────────────────────────────────┤
-│  Infrastructure                          │
-│  config(mlua) / memory(manager+store)    │
-│  mcp(rmcp) / permissions / hooks         │
-│  skills(registry+cache+curator)          │
-│  plugin(sandbox+bridge) / utils          │
-│  cost_tracker · gitignore · rate_limiter │
-└──────────────────────────────────────────┘
+                    ┌─── zeno --acp ───┐    ┌──── zeno ────┐
+                    │  ACP Server       │    │  ratatui TUI  │
+                    │  stdio JSON-RPC   │    │  流式输出      │
+                    │  session mgmt     │    │  斜杠命令      │
+                    └────────┬─────────┘    └──────┬────────┘
+                             │                     │
+                             └──────┬──────────────┘
+                                    ▼
+┌───────────────────────────────────────────────────────┐
+│              Engine (核心对话循环)                      │
+│  query loop → API client → tool exec                  │
+│  SSE stream → event → TUI/ACP render                  │
+│  auto-continue · ToolCarryover ·                      │
+│  session mgmt · sub-agent · curator                   │
+├──────────────────┬────────────────────────────────────┤
+│  Tool Registry   │  bash / read / write / edit /      │
+│  (24 tools)      │  glob / grep / web_search / fetch  │
+│                  │  todo / delegate_task / skill_manage│
+├──────────────────┴────────────────────────────────────┤
+│  API Clients (reqwest + SSE)                          │
+│  Anthropic / OpenAI Chat / OpenAI Responses           │
+├───────────────────────────────────────────────────────┤
+│  Auxiliary Router (6 辅助任务)                         │
+│  按任务分派 provider/model · 402 自动降级 · chain     │
+├───────────────────────────────────────────────────────┤
+│  Prompts                                              │
+│  system_prompt build · context inject                 │
+│  CLAUDE.md / AGENTS.md parser                         │
+├───────────────────────────────────────────────────────┤
+│  Infrastructure                                       │
+│  config(mlua) / memory(manager+store)                 │
+│  mcp(rmcp) / acp(agent-client-protocol) / permissions │
+│  skills(registry+cache+curator) / hooks(lua)          │
+│  plugin(sandbox+bridge) / utils / cost_tracker        │
+│  gitignore · rate_limiter                             │
+└───────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -305,6 +325,7 @@ zeno
 | LLM API  | reqwest + eventsource-stream (SSE)             |
 | 配置     | mlua (Lua 5.4, vendored)                       |
 | MCP      | rmcp (stdio + HTTP Streamable)                 |
+| ACP      | agent-client-protocol (stdio JSON-RPC)         |
 | 序列化   | serde + serde_json + serde_yaml                |
 | 日志     | tracing + tracing-subscriber (JSON)            |
 | 文件监控 | notify（配置热加载）                           |

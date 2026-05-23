@@ -18,9 +18,18 @@ use super::types::{HookEvent, HookResult, VALID_HOOK_EVENTS};
 /// A stored hook callback (registry key reference).
 struct StoredHook {
     /// Registry key pointing to the Lua function.
-    key: RegistryKey,
+    key: Arc<RegistryKey>,
     /// The event name string (for diagnostics / logging).
     event_name: &'static str,
+}
+
+impl Clone for StoredHook {
+    fn clone(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            event_name: self.event_name,
+        }
+    }
 }
 
 /// The hook executor manages all registered Lua callbacks and fires them
@@ -29,6 +38,7 @@ struct StoredHook {
 /// It owns the Lua VM from the config loader (which holds all `zn.hook()`
 /// callback functions in its registry). This means the Lua VM stays alive
 /// for the entire session.
+#[derive(Clone)]
 pub struct HookExecutor {
     /// The Lua VM from the config loader — holds hook functions in its registry.
     /// Shared with LuaMemoryProvider so provider tables (with functions) are
@@ -55,7 +65,7 @@ impl HookExecutor {
     /// The function is stored in the Lua registry and the `RegistryKey`
     /// is kept in the executor for later invocation.
     pub fn register(&mut self, event: HookEvent, func: mlua::Function) -> Result<(), mlua::Error> {
-        let key = self.lua.lock().unwrap().create_registry_value(&func)?;
+        let key = Arc::new(self.lua.lock().unwrap().create_registry_value(&func)?);
         let event_name = event_name_for(event);
         self.hooks
             .entry(event)
@@ -78,7 +88,7 @@ impl HookExecutor {
         let mut results = Vec::new();
         for stored in callbacks {
             let lua = self.lua.lock().unwrap();
-            match lua.registry_value::<mlua::Function>(&stored.key) {
+            match lua.registry_value::<mlua::Function>(&*stored.key) {
                 Ok(func) => match func.call::<Value>(context.clone()) {
                     Ok(val) => {
                         if let Some(result) = parse_hook_result(&lua, event, &val) {

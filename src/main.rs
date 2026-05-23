@@ -1,3 +1,4 @@
+mod acp;
 mod api;
 mod auxiliary;
 mod config;
@@ -399,7 +400,7 @@ async fn main() -> anyhow::Result<()> {
     let mut engine = QueryEngine::new(
         client,
         model.to_string(),
-        system_prompt,
+        system_prompt.clone(),
         ConversationHistory::new(),
         registry.clone(),
         settings.max_turns,
@@ -426,7 +427,32 @@ async fn main() -> anyhow::Result<()> {
             .await;
     }
 
-    // TUI setup
+    // ── ACP mode (headless) ──
+    // If --acp is passed, skip TUI and run the ACP server on stdio.
+    let is_acp = std::env::args().any(|a| a == "--acp");
+    if is_acp {
+        // Minimal init: logging, config, client, tools, prompt
+        tracing::info!("Starting in ACP mode");
+
+        let acp_config = acp::server::AcpConfig {
+            settings: settings.clone(),
+            tool_registry: registry.clone(),
+            provider_name: provider_name.clone(),
+            model: model.clone(),
+            client_factory: Some(client_factory.clone()),
+            cwd: cwd.clone(),
+            system_prompt: system_prompt.clone(),
+            mcp_manager: Some(mcp_manager.clone()),
+            memory_manager: Some(memory_manager.clone()),
+            hook_executor: engine.hook_executor.clone(),
+            active_identity: settings.active_identity.clone(),
+            permission_mode: settings.permissions.clone(),
+        };
+
+        return acp::server::run_server(acp_config).await;
+    }
+
+    // ── TUI mode (interactive) ──
     use std::time::Duration;
     use tokio::sync::Mutex;
 
