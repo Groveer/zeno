@@ -470,35 +470,11 @@ async fn main() -> anyhow::Result<()> {
         memory_manager.clone(),
         skill_registry.clone(),
         mcp_manager.clone(),
-        todo_state.clone(),
         provider_name.to_string(),
         model.to_string(),
         builtin_tool_names,
-        cwd.clone(),
-    );
-
-    // Register method handlers (forward-looking API for JSON-RPC dispatch).
-    // These enable future StdioTransport integration (external TUI frontends).
-    gateway.register_handler(
-        "session.create",
-        Box::new(gateway::handlers::session::SessionCreateHandler),
-    );
-    gateway.register_handler(
-        "session.list",
-        Box::new(gateway::handlers::session::SessionListHandler),
-    );
-    gateway.register_handler(
-        "config.get",
-        Box::new(gateway::handlers::config::ConfigGetHandler::new(
-            settings.clone(),
-        )),
-    );
-    gateway.register_handler(
-        "prompt.submit",
-        Box::new(gateway::handlers::prompt::PromptSubmitHandler::new(
-            engine.clone(),
-        )),
-    );
+    )
+    .await;
 
     // Create App — pass Gateway's engine event sender for image paste, etc.
     let mut app = ui::app::App::with_identity(

@@ -3,8 +3,6 @@
 //! This module implements the `event_map()` method on Gateway,
 //! which converts streaming engine events into discrete UI commands.
 
-use std::sync::atomic::Ordering;
-
 use crate::engine::tui_events::EngineEvent;
 use crate::ui::status_bar::AppMode;
 
@@ -16,6 +14,10 @@ impl Gateway {
     /// This is the core event routing function: Engine → Gateway → UI.
     /// Each engine event is translated into zero or more UI commands
     /// that are sent to the appropriate components.
+    ///
+    /// Some events require side effects (e.g., setting permission_allow_all).
+    /// These are handled directly in `drain_engine_events()` before calling
+    /// this method.
     pub fn event_map(&self, event: EngineEvent) -> Vec<UiCommand> {
         match event {
             // ── Text stream ──────────────────────────────────────
@@ -112,13 +114,8 @@ impl Gateway {
                 input,
                 response_tx,
             } => {
-                // If allow_all is enabled, auto-approve without showing UI
-                if self.permission_allow_all.load(Ordering::Relaxed) {
-                    if let Some(tx) = response_tx.lock().unwrap().take() {
-                        let _ = tx.send("y".into());
-                    }
-                    return vec![];
-                }
+                // Permission check is now handled by Engine's permission_allow_all
+                // No need to check here - just forward to UI
                 vec![UiCommand::ShowPermission {
                     tool_name,
                     reason,
@@ -145,7 +142,8 @@ impl Gateway {
                 )]
             }
             EngineEvent::PermissionAllowAllSet => {
-                self.permission_allow_all.store(true, Ordering::Relaxed);
+                // Side effect handled by drain_engine_events() which sets
+                // the shared Arc<AtomicBool> lock-free. No UI commands needed.
                 vec![]
             }
             EngineEvent::SteerHandled => {

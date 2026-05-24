@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 
 /// Priority ordering for tool schemas/names: MCP first, then delegate_task, then others.
@@ -93,7 +94,7 @@ pub struct SubAgentDeps {
     /// Shared "allow all" flag from the parent engine — when the user answers
     /// "allow all" (y/a) to a permission prompt, this flag is set so subsequent
     /// tools in both the main agent AND sub-agents are auto-approved.
-    pub permission_allow_all: Option<Arc<Mutex<bool>>>,
+    pub permission_allow_all: Option<Arc<AtomicBool>>,
     /// Execution policy for rule-based command authorization.
     /// Shared with sub-agents so they respect the same exec_policy rules.
     pub exec_policy: Option<Arc<ExecPolicy>>,
@@ -162,7 +163,7 @@ impl SubAgentDeps {
 
     /// Attach the parent engine's "allow all" flag so sub-agents respect
     /// the user's session-wide blanket permission.
-    pub fn with_permission_allow_all(mut self, flag: Arc<Mutex<bool>>) -> Self {
+    pub fn with_permission_allow_all(mut self, flag: Arc<AtomicBool>) -> Self {
         self.permission_allow_all = Some(flag);
         self
     }

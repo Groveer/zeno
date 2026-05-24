@@ -10,6 +10,7 @@ use crate::hooks::executor::HookExecutor;
 use crate::memory::manager::SharedMemoryManager;
 use crate::permissions::execpolicy::ExecPolicy;
 use crate::tools::base::ToolRegistry;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 /// Holds all state for a conversation session.
@@ -41,8 +42,10 @@ pub struct QueryEngine {
     pub hook_executor: Option<HookExecutor>,
     /// When true, all permission checks are auto-approved for this session.
     /// Set when the user answers "a" (yes to all) in a permission prompt.
-    /// Wrapped in Arc<Mutex<>> so it can be shared with tool execution functions.
-    pub permission_allow_all: Arc<Mutex<bool>>,
+    /// Wrapped in `Arc<AtomicBool>` for lock-free sharing with Gateway and sub-agents.
+    /// Gateway sets this directly without acquiring the engine lock (avoiding a
+    /// race where the engine holds its lock waiting for permission oneshot reply).
+    pub permission_allow_all: Arc<AtomicBool>,
     /// Pending user input injected while the LLM is running (steer).
     /// Thread-safe: the TUI writes into this slot via `steer_into_slot()`,
     /// and the engine drains it after tool results are appended (before
@@ -164,7 +167,7 @@ impl QueryEngine {
             cwd,
             carryover: Carryover::default(),
             hook_executor: None,
-            permission_allow_all: Arc::new(Mutex::new(false)),
+            permission_allow_all: Arc::new(AtomicBool::new(false)),
             pending_steer: Arc::new(Mutex::new(None)),
             mcp_manager: None,
             memory_manager: None,
@@ -179,6 +182,19 @@ impl QueryEngine {
             active_identity: None,
             exec_policy,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Accessors (lock-free, no &mut self required)
+    // -----------------------------------------------------------------------
+
+    /// Return a reference to the shared `permission_allow_all` flag.
+    ///
+    /// Allows Gateway to access the flag without acquiring the engine lock,
+    /// avoiding a potential deadlock when the engine is waiting for a permission
+    /// oneshot reply while Gateway tries to set the allow-all flag.
+    pub fn permission_allow_all_ref(&self) -> Arc<AtomicBool> {
+        self.permission_allow_all.clone()
     }
 
     // -----------------------------------------------------------------------

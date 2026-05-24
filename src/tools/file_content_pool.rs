@@ -128,45 +128,6 @@ impl FileContentPool {
         total_lines
     }
 
-    /// Load a file into the pool (or replace if already present).
-    /// Returns the total line count.
-    ///
-    /// Note: prefer `insert_preserving_ranges` in production code to avoid
-    /// resetting read tracking on concurrent inserts.
-    #[allow(dead_code)]
-    pub fn insert(&mut self, resolved_path: &str, content: &str) -> usize {
-        let byte_size = content.len();
-        let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
-        let total_lines = lines.len();
-
-        // Remove existing entry if present
-        self.remove_internal(resolved_path);
-
-        // Evict LRU entries until we have room
-        while (self.files.len() >= MAX_FILES)
-            || (self.total_bytes + byte_size > MAX_TOTAL_BYTES && !self.files.is_empty())
-        {
-            if let Some(oldest_key) = self.lru.pop_back()
-                && let Some(removed) = self.files.remove(&oldest_key)
-            {
-                self.total_bytes -= removed.byte_size;
-            }
-        }
-
-        self.total_bytes += byte_size;
-        self.files.insert(
-            resolved_path.to_string(),
-            CachedFile {
-                lines,
-                byte_size,
-                read_ranges: Vec::new(),
-            },
-        );
-        self.lru.push_front(resolved_path.to_string());
-
-        total_lines
-    }
-
     /// Look up a file and request a range of lines.
     ///
     /// Returns `ReadOutcome::Hit` with the requested lines and overlap info,
@@ -446,7 +407,7 @@ mod tests {
     fn test_insert_and_read() {
         let mut pool = FileContentPool::new();
         let content = "line 0\nline 1\nline 2\nline 3\nline 4\n";
-        pool.insert("/test.rs", content);
+        pool.insert_preserving_ranges("/test.rs", content);
 
         match pool.read_range("/test.rs", 0, 3) {
             ReadOutcome::Hit {
@@ -469,7 +430,7 @@ mod tests {
     fn test_overlap_detection() {
         let mut pool = FileContentPool::new();
         let content = "a\nb\nc\nd\ne\n";
-        pool.insert("/test.rs", content);
+        pool.insert_preserving_ranges("/test.rs", content);
 
         // First read: lines 0-3 (a, b, c)
         let r1 = pool.read_range("/test.rs", 0, 3);
@@ -497,7 +458,7 @@ mod tests {
     #[test]
     fn test_full_overlap() {
         let mut pool = FileContentPool::new();
-        pool.insert("/test.rs", "a\nb\nc\n");
+        pool.insert_preserving_ranges("/test.rs", "a\nb\nc\n");
 
         // Read all
         pool.read_range("/test.rs", 0, 3);
@@ -514,7 +475,7 @@ mod tests {
     #[test]
     fn test_miss() {
         let mut pool = FileContentPool::new();
-        pool.insert("/test.rs", "a\nb\n");
+        pool.insert_preserving_ranges("/test.rs", "a\nb\n");
 
         match pool.read_range("/other.rs", 0, 2) {
             ReadOutcome::Miss => {}
@@ -525,7 +486,7 @@ mod tests {
     #[test]
     fn test_remove() {
         let mut pool = FileContentPool::new();
-        pool.insert("/test.rs", "a\nb\n");
+        pool.insert_preserving_ranges("/test.rs", "a\nb\n");
         assert!(pool.contains("/test.rs"));
 
         pool.remove("/test.rs");
@@ -543,7 +504,7 @@ mod tests {
         // Set a low limit for testing
         // (We can't easily change MAX_FILES, so test with fewer files)
         for i in 0..MAX_FILES {
-            pool.insert(&format!("/file_{}.rs", i), &format!("content {}", i));
+            pool.insert_preserving_ranges(&format!("/file_{}.rs", i), &format!("content {}", i));
         }
         assert_eq!(pool.len(), MAX_FILES);
 
@@ -551,7 +512,7 @@ mod tests {
         pool.read_range("/file_0.rs", 0, 1);
 
         // Insert one more — should evict the LRU (file_1, since file_0 was promoted)
-        pool.insert("/new.rs", "new content");
+        pool.insert_preserving_ranges("/new.rs", "new content");
         assert_eq!(pool.len(), MAX_FILES);
         assert!(pool.contains("/file_0.rs")); // Promoted — still present
         assert!(pool.contains("/new.rs")); // Newly inserted
@@ -560,7 +521,7 @@ mod tests {
     #[test]
     fn test_range_coalescing() {
         let mut pool = FileContentPool::new();
-        pool.insert("/test.rs", "0\n1\n2\n3\n4\n5\n6\n7\n8\n9\n");
+        pool.insert_preserving_ranges("/test.rs", "0\n1\n2\n3\n4\n5\n6\n7\n8\n9\n");
 
         // Read 0-3, then 2-6, then 5-10 — should coalesce to (0, 10)
         pool.read_range("/test.rs", 0, 3);
@@ -579,7 +540,7 @@ mod tests {
     #[test]
     fn test_insert_preserving_ranges_same_content() {
         let mut pool = FileContentPool::new();
-        pool.insert("/test.rs", "a\nb\nc\n");
+        pool.insert_preserving_ranges("/test.rs", "a\nb\nc\n");
 
         // Read some lines to build up read_ranges
         pool.read_range("/test.rs", 0, 2);
@@ -599,7 +560,7 @@ mod tests {
     #[test]
     fn test_insert_preserving_ranges_different_content() {
         let mut pool = FileContentPool::new();
-        pool.insert("/test.rs", "a\nb\nc\n");
+        pool.insert_preserving_ranges("/test.rs", "a\nb\nc\n");
 
         // Read some lines
         pool.read_range("/test.rs", 0, 2);
@@ -622,7 +583,7 @@ mod tests {
 
         // Insert a file but never read it — should still be None
         let mut pool = FileContentPool::new();
-        pool.insert("/empty.rs", "a\nb\nc\n");
+        pool.insert_preserving_ranges("/empty.rs", "a\nb\nc\n");
         assert!(pool.read_files_summary().is_none());
     }
 
@@ -630,7 +591,7 @@ mod tests {
     fn test_read_files_summary_fully_read() {
         let mut pool = FileContentPool::new();
         let content = "aaa\nbbb\nccc\nddd\neee\n";
-        pool.insert("/test.rs", content);
+        pool.insert_preserving_ranges("/test.rs", content);
         pool.read_range("/test.rs", 0, 5);
 
         let summary = pool.read_files_summary().unwrap();
@@ -642,7 +603,7 @@ mod tests {
     fn test_read_files_summary_partial_read() {
         let mut pool = FileContentPool::new();
         let content = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n";
-        pool.insert("/partial.rs", content);
+        pool.insert_preserving_ranges("/partial.rs", content);
         // Read only first 3 lines
         pool.read_range("/partial.rs", 0, 3);
 
@@ -653,8 +614,8 @@ mod tests {
     #[test]
     fn test_read_files_summary_multiple_files() {
         let mut pool = FileContentPool::new();
-        pool.insert("/a.rs", "1\n2\n3\n");
-        pool.insert("/b.rs", "x\ny\nz\n");
+        pool.insert_preserving_ranges("/a.rs", "1\n2\n3\n");
+        pool.insert_preserving_ranges("/b.rs", "x\ny\nz\n");
         pool.read_range("/a.rs", 0, 3);
         pool.read_range("/b.rs", 0, 3);
 

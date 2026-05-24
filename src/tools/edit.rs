@@ -1267,7 +1267,12 @@ fn find_closest_lines(old_string: &str, content: &str) -> String {
         #[allow(clippy::needless_range_loop)]
         for j in start..end {
             let line = content_lines[j];
-            let display = if line.len() > 80 { &line[..77] } else { line };
+            let cutoff = if line.len() > 80 {
+                line.floor_char_boundary(77)
+            } else {
+                line.len()
+            };
+            let display = &line[..cutoff];
             snippet.push_str(&format!("{:4}| {}\n", j + 1, display));
         }
         parts.push(snippet);

@@ -7,6 +7,5 @@ pub mod query;
 pub mod query_engine;
 pub mod review;
 pub mod session;
-pub mod stream_events;
 pub mod sub_agent;
 pub mod tui_events;

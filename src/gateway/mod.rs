@@ -10,17 +10,25 @@
 //!   on event_map + write to channel sender (`&self` safe)
 //! - `handle_input(&mut self)` — called from sync main loop, modifies handler
 //!   state / engine references
+//!
+//! ## Architecture
+//!
+//! Gateway is split into two parts:
+//! - **Gateway**: pure event routing (EngineEvent → UiCommand)
+//! - **CommandRouter**: slash command execution (business logic)
+//!
+//! This separation keeps Gateway focused on event routing while
+//! CommandRouter owns the service dependencies for slash commands.
 
-pub mod dispatch;
+pub mod commands;
 pub mod events;
-pub mod handlers;
 pub mod sub_agent;
 pub mod transport;
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 
-use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::engine::sub_agent::SubAgentEvent;
@@ -142,6 +150,10 @@ pub enum UiCommand {
     },
 
     // ── Misc ─────────────────────────────────────────────
+    /// Mark query as done (token count for status bar update).
+    QueryDone {
+        tokens: u64,
+    },
     /// Show an error message in the output.
     ShowError(String),
     /// Show a status message in the output.
@@ -157,32 +169,20 @@ pub use crate::ui::status_bar::StatusInfo;
 
 /// Gateway: event routing + command dispatch + session management.
 ///
-/// ## Field Bloat Tracking
+/// ## Architecture
 ///
-/// Gateway currently holds 6 `Arc<Mutex<...>>` dependencies. If `handlers/`
-/// grows beyond 10 handlers, consider splitting into sub-Gateways
-/// (SessionGateway, ConfigGateway), each holding only its own deps.
+/// Gateway is split into two parts:
+/// - **Gateway**: pure event routing (EngineEvent → UiCommand)
+/// - **CommandRouter**: slash command execution (business logic)
+///
+/// This separation keeps Gateway focused on event routing while
+/// CommandRouter owns the service dependencies for slash commands.
 pub struct Gateway {
-    /// Registered method handlers (JSON-RPC-style dispatch).
-    handlers: dispatch::HandlerRegistry,
     /// Engine reference (shared with main loop for status polling).
     engine: Arc<tokio::sync::Mutex<crate::engine::query_engine::QueryEngine>>,
-    /// Shared memory manager.
-    memory_manager: crate::memory::manager::SharedMemoryManager,
-    /// Shared skill registry.
-    skill_registry: Arc<tokio::sync::Mutex<crate::skills::registry::SkillRegistry>>,
-    /// Shared MCP manager.
-    mcp_manager: Arc<tokio::sync::Mutex<crate::mcp::manager::McpManager>>,
-    /// Shared todo state.
-    #[allow(dead_code)] // Accessed via main.rs, reserved for Gateway-side panel integration
-    todo_state: Arc<tokio::sync::Mutex<crate::tools::todo::TodoState>>,
-    /// Application settings.
-    settings: Arc<crate::config::settings::Settings>,
-    /// Global permission auto-approve flag (set when user answers "a").
-    permission_allow_all: AtomicBool,
     /// Transport for sending UiCommands to the UI.
     /// Wrapped in Mutex so emit() works with &self (needed for slash commands).
-    transport: Mutex<Box<dyn Transport>>,
+    transport: std::sync::Mutex<Box<dyn Transport>>,
     /// Sender for engine events (cloned into spawned engine tasks).
     engine_event_tx: mpsc::UnboundedSender<EngineEvent>,
     /// Receiver for engine events (drained by drain_engine_events()).
@@ -191,60 +191,62 @@ pub struct Gateway {
     sub_agent_tx: mpsc::UnboundedSender<SubAgentEvent>,
     /// Receiver for sub-agent events (drained by drain_sub_agent_events()).
     sub_agent_rx: mpsc::UnboundedReceiver<SubAgentEvent>,
-    /// Provider display name (for status bar).
-    provider_name: String,
-    /// Model display name (for status bar).
-    model_name: String,
-    /// Built-in tool names (for /tools command).
-    builtin_tool_names: Vec<String>,
-    /// Built-in tool count.
-    builtin_tool_count: usize,
-    /// Working directory.
-    #[allow(dead_code)] // Used by slash handlers via eng.cwd; field reserved for direct access
-    cwd: std::path::PathBuf,
+    /// Direct reference to engine's permission_allow_all AtomicBool.
+    /// Set lock-free by drain_engine_events() without needing the engine lock,
+    /// avoiding a race where the engine holds its lock waiting for a permission
+    /// oneshot reply while we try to set the flag.
+    permission_allow_all: Arc<AtomicBool>,
+    /// Command router for slash commands.
+    /// Owns service dependencies (memory, skills, mcp, settings).
+    commands: commands::CommandRouter,
 }
 
 impl Gateway {
-    pub fn new(
+    pub async fn new(
         engine: Arc<tokio::sync::Mutex<crate::engine::query_engine::QueryEngine>>,
         settings: Arc<crate::config::settings::Settings>,
         transport: Box<dyn Transport>,
         memory_manager: crate::memory::manager::SharedMemoryManager,
         skill_registry: Arc<tokio::sync::Mutex<crate::skills::registry::SkillRegistry>>,
         mcp_manager: Arc<tokio::sync::Mutex<crate::mcp::manager::McpManager>>,
-        todo_state: Arc<tokio::sync::Mutex<crate::tools::todo::TodoState>>,
         provider_name: String,
         model_name: String,
         builtin_tool_names: Vec<String>,
-        cwd: std::path::PathBuf,
     ) -> Self {
-        let builtin_tool_count = builtin_tool_names.len();
         // Create engine event channel — Gateway owns both ends.
-        // The sender is cloned into engine tasks; the receiver is drained
-        // by drain_engine_events() each render cycle.
         let (engine_event_tx, engine_event_rx) = mpsc::unbounded_channel();
-        // Create sub-agent event channel — separate from engine events
-        // to avoid head-of-line blocking.
+        // Create sub-agent event channel — separate from engine events.
         let (sub_agent_tx, sub_agent_rx) = mpsc::unbounded_channel();
-        Self {
-            handlers: dispatch::HandlerRegistry::new(),
-            engine,
+
+        // Create command router with service dependencies.
+        let commands = commands::CommandRouter::new(
+            engine.clone(),
+            settings,
             memory_manager,
             skill_registry,
             mcp_manager,
-            todo_state,
-            settings,
-            permission_allow_all: AtomicBool::new(false),
-            transport: Mutex::new(transport),
+            engine_event_tx.clone(),
+            provider_name,
+            model_name,
+            builtin_tool_names,
+        );
+
+        // Extract a direct reference to engine's `permission_allow_all` (Arc<AtomicBool>)
+        // so Gateway can set it lock-free without acquiring the engine lock.
+        // This avoids a race where the engine holds its lock waiting for a permission
+        // oneshot reply while Gateway tries to set the allow-all flag.
+        // Using the lock-free accessor so this never touches the engine mutex.
+        let permission_allow_all = engine.lock().await.permission_allow_all_ref();
+
+        Self {
+            engine,
+            transport: std::sync::Mutex::new(transport),
             engine_event_tx,
             engine_event_rx,
             sub_agent_tx,
             sub_agent_rx,
-            provider_name,
-            model_name,
-            builtin_tool_names,
-            builtin_tool_count,
-            cwd,
+            permission_allow_all,
+            commands,
         }
     }
 
@@ -260,6 +262,15 @@ impl Gateway {
         for _ in 0..MAX_BATCH {
             match self.engine_event_rx.try_recv() {
                 Ok(event) => {
+                    // Lock-free permission_allow_all: set atomically without
+                    // acquiring the engine lock. This avoids a race where the
+                    // engine holds its lock waiting for a permission oneshot
+                    // reply while we try to set the allow-all flag.
+                    if matches!(event, EngineEvent::PermissionAllowAllSet) {
+                        self.permission_allow_all
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+
                     let commands = self.event_map(event);
                     for cmd in commands {
                         self.emit(cmd);
@@ -325,7 +336,17 @@ impl Gateway {
         cancel_token: tokio_util::sync::CancellationToken,
     ) {
         if input.starts_with('/') {
-            self.dispatch_slash(input).await;
+            // Delegate to command router
+            match self.commands.dispatch(input).await {
+                commands::CommandResult::Handled(cmds) => {
+                    for cmd in cmds {
+                        self.emit(cmd);
+                    }
+                }
+                commands::CommandResult::PassThrough => {
+                    self.submit_query(input, images, cancel_token).await;
+                }
+            }
         } else {
             self.submit_query(input, images, cancel_token).await;
         }
@@ -349,115 +370,8 @@ impl Gateway {
         });
     }
 
-    // Accessors for external consumers (main.rs, future handlers).
-    // Not yet called but part of the public API surface.
-    #[allow(dead_code)]
-    pub fn engine(&self) -> &Arc<tokio::sync::Mutex<crate::engine::query_engine::QueryEngine>> {
-        &self.engine
-    }
-    #[allow(dead_code)]
-    pub fn settings(&self) -> &Arc<crate::config::settings::Settings> {
-        &self.settings
-    }
-    #[allow(dead_code)]
-    pub fn memory_manager(&self) -> &crate::memory::manager::SharedMemoryManager {
-        &self.memory_manager
-    }
-    #[allow(dead_code)]
-    pub fn skill_registry(
-        &self,
-    ) -> &Arc<tokio::sync::Mutex<crate::skills::registry::SkillRegistry>> {
-        &self.skill_registry
-    }
-    #[allow(dead_code)]
-    pub fn mcp_manager(&self) -> &Arc<tokio::sync::Mutex<crate::mcp::manager::McpManager>> {
-        &self.mcp_manager
-    }
-    #[allow(dead_code)]
-    pub fn todo_state(&self) -> &Arc<tokio::sync::Mutex<crate::tools::todo::TodoState>> {
-        &self.todo_state
-    }
-    #[allow(dead_code)]
-    pub fn provider_name(&self) -> &str {
-        &self.provider_name
-    }
-    #[allow(dead_code)]
-    pub fn model_name(&self) -> &str {
-        &self.model_name
-    }
-    #[allow(dead_code)]
-    pub fn set_model_name(&mut self, name: String) {
-        self.model_name = name;
-    }
-    #[allow(dead_code)]
-    pub fn builtin_tool_names(&self) -> &[String] {
-        &self.builtin_tool_names
-    }
-    #[allow(dead_code)]
-    pub fn builtin_tool_count(&self) -> usize {
-        self.builtin_tool_count
-    }
-    #[allow(dead_code)]
-    pub fn cwd(&self) -> &std::path::Path {
-        &self.cwd
-    }
-    #[allow(dead_code)]
-    pub fn set_permission_allow_all(&self, allow: bool) {
-        self.permission_allow_all.store(allow, Ordering::Relaxed);
-    }
-    #[allow(dead_code)]
-    pub fn permission_allow_all(&self) -> bool {
-        self.permission_allow_all.load(Ordering::Relaxed)
-    }
-
     /// Get the engine event sender (for spawning tasks that need to send events).
     pub fn engine_event_sender(&self) -> mpsc::UnboundedSender<EngineEvent> {
         self.engine_event_tx.clone()
-    }
-
-    // ── Method handler registration ──
-
-    /// Register a method handler for JSON-RPC-style dispatch.
-    ///
-    /// Similar to Hermes `@method` decorator pattern. Handlers are looked up
-    /// by name in `dispatch()` and can be called from both slash command routes
-    /// and external RPC interfaces (e.g., future StdioTransport).
-    ///
-    /// ## Example
-    ///
-    /// ```ignore
-    /// gateway.register_handler("session.create", SessionCreateHandler::new());
-    /// gateway.register_handler("config.get", ConfigGetHandler::new(settings.clone()));
-    /// ```
-    #[allow(dead_code)] // API surface for future RPC integration
-    pub fn register_handler(&mut self, name: &str, handler: Box<dyn dispatch::MethodHandler>) {
-        self.handlers.insert(name.to_string(), handler);
-    }
-
-    /// Dispatch a method call to the registered handler.
-    ///
-    /// Looks up `name` in the handler registry and calls it with `params`.
-    /// Returns the handler's result or `MethodError::NotFound` if no handler
-    /// is registered for the given name.
-    #[allow(dead_code, unused_variables)] // API surface for future RPC integration
-    pub fn dispatch(&self, name: &str, params: &Value) -> Result<Value, dispatch::MethodError> {
-        // Need &mut to call handle() — we use interior mutability via the
-        // handler's own mechanisms (or this requires &mut self).
-        // For now, dispatch requires &mut self at the call site.
-        // This method is kept as a convenience wrapper.
-        Err(dispatch::MethodError::NotFound(name.into()))
-    }
-
-    /// Mutable dispatch — requires &mut self for handler state mutation.
-    #[allow(dead_code)]
-    pub fn dispatch_mut(
-        &mut self,
-        name: &str,
-        params: &Value,
-    ) -> Result<Value, dispatch::MethodError> {
-        match self.handlers.get_mut(name) {
-            Some(handler) => handler.handle(params),
-            None => Err(dispatch::MethodError::NotFound(name.into())),
-        }
     }
 }

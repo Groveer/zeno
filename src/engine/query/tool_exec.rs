@@ -6,6 +6,7 @@
 //! - ToolExecConfig for session-scoped execution parameters
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
@@ -130,7 +131,7 @@ pub(super) fn should_parallelize(tool_uses: &[CollectedToolUse], cwd: &Path) -> 
 pub(super) struct ToolExecConfig<'a> {
     pub permission_mode: &'a crate::config::settings::PermissionMode,
     pub trusted_paths: &'a [String],
-    pub permission_allow_all: &'a Arc<Mutex<bool>>,
+    pub permission_allow_all: &'a Arc<AtomicBool>,
     pub tools: &'a ToolRegistry,
     pub hook_executor: Option<&'a HookExecutor>,
     pub tool_cache: Option<&'a std::sync::Mutex<crate::tools::cache::ToolCache>>,
@@ -247,10 +248,9 @@ pub(super) async fn execute_single_tool_tui(
     }
 
     // --- Permission check ---
-    let already_allowed = {
-        let guard = config.permission_allow_all.lock().unwrap();
-        *guard
-    };
+    let already_allowed = config
+        .permission_allow_all
+        .load(std::sync::atomic::Ordering::Relaxed);
 
     let permitted = if already_allowed {
         tracing::debug!(
@@ -315,8 +315,9 @@ pub(super) async fn execute_single_tool_tui(
                         "User responded to permission prompt"
                     );
                     if allowed && matches!(r.as_str(), "a" | "all" | "always") {
-                        let mut guard = config.permission_allow_all.lock().unwrap();
-                        *guard = true;
+                        config
+                            .permission_allow_all
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
                         let _ = sender.send(EngineEvent::Status(
                             "All permissions granted for this session.".into(),
                         ));

@@ -556,6 +556,9 @@ impl App {
             UiCommand::SetModel(model) => {
                 self.status.update(UiCommand::SetModel(model));
             }
+            UiCommand::QueryDone { tokens } => {
+                self.status.update(UiCommand::UpdateTokens(tokens));
+            }
 
             // ── PermissionOverlay — delegate to overlay ──────────
             UiCommand::ShowPermission {

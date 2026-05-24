@@ -1091,8 +1091,7 @@ async fn check_sub_agent_permission(
 
     // 1. Check session-wide "allow all" flag
     if let Some(ref allow_all) = deps.permission_allow_all
-        && let Ok(guard) = allow_all.lock()
-        && *guard
+        && allow_all.load(std::sync::atomic::Ordering::Relaxed)
     {
         tracing::debug!(
             tool_name = %tool_name,
@@ -1176,10 +1175,8 @@ async fn check_sub_agent_permission(
 
                 // If user said "allow all", set the session-wide flag
                 if allowed && matches!(r.as_str(), "a" | "all" | "always") {
-                    if let Some(ref allow_all) = deps.permission_allow_all
-                        && let Ok(mut guard) = allow_all.lock()
-                    {
-                        *guard = true;
+                    if let Some(ref allow_all) = deps.permission_allow_all {
+                        allow_all.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
                     let _ = sender.send(EngineEvent::Status(
                         "All permissions granted for this session (from sub-agent).".into(),
