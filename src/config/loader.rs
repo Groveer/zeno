@@ -15,9 +15,9 @@ use mlua::{Lua, LuaOptions, LuaSerdeExt, StdLib, Value};
 
 use super::paths;
 use super::settings::{
-    AuxiliaryConfig, DelegationConfig, EngineConfig, GuidelineEntry, GuidelinesConfig,
-    IdentityConfig, McpServerConfig, PermissionMode, ProviderConfig, Settings, SkillsConfig,
-    ToolsConfig, WebSearchConfig,
+    AuxiliaryConfig, DelegationConfig, EngineConfig, GuidelinesConfig, IdentityConfig,
+    McpServerConfig, PermissionMode, ProviderConfig, Settings, SkillsConfig, ToolsConfig,
+    WebSearchConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -1526,24 +1526,9 @@ return zn.config()
         );
 
         let guidelines = settings.role.guidelines.unwrap();
-        match guidelines {
-            GuidelinesConfig::Multi(ref entries) => {
-                assert_eq!(entries.len(), 2);
-                assert!(
-                    matches!(&entries[0], GuidelineEntry::Text(s) if s == "- Always check logs first."),
-                    "expected Text entry, got {:?}",
-                    entries[0]
-                );
-                assert!(
-                    matches!(&entries[1], GuidelineEntry::Ref((text, _)) if text == "- Company rules:"),
-                    "expected Ref entry, got {:?}",
-                    entries[1]
-                );
-            }
-            _ => panic!("Expected Multi variant"),
-        }
 
-        // Also verify that resolve() produces the combined content
+        // Verify resolve() produces the combined content from both
+        // inline text and external file reference.
         let resolved = guidelines.resolve(dir.path()).unwrap();
         assert!(resolved.contains("- Always check logs first."));
         assert!(resolved.contains("- Follow company policy."));

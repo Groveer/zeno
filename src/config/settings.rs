@@ -640,6 +640,30 @@ mod tests {
         assert_eq!(settings.active_identity, None);
         assert!(settings.identities.is_empty());
     }
+
+    #[test]
+    fn test_guidelines_config_deserialization() {
+        // GuidelinesConfig::Multi with a mix of Text and Ref entries
+        let json = r#"[
+            "- Always check logs first.",
+            ["- Company rules:", "/path/to/company.md"]
+        ]"#;
+        let config: GuidelinesConfig = serde_json::from_str(json).unwrap();
+        match config {
+            GuidelinesConfig::Multi(ref entries) => {
+                assert_eq!(entries.len(), 2);
+                assert!(
+                    matches!(&entries[0], GuidelineEntry::Text(s) if s == "- Always check logs first."),
+                    "expected Text entry"
+                );
+                assert!(
+                    matches!(&entries[1], GuidelineEntry::Ref((text, _)) if text == "- Company rules:"),
+                    "expected Ref entry"
+                );
+            }
+            _ => panic!("Expected Multi variant"),
+        }
+    }
 }
 // ---------------------------------------------------------------------------
 // MCP
