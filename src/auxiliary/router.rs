@@ -5,14 +5,7 @@
 //! provider/model pair.
 //!
 //! Routing functions (`resolve_provider`, `build_provider_chain`, etc.)
-//! are actively used. Some task variants and error variants are only
-//! constructed at runtime via `config()` lookup or are reserved for
-//! future task types.
-#![allow(
-    dead_code,
-    reason = "planned task variants (SessionSearch) and error variant (UnsupportedParameter)"
-)]
-
+//! are actively used.
 use std::collections::HashMap;
 
 use crate::config::settings::{AuxiliaryTaskConfig, Settings};
@@ -118,17 +111,6 @@ pub enum AuxiliaryTask {
 }
 
 impl AuxiliaryTask {
-    /// Get the task's config key name (matches `auxiliary` section in config).
-    pub fn config_key(&self) -> &str {
-        match self {
-            Self::Compression => "compression",
-            Self::Vision => "vision",
-            Self::WebExtract => "web_fetch",
-            Self::TitleGeneration => "title_generation",
-            Self::SessionSearch => "session_search",
-        }
-    }
-
     /// Get the task config from settings.
     pub fn config<'a>(&self, settings: &'a Settings) -> &'a AuxiliaryTaskConfig {
         match self {
@@ -140,17 +122,6 @@ impl AuxiliaryTask {
         }
     }
 
-    /// Default temperature for this task type.
-    pub fn default_temperature(&self) -> f64 {
-        match self {
-            Self::Compression => 0.3,
-            Self::Vision => 0.3,
-            Self::WebExtract => 0.3,
-            Self::TitleGeneration => 0.3,
-            Self::SessionSearch => 0.3,
-        }
-    }
-
     /// Default max_tokens for this task type.
     pub fn default_max_tokens(&self) -> u32 {
         match self {
@@ -159,17 +130,6 @@ impl AuxiliaryTask {
             Self::WebExtract => 4096,
             Self::TitleGeneration => 256,
             Self::SessionSearch => 1024,
-        }
-    }
-
-    /// Config table name in the `auxiliary` section.
-    pub fn config_table_name(&self) -> &str {
-        match self {
-            Self::Compression => "compression",
-            Self::Vision => "vision",
-            Self::WebExtract => "web_extract",
-            Self::TitleGeneration => "title_generation",
-            Self::SessionSearch => "session_search",
         }
     }
 }
@@ -223,9 +183,6 @@ pub enum AuxiliaryError {
 
     #[error("Invalid response from provider '{0}': {1}")]
     InvalidResponse(String, String),
-
-    #[error("Unsupported parameter '{0}' on provider '{1}'")]
-    UnsupportedParameter(String, String),
 }
 
 /// Check if an HTTP status code indicates a payment error.
@@ -236,15 +193,6 @@ pub fn is_payment_error(status: u16) -> bool {
 /// Check if an HTTP status code indicates an auth error.
 pub fn is_auth_error(status: u16) -> bool {
     status == 401 || status == 403
-}
-
-/// Check if an HTTP status code indicates a connection / server error
-/// that might be transient and worth retrying.
-///
-/// Delegates to the shared `api::retry::is_retryable_status_default()`.
-/// Kept as a convenience re-export for use within the auxiliary module.
-pub fn is_connection_error(status: u16) -> bool {
-    crate::api::retry::is_retryable_status_default(status)
 }
 
 /// Route an auxiliary task to a concrete provider.
@@ -551,18 +499,6 @@ mod tests {
     }
 
     #[test]
-    fn test_task_config_key() {
-        assert_eq!(AuxiliaryTask::Compression.config_key(), "compression");
-        assert_eq!(AuxiliaryTask::Vision.config_key(), "vision");
-        assert_eq!(AuxiliaryTask::WebExtract.config_key(), "web_fetch");
-        assert_eq!(
-            AuxiliaryTask::TitleGeneration.config_key(),
-            "title_generation"
-        );
-        assert_eq!(AuxiliaryTask::SessionSearch.config_key(), "session_search");
-    }
-
-    #[test]
     fn test_model_omits_temperature() {
         assert!(model_omits_temperature("kimi-latest"));
         assert!(model_omits_temperature("kimi"));
@@ -646,14 +582,5 @@ mod tests {
         assert!(is_auth_error(401));
         assert!(is_auth_error(403));
         assert!(!is_auth_error(402));
-    }
-
-    #[test]
-    fn test_is_connection_error() {
-        assert!(is_connection_error(500));
-        assert!(is_connection_error(502));
-        assert!(is_connection_error(429));
-        assert!(!is_connection_error(400));
-        assert!(!is_connection_error(402));
     }
 }

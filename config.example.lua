@@ -105,7 +105,8 @@ zn.set_model("gpt-5.5")
 -- Auxiliary models (cheaper models for specific tasks)
 -- ═══════════════════════════════════════════════
 --
--- Each task can override provider, model, url, api_key, timeout, extra_body, max_tokens, temperature.
+-- Each task can override provider, model, url, api_key, extra_body, max_tokens, temperature, timeout.
+-- timeout = 0 → no timeout (wait indefinitely).
 -- provider = "auto" → try active provider first, then fallback to others.
 -- model = "" → inherit from the resolved provider or main model.
 -- url = nil → use the resolved provider's base_url.
@@ -118,12 +119,12 @@ zn.auxiliaries({
     model = "",
     url = nil,
     api_key = nil,
-    timeout = 30,
+    timeout = 30,    -- seconds; 0 = no timeout
     max_tokens = 0,
     temperature = nil,
   },
   vision = { provider = "auto", model = "", timeout = 30 },
-  web_fetch = { provider = "auto", model = "", timeout = 60 },
+  web_fetch = { provider = "auto", model = "", timeout = 60, max_tokens = 2048 },
   title_generation = { provider = "auto", model = "", timeout = 30, max_tokens = 256 },
   session_search = { provider = "auto", model = "", timeout = 30, max_tokens = 1024 },
   delegation = { provider = "auto", model = "", timeout = 60 },
@@ -353,8 +354,8 @@ zn.compact_threshold(0.5)
 -- All values use sensible defaults — uncomment to customize.
 
 -- zn.engine({
---   max_auto_continue = 3,       -- max retries when LLM stops without tool use
---   stream_timeout_secs = 120,   -- abort if no token for this many seconds
+--   max_auto_continue = 3,         -- max retries when LLM stops without tool use
+--   stream_timeout_secs = 120,     -- stream idle timeout (no event for N seconds), 0 = no timeout
 --   collapse_char_limit = 2400,  -- text blocks larger than this get head/tail collapsed
 --   collapse_head_chars = 900,   -- chars to keep from the beginning
 --   collapse_tail_chars = 500,   -- chars to keep from the end

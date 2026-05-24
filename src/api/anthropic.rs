@@ -21,6 +21,7 @@ pub struct AnthropicClient {
 }
 
 impl AnthropicClient {
+    /// Create a client without a per-request timeout (uses reqwest's default).
     pub fn new(api_key: String, base_url: String) -> Self {
         Self {
             http: Client::new(),

@@ -798,11 +798,10 @@ impl Default for DelegationConfig {
 pub struct EngineConfig {
     /// Maximum auto-continue attempts per user input.
     pub max_auto_continue: u32,
-    /// Per-event stream timeout in seconds.
+    /// Per-stream-event idle timeout in seconds.
     ///
     /// If the stream produces no event within this duration, it's considered
-    /// stalled and triggers a retry (up to `llm.max_retries` times).
-    /// Set to `0` to disable the timeout (wait indefinitely for stream events).
+    /// stalled and triggers a retry. Set to `0` to disable (wait indefinitely).
     pub stream_timeout_secs: u64,
     /// Context collapse char limit.
     pub collapse_char_limit: usize,
@@ -928,7 +927,6 @@ pub struct AuxiliaryTaskConfig {
     /// API key or environment variable name (auto-detected).
     /// Same logic as `ProviderConfig.api_key` and `WebSearchConfig.api_key`.
     pub api_key: Option<String>,
-    pub timeout: f64,
     /// Per-task extra body fields (provider-specific request parameters).
     /// E.g. `{"enable_thinking": false}` for providers that support it.
     #[serde(default)]
@@ -936,12 +934,19 @@ pub struct AuxiliaryTaskConfig {
     /// Maximum output tokens for this task. 0 = use default (4096).
     #[serde(default)]
     pub max_tokens: u32,
+    /// Request timeout in seconds for this task. 0 = no timeout (wait indefinitely).
+    #[serde(default = "default_task_timeout")]
+    pub timeout: f64,
     /// Temperature override for this task. None = use task-specific default.
     pub temperature: Option<f64>,
 }
 
 fn default_auto() -> String {
     "auto".into()
+}
+
+fn default_task_timeout() -> f64 {
+    30.0
 }
 
 impl Default for AuxiliaryTaskConfig {
@@ -951,9 +956,9 @@ impl Default for AuxiliaryTaskConfig {
             model: String::new(),
             url: None,
             api_key: None,
-            timeout: 30.0,
             extra_body: HashMap::new(),
             max_tokens: 0,
+            timeout: default_task_timeout(),
             temperature: None,
         }
     }

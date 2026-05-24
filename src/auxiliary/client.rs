@@ -3,7 +3,7 @@
 //! Provides a unified `call_auxiliary()` function that:
 //! 1. Resolves the provider/model for the task via the router
 //! 2. Creates the appropriate API client based on `api_type` (OpenAI, Anthropic, Responses)
-//! 3. Calls through the main model's `call_messages` trait method (non-streaming wrapper)
+//! 3. Calls through `call_with_idle_timeout` (streaming with per-event idle timeout)
 //! 4. Handles error retries: 402 (payment), 401/403 (auth), 429/5xx (connection)
 //! 5. Auto-retries without temperature when provider rejects it
 //! 6. Validates response before returning
@@ -15,8 +15,10 @@ use std::time::Duration;
 
 use crate::api::client::SupportsStreamingMessages;
 use crate::api::retry::{RetryConfig, get_retry_delay, is_retryable_status_default};
-use crate::api::types::{ContentBlock, Message, Role};
+use crate::api::types::{ApiError, ContentBlock, Message, Role, StreamEvent};
 use crate::config::settings::{ApiType, Settings};
+
+use futures::StreamExt;
 
 use super::router::{
     AuxiliaryError, AuxiliaryTask, ResolvedProvider, effective_temperature, is_auth_error,
@@ -222,8 +224,8 @@ async fn call_resolved(
 
 /// Make a non-streaming call with raw JSON messages (supports both text and vision).
 ///
-/// Uses the main model's `call_messages` trait method, which supports all three
-/// API types (OpenAI, OpenAI Responses, Anthropic).
+/// Uses `call_with_idle_timeout` under the hood, supporting all three
+/// API types (OpenAI, OpenAI Responses, Anthropic) with per-event idle timeout.
 ///
 /// Retry strategy:
 /// 1. **Connection/server errors (429/5xx)**: retry with exponential backoff.
@@ -251,7 +253,7 @@ pub(super) async fn call_resolved_with_messages(
     let system = extract_system_prompt(raw_messages);
 
     // Merge per-task extra_body into max_tokens override via response_format
-    // (extra_body is not directly supported by call_messages, so we apply
+    // (extra_body is not directly supported by stream_messages, so we apply
     // max_completion_tokens adaptation at this level)
     let use_completion_tokens = provider.extra_body.contains_key("max_completion_tokens");
     let effective_max_tokens = if use_completion_tokens {
@@ -269,16 +271,15 @@ pub(super) async fn call_resolved_with_messages(
     let mut attempts: u32 = 0;
 
     loop {
-        match client
-            .call_messages(
-                &provider.model,
-                &system,
-                &messages,
-                &[], // no tools
-                effective_max_tokens,
-                None, // no response_format
-            )
-            .await
+        match call_with_idle_timeout(
+            &*client,
+            &provider.model,
+            &system,
+            &messages,
+            effective_max_tokens,
+            provider.timeout,
+        )
+        .await
         {
             Ok(text) if !text.is_empty() => {
                 return Ok(AuxiliaryResult { content: text });
@@ -301,16 +302,15 @@ pub(super) async fn call_resolved_with_messages(
                         "Retrying without temperature"
                     );
                     // Retry with no temperature — modify the approach
-                    if let Ok(text) = client
-                        .call_messages(
-                            &provider.model,
-                            &system,
-                            &messages,
-                            &[],
-                            effective_max_tokens,
-                            None,
-                        )
-                        .await
+                    if let Ok(text) = call_with_idle_timeout(
+                        &*client,
+                        &provider.model,
+                        &system,
+                        &messages,
+                        effective_max_tokens,
+                        provider.timeout,
+                    )
+                    .await
                         && !text.is_empty()
                     {
                         return Ok(AuxiliaryResult { content: text });
@@ -324,16 +324,15 @@ pub(super) async fn call_resolved_with_messages(
                         parameter = "max_completion_tokens",
                         "Retrying without max_tokens"
                     );
-                    if let Ok(text) = client
-                        .call_messages(
-                            &provider.model,
-                            &system,
-                            &messages,
-                            &[],
-                            None, // no max_tokens
-                            None,
-                        )
-                        .await
+                    if let Ok(text) = call_with_idle_timeout(
+                        &*client,
+                        &provider.model,
+                        &system,
+                        &messages,
+                        None, // no max_tokens
+                        provider.timeout,
+                    )
+                    .await
                         && !text.is_empty()
                     {
                         return Ok(AuxiliaryResult { content: text });
@@ -362,6 +361,61 @@ pub(super) async fn call_resolved_with_messages(
 // ---------------------------------------------------------------------------
 // Client creation
 // ---------------------------------------------------------------------------
+
+/// Call `stream_messages` with per-event idle timeout.
+///
+/// Wraps each stream event with a per-event idle timeout.
+/// Previously this was done via a non-streaming wrapper that had no timeout protection.
+/// If no event arrives within `idle_timeout_secs`, returns
+/// `ApiError::Stream`, which is classified as a retryable connection error.
+///
+/// Set `idle_timeout_secs` to 0.0 to disable the timeout.
+async fn call_with_idle_timeout(
+    client: &dyn SupportsStreamingMessages,
+    model: &str,
+    system: &str,
+    messages: &[Message],
+    max_tokens: Option<u32>,
+    idle_timeout_secs: f64,
+) -> Result<String, ApiError> {
+    let stream = client
+        .stream_messages(model, system, messages, &[], max_tokens, None)
+        .await?;
+
+    tokio::pin!(stream);
+    let mut full_text = String::new();
+
+    let timeout_dur = if idle_timeout_secs > 0.0 {
+        Some(Duration::from_secs_f64(idle_timeout_secs))
+    } else {
+        None
+    };
+
+    loop {
+        let event = if let Some(dur) = timeout_dur {
+            match tokio::time::timeout(dur, stream.next()).await {
+                Ok(result) => result,
+                Err(_elapsed) => {
+                    return Err(ApiError::Stream(format!(
+                        "Stream idle timeout after {}s of inactivity",
+                        idle_timeout_secs
+                    )));
+                }
+            }
+        } else {
+            stream.next().await
+        };
+
+        match event {
+            Some(Ok(StreamEvent::TextDelta(text))) => full_text.push_str(&text),
+            Some(Ok(StreamEvent::MessageComplete { .. })) | None => break,
+            Some(Ok(_)) => continue,
+            Some(Err(e)) => return Err(e),
+        }
+    }
+
+    Ok(full_text)
+}
 
 /// Create the appropriate API client based on `api_type`.
 fn create_api_client(
