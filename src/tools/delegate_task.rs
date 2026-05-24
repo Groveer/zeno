@@ -8,11 +8,149 @@
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use super::base::{Tool, ToolContext, ToolError};
 use crate::engine::sub_agent::{run_delegated_task, run_delegated_tasks_batch};
+use crate::store::agent_graph::EdgeStatus;
 use zeno_tools::{JsonToolOutput, ToolOutput};
+
+/// Maximum goal length stored in the graph store (byte length, approximate).
+///
+/// Longer goals are truncated to prevent JSON file bloat. This is a safety net
+/// — the display-side truncation in GraphPanel (char-based, ~50 chars) is tighter,
+/// so this storage limit only affects what lands in the persisted JSON.
+const STORAGE_MAX_GOAL_LEN: usize = 200;
+
+/// Drop guard that closes a spawn edge on panic or early return.
+///
+/// Normal path: call `.close().await` to synchronously close the edge.
+/// The `close()` method takes `graph_store`, so Drop becomes a no-op
+/// (no memory leak, no redundant write).
+///
+/// Panic path: if dropped without `.close()` being called, the Drop impl
+/// does a best-effort close via `tokio::spawn`.
+struct CloseEdgeGuard {
+    graph_store: Option<Arc<dyn crate::store::agent_graph::SubAgentGraphStore>>,
+    child_id: String,
+}
+
+impl CloseEdgeGuard {
+    /// Explicitly close the edge synchronously. After this, Drop is a no-op
+    /// because `graph_store` has been taken.
+    async fn close(mut self) {
+        if let Some(store) = self.graph_store.take() {
+            let _ = store
+                .set_edge_status(&self.child_id, EdgeStatus::Closed)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(error = %e, child_id = %self.child_id, "Failed to close spawn edge");
+                });
+        }
+    }
+}
+
+impl Drop for CloseEdgeGuard {
+    fn drop(&mut self) {
+        if let Some(store) = self.graph_store.take() {
+            let child_id = self.child_id.clone();
+            tokio::spawn(async move {
+                let _ = store.set_edge_status(&child_id, EdgeStatus::Closed).await;
+            });
+        }
+    }
+}
+
+/// Drop guard that closes multiple spawn edges on panic or early return.
+///
+/// Uses `Arc<Mutex<Vec<String>>>` so the guard can be installed *before*
+/// the recording loop, eliminating the race window where task cancellation
+/// between iterations would orphan Open edges.
+///
+/// Normal path: call `.close().await` for synchronous close + leak-free Drop.
+/// Panic path: Drop impl does best-effort close via `tokio::spawn`.
+struct CloseEdgesGuard {
+    graph_store: Option<Arc<dyn crate::store::agent_graph::SubAgentGraphStore>>,
+    child_ids: Arc<Mutex<Vec<String>>>,
+}
+
+impl CloseEdgesGuard {
+    /// Explicitly close all edges synchronously. After this, Drop is a no-op
+    /// because `graph_store` has been taken.
+    async fn close(mut self) {
+        if let Some(store) = self.graph_store.take() {
+            let child_ids = self.child_ids.lock().unwrap().clone();
+            for child_id in &child_ids {
+                let _ = store
+                    .set_edge_status(child_id, EdgeStatus::Closed)
+                    .await
+                    .map_err(|e| {
+                        tracing::warn!(
+                            error = %e,
+                            child_id = %child_id,
+                            "Failed to close spawn edge"
+                        );
+                    });
+            }
+        }
+    }
+}
+
+impl Drop for CloseEdgesGuard {
+    fn drop(&mut self) {
+        if let Some(store) = self.graph_store.take() {
+            let child_ids = self.child_ids.lock().unwrap().clone();
+            tokio::spawn(async move {
+                for child_id in child_ids {
+                    let _ = store.set_edge_status(&child_id, EdgeStatus::Closed).await;
+                }
+            });
+        }
+    }
+}
+
+/// Helper: record a sub-agent spawn edge in the graph store (if available).
+/// Returns the generated child_id.
+///
+/// Synchronous (no `tokio::spawn`) — the RwLock write is fast, and awaiting
+/// it here guarantees the edge is persisted before any `close_spawn_edge`
+/// call, eliminating the open→never-closed race.
+async fn record_spawn_edge(
+    graph_store: &Option<Arc<dyn crate::store::agent_graph::SubAgentGraphStore>>,
+    parent_id: &str,
+    task_index: usize,
+    goal: &str,
+) -> String {
+    let child_id = Uuid::new_v4().to_string();
+    if let Some(store) = graph_store {
+        let goal = if goal.len() > STORAGE_MAX_GOAL_LEN {
+            // char_indices ensures we never slice in the middle of a multi-byte char
+            let safe_end = goal
+                .char_indices()
+                .take(STORAGE_MAX_GOAL_LEN - 1)
+                .last()
+                .map(|(i, c)| i + c.len_utf8())
+                .unwrap_or(0);
+            format!("{}…", &goal[..safe_end])
+        } else {
+            goal.to_string()
+        };
+        let _ = store
+            .upsert_edge(parent_id, &child_id, EdgeStatus::Open, task_index, &goal)
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    error = %e,
+                    parent_id = %parent_id,
+                    child_id = %child_id,
+                    "Failed to record spawn edge"
+                );
+            });
+    }
+    child_id
+}
 
 pub struct DelegateTaskTool;
 
@@ -147,11 +285,37 @@ impl Tool for DelegateTaskTool {
                 }
             }
 
+            // Install panic guard BEFORE recording edges so task cancellation
+            // between iterations cannot orphan Open edges.
+            let recorded_ids: Arc<Mutex<Vec<String>>> =
+                Arc::new(Mutex::new(Vec::with_capacity(task_pairs.len())));
+            let guard = CloseEdgesGuard {
+                graph_store: deps.graph_store.clone(),
+                child_ids: Arc::clone(&recorded_ids),
+            };
+
+            // Record spawn edges in graph store.
+            for (i, (goal, _)) in task_pairs.iter().enumerate() {
+                let id = record_spawn_edge(&deps.graph_store, &ctx.task_id, i, goal).await;
+                recorded_ids.lock().unwrap().push(id);
+            }
+            // Defensive: ensure every task has a corresponding child_id before
+            // passing to run_delegated_tasks_batch, which indexes by position.
+            debug_assert_eq!(
+                recorded_ids.lock().unwrap().len(),
+                task_pairs.len(),
+                "child_ids length must match task_pairs length"
+            );
+            // Snapshot child_ids for run_delegated_tasks_batch (guard holds its
+            // own Arc<Mutex<...>>, so the snapshot is independent).
+            let child_ids = recorded_ids.lock().unwrap().clone();
+
             let progress_tx = deps.progress_tx.clone();
             let max_concurrent = deps.delegation_config.max_concurrent_children.max(1) as usize;
             let results = run_delegated_tasks_batch(
                 deps,
                 ctx.get_cwd(),
+                child_ids,
                 task_pairs,
                 extra_tools,
                 max_concurrent,
@@ -159,6 +323,11 @@ impl Tool for DelegateTaskTool {
                 progress_tx,
             )
             .await;
+
+            // Mark all edges as closed. guard.close() takes graph_store,
+            // making the eventual Drop a no-op (no leak, no redundant write).
+            guard.close().await;
+
             return Ok(Box::new(JsonToolOutput::success(
                 serde_json::to_string(&results)
                     .map_err(|e| ToolError::Execution(format!("Serialization error: {}", e)))?,
@@ -195,9 +364,17 @@ impl Tool for DelegateTaskTool {
             CancellationToken::new()
         };
 
+        // Record spawn edge in graph store
+        let child_id = record_spawn_edge(&deps.graph_store, &ctx.task_id, 0, goal).await;
+        let guard = CloseEdgeGuard {
+            graph_store: deps.graph_store.clone(),
+            child_id: child_id.clone(),
+        };
+
         let result = run_delegated_task(
             &deps,
             ctx.get_cwd(),
+            &child_id,
             goal.to_string(),
             context,
             extra_tools,
@@ -205,6 +382,11 @@ impl Tool for DelegateTaskTool {
             deps.progress_tx.clone(),
         )
         .await;
+
+        // Mark edge as closed. guard.close() takes graph_store, making the
+        // eventual Drop a no-op (no leak, no redundant write).
+        // If we panicked before this line, Drop handles it best-effort.
+        guard.close().await;
 
         Ok(Box::new(JsonToolOutput::success(
             serde_json::to_string(&result)

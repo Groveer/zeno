@@ -107,7 +107,7 @@ pub fn spawn_background_review(
         let result = if let Some(ref pc) = parent_cancel {
             tokio::select! {
                 result = run_delegated_task(
-                    &deps, cwd, goal, None, extra_tools, cancel, tx,
+                    &deps, cwd, "skill_review", goal, None, extra_tools, cancel, tx,
                 ) => Some(result),
                 _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
                     tracing::warn!("Background skill review timed out after 300s");
@@ -121,7 +121,7 @@ pub fn spawn_background_review(
         } else {
             tokio::select! {
                 result = run_delegated_task(
-                    &deps, cwd, goal, None, extra_tools, cancel, tx,
+                    &deps, cwd, "skill_review", goal, None, extra_tools, cancel, tx,
                 ) => Some(result),
                 _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
                     tracing::warn!("Background skill review timed out after 300s");

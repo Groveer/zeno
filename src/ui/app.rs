@@ -18,11 +18,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::engine::query_engine::steer_into_slot;
 use crate::gateway::UiCommand;
+use crate::store::agent_graph::SubAgentGraphStore;
 use crate::tools::todo::TodoState;
 use crate::utils::{padded_emoji, truncate};
 
 use super::component::Component as ComponentTrait;
 use super::component::safe_view;
+use super::graph_panel::GraphPanel;
 use super::input::{self, InputState};
 use super::output::{OutputSegment, OutputState};
 use super::permission_overlay::{self, PermissionOverlay};
@@ -41,6 +43,16 @@ pub struct App {
     title_bar: TitleBar,
     /// Side panel component (todo list).
     side_panel: SidePanel,
+    /// Graph panel component (sub-agent tree).
+    graph_panel: GraphPanel,
+    /// Shared graph store reference (for poll_engine_status).
+    graph_store: Option<std::sync::Arc<dyn SubAgentGraphStore>>,
+    /// Cached generation — list of child IDs for change detection.
+    graph_child_ids: Vec<String>,
+    /// Parent agent ID for querying the graph store.
+    parent_id: String,
+    /// Frame counter for throttling graph store polling (poll every N frames).
+    graph_poll_skip: u8,
     /// Shared todo state reference (for poll_engine_status generation tracking).
     todo_state: Option<std::sync::Arc<tokio::sync::Mutex<TodoState>>>,
     /// Cached todo state generation — poll_engine_status compares against this.
@@ -67,12 +79,17 @@ pub struct App {
     steer_slot: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
     /// Width of the side panel (todo list) in terminal columns.
     side_panel_width: u16,
+    /// Width of the graph panel (sub-agent tree) in terminal columns.
+    /// Used when only the graph panel is visible without the todo list.
+    graph_panel_width: u16,
     /// Whether the user is currently dragging the side panel divider.
     side_panel_dragging: bool,
     /// X coordinate of the side panel divider (set during render, used for hit-testing).
     divider_x: u16,
     /// Cached side panel area (set during render, used for mouse hit-testing).
     side_panel_area: Rect,
+    /// Cached graph panel area (set during render, used for mouse hit-testing).
+    graph_panel_area: Rect,
     /// Images extracted from input markers on submit, waiting for the main loop.
     pending_image_blocks: Vec<(String, String)>,
 }
@@ -95,6 +112,11 @@ impl App {
             output: OutputState::new(),
             title_bar: TitleBar,
             side_panel: SidePanel::new(),
+            graph_panel: GraphPanel::new(),
+            graph_store: None,
+            graph_child_ids: Vec::new(),
+            parent_id: String::new(),
+            graph_poll_skip: 0,
             todo_state: None,
             todo_gen: 0,
             mode: AppMode::Idle,
@@ -122,9 +144,11 @@ impl App {
             steer_queue: Vec::new(),
             steer_slot: None,
             side_panel_width: 40,
+            graph_panel_width: 30,
             side_panel_dragging: false,
             divider_x: 0,
             side_panel_area: Rect::new(0, 0, 0, 0),
+            graph_panel_area: Rect::new(0, 0, 0, 0),
             _watcher_guard: None,
             pending_image_blocks: Vec::new(),
         };
@@ -142,6 +166,7 @@ impl App {
         self.output.mount();
         self.input.mount();
         self.side_panel.mount();
+        self.graph_panel.mount();
         self.status.mount();
         self.permission_overlay.mount();
     }
@@ -153,6 +178,7 @@ impl App {
         self.output.unmount();
         self.input.unmount();
         self.side_panel.unmount();
+        self.graph_panel.unmount();
         self.status.unmount();
         self.permission_overlay.unmount();
     }
@@ -172,6 +198,16 @@ impl App {
     pub fn set_todo_state(&mut self, state: std::sync::Arc<tokio::sync::Mutex<TodoState>>) {
         self.side_panel.set_todo_state(state.clone());
         self.todo_state = Some(state);
+    }
+
+    /// Set the shared graph store for the graph panel and poll_engine_status tracking.
+    pub fn set_graph_store(
+        &mut self,
+        store: std::sync::Arc<dyn SubAgentGraphStore>,
+        parent_id: String,
+    ) {
+        self.graph_store = Some(store);
+        self.parent_id = parent_id;
     }
 
     /// Whether something changed since the last frame and a re-render is due.
@@ -195,7 +231,7 @@ impl App {
     /// Called from the main loop each render cycle.
     ///
     /// TODO(Phase 4): Replace with tokio::sync::watch channel push notification.
-    pub fn poll_engine_status(&mut self) {
+    pub async fn poll_engine_status(&mut self) {
         if let Some(ref state) = self.todo_state
             && let Ok(s) = state.try_lock()
         {
@@ -206,6 +242,36 @@ impl App {
                 // Reset side panel scroll when task list changes so the user
                 // always sees the top of the new task list.
                 self.side_panel.reset_scroll();
+            }
+        }
+
+        // Poll graph store for open sub-agents (throttled: every 10 frames).
+        // The graph store is in-memory (no file I/O on reads), but this avoids
+        // unnecessary RwLock contention on every frame.
+        if let Some(ref store) = self.graph_store {
+            self.graph_poll_skip = self.graph_poll_skip.wrapping_add(1);
+            if self.graph_poll_skip % 10 == 0 {
+                if let Ok(records) = store
+                    .list_children_with_details(
+                        &self.parent_id,
+                        Some(crate::store::agent_graph::EdgeStatus::Open),
+                    )
+                    .await
+                {
+                    // Compare full list of child IDs — count-only misses
+                    // simultaneous additions + removals.
+                    let child_ids: Vec<String> =
+                        records.iter().map(|r| r.child_id.clone()).collect();
+                    if child_ids != self.graph_child_ids {
+                        let changed = child_ids.len() != self.graph_child_ids.len();
+                        self.graph_child_ids = child_ids;
+                        self.graph_panel.set_children(records);
+                        if changed {
+                            self.graph_panel.reset_scroll();
+                        }
+                        self.render_dirty = true;
+                    }
+                }
             }
         }
         // try_lock failure: todo_state held by tool — skip this cycle.
@@ -252,12 +318,12 @@ impl App {
         self.should_quit
     }
 
-    /// Scroll up — routes to output panel or side panel based on mouse position.
+    /// Scroll up — routes to the correct panel based on mouse position.
     pub fn scroll_up(&mut self, lines: usize, mouse_x: u16, mouse_y: u16) {
-        if self
-            .side_panel_area
-            .contains(ratatui::layout::Position::new(mouse_x, mouse_y))
-        {
+        let pos = ratatui::layout::Position::new(mouse_x, mouse_y);
+        if self.graph_panel_area.contains(pos) && self.graph_panel.has_children() {
+            self.graph_panel.scroll_up(lines);
+        } else if self.side_panel_area.contains(pos) && self.side_panel.is_visible() {
             self.side_panel.scroll_up(lines);
         } else {
             self.output.scroll_up(lines);
@@ -265,12 +331,12 @@ impl App {
         self.render_dirty = true;
     }
 
-    /// Scroll down — routes to output panel or side panel based on mouse position.
+    /// Scroll down — routes to the correct panel based on mouse position.
     pub fn scroll_down(&mut self, lines: usize, mouse_x: u16, mouse_y: u16) {
-        if self
-            .side_panel_area
-            .contains(ratatui::layout::Position::new(mouse_x, mouse_y))
-        {
+        let pos = ratatui::layout::Position::new(mouse_x, mouse_y);
+        if self.graph_panel_area.contains(pos) && self.graph_panel.has_children() {
+            self.graph_panel.scroll_down(lines);
+        } else if self.side_panel_area.contains(pos) && self.side_panel.is_visible() {
             self.side_panel.scroll_down(lines);
         } else {
             self.output.scroll_down(lines);
@@ -315,9 +381,12 @@ impl App {
             MouseEventKind::Drag(crossterm::event::MouseButton::Left)
                 if self.side_panel_dragging => {
                     // Resize: side panel width = total - mouse column position
+                    // Both width values are updated together so whichever panel is visible
+                    // uses the current divider position.
                     let new_width = terminal_width.saturating_sub(mouse.column);
                     self.side_panel_width =
                         new_width.clamp(Self::SIDE_PANEL_MIN, Self::SIDE_PANEL_MAX);
+                    self.graph_panel_width = self.side_panel_width;
                     self.render_dirty = true;
                 }
             MouseEventKind::Down(crossterm::event::MouseButton::Left)
@@ -677,20 +746,34 @@ impl App {
         let input_area = vert_chunks[2];
         let status_area = vert_chunks[3];
 
-        // Decide layout: if side panel has active todos and there's room,
+        // Decide layout: if side panel or graph panel has content and there's room,
         // split output area horizontally.
-        let side_panel_width = self.side_panel_width;
-        let has_side_panel = self.side_panel.is_visible() && full.width > side_panel_width + 20;
+        let has_graph = self.graph_panel.has_children();
+        let has_todo = self.side_panel.is_visible();
 
-        let (output_area, side_area) = if has_side_panel {
+        // Pick the right-column width based on which panels are visible.
+        // When both are stacked vertically, use the wider of the two so
+        // the combined column is wide enough for either panel.
+        let effective_side_width = if has_graph && !has_todo {
+            self.graph_panel_width
+        } else if has_todo && !has_graph {
+            self.side_panel_width
+        } else {
+            self.side_panel_width.max(self.graph_panel_width)
+        };
+
+        let has_side_content = (has_todo || has_graph) && full.width > effective_side_width + 20;
+
+        let (output_area, side_area) = if has_side_content {
             let areas = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Min(1), Constraint::Length(side_panel_width)])
+                .constraints([Constraint::Min(1), Constraint::Length(effective_side_width)])
                 .split(vert_output_area);
             // Store divider x position for mouse drag hit-testing
             self.divider_x = areas[1].x;
             // Cache side panel area for mouse scroll hit-testing
             self.side_panel_area = areas[1];
+            self.graph_panel_area = Rect::new(0, 0, 0, 0);
             (areas[0], areas[1])
         } else {
             self.divider_x = 0;
@@ -719,9 +802,30 @@ impl App {
         // Status bar
         safe_view(&mut self.status, status_area, frame);
 
-        // Side panel (todo list)
-        if has_side_panel {
-            safe_view(&mut self.side_panel, side_area, frame);
+        // Right panel: graph panel (top) + side panel (bottom), stacked if both visible
+        if has_side_content {
+            let (graph_area, todo_area) = if has_graph && has_todo && side_area.height > 6 {
+                let areas = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(side_area.height / 3), // graph gets ~1/3
+                        Constraint::Min(1),                       // todo gets the rest
+                    ])
+                    .split(side_area);
+                (areas[0], areas[1])
+            } else if has_graph {
+                (side_area, Rect::default())
+            } else {
+                (Rect::default(), side_area)
+            };
+
+            if has_graph {
+                self.graph_panel_area = graph_area;
+                safe_view(&mut self.graph_panel, graph_area, frame);
+            }
+            if has_todo {
+                safe_view(&mut self.side_panel, todo_area, frame);
+            }
         }
 
         // Cursor

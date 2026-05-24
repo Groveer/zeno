@@ -160,6 +160,7 @@ pub enum SubAgentError {
 pub async fn run_delegated_task(
     deps: &SubAgentDeps,
     cwd: PathBuf,
+    task_id: &str,
     goal: String,
     context: Option<String>,
     extra_tools: Vec<String>,
@@ -180,6 +181,7 @@ pub async fn run_delegated_task(
         deps,
         cwd,
         0,
+        task_id,
         &goal,
         context.as_deref(),
         &allowed_tools,
@@ -202,6 +204,7 @@ pub async fn run_delegated_task(
 pub async fn run_delegated_tasks_batch(
     deps: SubAgentDeps,
     cwd: PathBuf,
+    child_ids: Vec<String>,
     tasks: Vec<(String, Option<String>)>, // (goal, context) pairs
     extra_tools: Vec<String>,
     max_concurrent: usize,
@@ -243,6 +246,7 @@ pub async fn run_delegated_tasks_batch(
         let allowed_tools = allowed_tools.clone();
         let pt = progress_tx.clone();
         let bc = batch_cancel.clone();
+        let child_id = child_ids[i].clone();
 
         let handle = tokio::spawn(async move {
             let _permit = permit; // held until task finishes
@@ -257,6 +261,7 @@ pub async fn run_delegated_tasks_batch(
                 &deps,
                 cwd,
                 i,
+                &child_id,
                 &goal,
                 context.as_deref(),
                 &allowed_tools,
@@ -373,6 +378,7 @@ async fn run_single_sub_agent(
     deps: &SubAgentDeps,
     cwd: PathBuf,
     task_index: usize,
+    task_id: &str,
     goal: &str,
     context: Option<&str>,
     allowed_tools: &[String],
@@ -392,7 +398,7 @@ async fn run_single_sub_agent(
     // Pass sub_agent_deps through so skill_manage can read write_origin provenance.
     let ctx = ToolContext {
         cwd: Arc::new(std::sync::RwLock::new(cwd)),
-        task_id: format!("sub_{}", task_index),
+        task_id: task_id.to_string(),
         ask_sender: None,
         mcp_manager: None,
         sub_agent_deps: Some(deps.clone()),

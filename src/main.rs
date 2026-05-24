@@ -12,6 +12,7 @@ mod plugin;
 mod prompts;
 mod sandbox;
 mod skills;
+mod store;
 mod tools;
 mod ui;
 mod utils;
@@ -203,6 +204,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Register tool_search (Deferred — not shown to model initially)
     registry.register(Box::new(tools::tool_search::ToolSearchTool::new()))?;
+
+    // Register list_sub_agents (Deferred — discoverable via tool_search)
+    registry.register(Box::new(tools::list_sub_agents::ListSubAgentsTool::new()))?;
 
     // Create client factory for sub-agents
     let client_factory: Arc<
@@ -411,12 +415,17 @@ async fn main() -> anyhow::Result<()> {
         permission_mode.clone(),
         settings.clone(),
         cwd.clone(),
+        String::from("main"),
     );
     engine.mcp_manager = Some(mcp_manager.clone());
     engine.memory_manager = Some(memory_manager.clone());
     engine.hook_executor = hook_executor;
     engine.client_factory = Some(client_factory.clone());
     engine.active_identity = settings.active_identity.clone();
+
+    // Initialize sub-agent topology graph store
+    let graph_store = crate::store::create_graph_store(&crate::config::paths::data_dir());
+    engine.graph_store = Some(graph_store.clone());
 
     // Fire session_start hook
     if let Some(he) = &engine.hook_executor
@@ -489,6 +498,8 @@ async fn main() -> anyhow::Result<()> {
     app.input.identity_names = settings.identities.keys().cloned().collect();
     // Share the todo state so the TUI can render the side panel
     app.set_todo_state(todo_state.clone());
+    // Share the graph store so the TUI can render the sub-agent tree
+    app.set_graph_store(graph_store.clone(), String::from("main"));
     // Share the sub-agent progress sender with the engine so delegate_task
     // can report sub-agent progress to the TUI.
     {
@@ -590,7 +601,7 @@ async fn main() -> anyhow::Result<()> {
             gateway.drain_engine_events();
             gateway.drain_sub_agent_events();
             app.drain_commands();
-            app.poll_engine_status();
+            app.poll_engine_status().await;
             if let Ok(eng) = engine.try_lock() {
                 let ct = &eng.cost_tracker;
                 // Context pressure = last API call's full prompt + output
@@ -712,6 +723,7 @@ async fn main() -> anyhow::Result<()> {
                         eng.sub_agent_cost_tracker.clone(),
                     )
                     .with_write_origin(crate::skills::provenance::BACKGROUND_REVIEW)
+                    .with_graph_store_opt(eng.graph_store.clone())
                 })
             };
 

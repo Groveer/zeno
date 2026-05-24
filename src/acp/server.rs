@@ -113,6 +113,7 @@ impl SessionState {
             config.permission_mode.clone(),
             config.settings.clone(),
             config.cwd.clone(),
+            String::from("main"),
         );
 
         // Wire up shared engine services (same as main.rs TUI path)
@@ -121,6 +122,11 @@ impl SessionState {
         engine.hook_executor = config.hook_executor.clone();
         engine.client_factory = config.client_factory.clone();
         engine.active_identity = config.active_identity.clone();
+
+        // Initialize sub-agent topology graph store (same pattern as main.rs)
+        engine.graph_store = Some(crate::store::create_graph_store(
+            &crate::config::paths::data_dir(),
+        ));
 
         Self {
             engine: Arc::new(Mutex::new(engine)),

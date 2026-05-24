@@ -35,6 +35,7 @@ use crate::config::settings::{DelegationConfig, ProviderConfig, Settings};
 use crate::engine::cost_tracker::CostTracker;
 use crate::engine::sub_agent::SubAgentEvent;
 use crate::permissions::execpolicy::ExecPolicy;
+use crate::store::agent_graph::SubAgentGraphStore;
 
 // ---------------------------------------------------------------------------
 // Tool Error
@@ -98,6 +99,9 @@ pub struct SubAgentDeps {
     /// Execution policy for rule-based command authorization.
     /// Shared with sub-agents so they respect the same exec_policy rules.
     pub exec_policy: Option<Arc<ExecPolicy>>,
+    /// Sub-agent spawn topology store — records parent/child relationships.
+    /// When set, `delegate_task` automatically logs each spawn as an edge.
+    pub graph_store: Option<Arc<dyn SubAgentGraphStore>>,
 }
 
 impl std::fmt::Debug for SubAgentDeps {
@@ -111,6 +115,7 @@ impl std::fmt::Debug for SubAgentDeps {
                 &self.permission_allow_all.is_some(),
             )
             .field("has_exec_policy", &self.exec_policy.is_some())
+            .field("has_graph_store", &self.graph_store.is_some())
             .finish()
     }
 }
@@ -140,6 +145,7 @@ impl SubAgentDeps {
             tui_event_sender: None,
             permission_allow_all: None,
             exec_policy: None,
+            graph_store: None,
         }
     }
 
@@ -172,6 +178,13 @@ impl SubAgentDeps {
     /// rule-based command authorization as the main engine.
     pub fn with_exec_policy(mut self, policy: Arc<ExecPolicy>) -> Self {
         self.exec_policy = Some(policy);
+        self
+    }
+
+    /// Attach an optional sub-agent topology graph store.
+    /// Convenience for call sites that already hold `Option<Arc<...>>`.
+    pub fn with_graph_store_opt(mut self, store: Option<Arc<dyn SubAgentGraphStore>>) -> Self {
+        self.graph_store = store;
         self
     }
 }

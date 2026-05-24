@@ -11,6 +11,7 @@ pub mod file_state;
 pub mod gitignore;
 pub mod glob;
 pub mod grep;
+pub mod list_sub_agents;
 pub mod memory;
 pub mod memory_provider_tool;
 pub mod path_safety;

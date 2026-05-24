@@ -88,6 +88,15 @@ pub struct QueryEngine {
     /// Execution policy for rule-based command authorization.
     /// Constructed from built-in rules + user-configured rules at startup.
     pub exec_policy: Arc<ExecPolicy>,
+    /// Sub-agent spawn topology store — records parent/child relationships.
+    pub graph_store: Option<Arc<dyn crate::store::agent_graph::SubAgentGraphStore>>,
+
+    /// Identifier for this agent session.
+    ///
+    /// `"main"` for the primary user-facing agent, UUID for sub-agents.
+    /// Used as the parent_id when recording spawn edges and when querying
+    /// the graph store for child sub-agents in system prompt injection.
+    pub task_id: String,
 }
 
 /// Inject user text into a steer slot without interrupting the agent.
@@ -128,6 +137,7 @@ impl QueryEngine {
         permission_mode: PermissionMode,
         settings: Arc<Settings>,
         cwd: std::path::PathBuf,
+        task_id: String,
     ) -> Self {
         let compact_config = CompactConfig {
             threshold_ratio: settings.llm.compact_threshold,
@@ -181,6 +191,8 @@ impl QueryEngine {
             tool_stats: crate::tools::tool_stats::new_shared(),
             active_identity: None,
             exec_policy,
+            graph_store: None,
+            task_id,
         }
     }
 

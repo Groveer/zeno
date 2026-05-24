@@ -274,6 +274,7 @@ When done, write a summary of what was consolidated."#,
         let result = crate::engine::sub_agent::run_delegated_task(
             &deps,
             cwd,
+            "curator",
             goal,
             None,
             extra_tools,

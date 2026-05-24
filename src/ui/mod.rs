@@ -1,5 +1,6 @@
 pub mod app;
 pub mod component;
+pub mod graph_panel;
 pub mod input;
 pub mod markdown;
 pub mod output;

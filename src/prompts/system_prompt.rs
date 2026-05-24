@@ -152,6 +152,20 @@ a specific directory rather than re-reading entire files.",
     )
 }
 
+/// Format the "Active Sub-Agents" context block for the system prompt.
+///
+/// Injected each turn when there are open sub-agents so the LLM knows
+/// about work it delegated. Guides the model to use `tool_search` then
+/// `list_sub_agents` to query child status.
+pub fn sub_agent_block(open_count: usize, total_count: usize) -> String {
+    format!(
+        "## Sub-Agent Summary\n\n\
+You have {open_count} open sub-agent(s) (out of {total_count} total in this session).\n\
+Use `tool_search(\"list_sub_agents\")` to discover the `list_sub_agents` tool,\n\
+then call it to query open sub-agents and check their status."
+    )
+}
+
 /// Built-in guidelines — always present in the system prompt body.
 fn builtin_guidelines() -> String {
     r#"

@@ -24,6 +24,7 @@ use crate::engine::query_engine::QueryEngine;
 use crate::engine::tui_events::EngineEvent;
 use crate::hooks::types::HookEvent;
 use crate::prompts::system_prompt::{MEMORY_GUIDANCE, session_files_block};
+use crate::store::EdgeStatus;
 use crate::tools::base::{SubAgentDeps, ToolContext};
 use tokio_util::sync::CancellationToken;
 
@@ -247,6 +248,32 @@ impl QueryEngine {
                         let block = session_files_block(&summary);
                         effective_system_prompt.push_str("\n\n");
                         effective_system_prompt.push_str(&block);
+                    }
+                }
+
+                // --- Inject sub-agent context ---
+                // Tells the LLM how many open sub-agents it has and how to query them.
+                // Uses `self.task_id` so sub-agents see their own children in multi-level delegation.
+                {
+                    if let Some(ref store) = self.graph_store {
+                        // Single query: get all children with details, then derive
+                        // counts in-memory instead of two sequential list_children calls.
+                        if let Ok(records) =
+                            store.list_children_with_details(&self.task_id, None).await
+                        {
+                            let open = records
+                                .iter()
+                                .filter(|r| r.status == EdgeStatus::Open)
+                                .count();
+                            if open > 0 {
+                                let block = crate::prompts::system_prompt::sub_agent_block(
+                                    open,
+                                    records.len(),
+                                );
+                                effective_system_prompt.push_str("\n\n");
+                                effective_system_prompt.push_str(&block);
+                            }
+                        }
                     }
                 }
                 if let Some(he) = &self.hook_executor
@@ -745,7 +772,8 @@ impl QueryEngine {
                 )
                 .with_tui_event_sender(sender.clone())
                 .with_permission_allow_all(self.permission_allow_all.clone())
-                .with_exec_policy(self.exec_policy.clone());
+                .with_exec_policy(self.exec_policy.clone())
+                .with_graph_store_opt(self.graph_store.clone());
                 ctx = ctx.with_sub_agent_deps(deps);
             }
             let mut tool_results: Vec<ContentBlock> = Vec::new();
@@ -963,7 +991,8 @@ impl QueryEngine {
             self.settings.delegation.clone(),
             self.sub_agent_cost_tracker.clone(),
         )
-        .with_write_origin(crate::skills::provenance::BACKGROUND_REVIEW);
+        .with_write_origin(crate::skills::provenance::BACKGROUND_REVIEW)
+        .with_graph_store_opt(self.graph_store.clone());
 
         crate::engine::review::spawn_background_review(
             deps,

@@ -871,6 +871,7 @@ mod tests {
             Default::default(),
             settings.clone(),
             tmp.path().to_path_buf(),
+            String::from("main"),
         )));
 
         // Memory store + manager
