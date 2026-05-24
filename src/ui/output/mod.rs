@@ -115,46 +115,63 @@ impl Component for OutputState {
             UiCommand::ClearOutput => {
                 self.clear();
             }
-            UiCommand::ToolStart { input_summary, .. } => {
+            UiCommand::ToolStart {
+                name,
+                input_summary,
+            } => {
                 let display = if input_summary.is_empty() {
                     String::new()
                 } else {
                     input_summary
                 };
-                self.push(OutputSegment::ToolExecuting(display));
+                self.push(OutputSegment::ToolExecuting {
+                    name,
+                    summary: display,
+                });
             }
-            UiCommand::ToolComplete { output, .. } => {
-                if let Some(last) = self
-                    .segments
-                    .iter_mut()
-                    .rev()
-                    .find(|s| matches!(s, OutputSegment::ToolExecuting(_)))
-                {
+            UiCommand::ToolComplete { name, output } => {
+                if let Some(last) = self.segments.iter_mut().rev().find(
+                    |s| matches!(s, OutputSegment::ToolExecuting { name: n, .. } if *n == name),
+                ) {
                     let summary =
                         match std::mem::replace(last, OutputSegment::Status(String::new())) {
-                            OutputSegment::ToolExecuting(op) => format!("{} → {}", op, output),
+                            OutputSegment::ToolExecuting { summary: op, .. } => {
+                                if op.is_empty() {
+                                    format!("{} → {}", name, output)
+                                } else {
+                                    format!("{} → {}", op, output)
+                                }
+                            }
                             _ => output.clone(),
                         };
                     *last = OutputSegment::ToolComplete(summary);
                     self.mark_dirty();
+                } else {
+                    self.push(OutputSegment::ToolComplete(format!(
+                        "{} → {}",
+                        name, output
+                    )));
                 }
             }
-            UiCommand::ToolError { error, .. } => {
-                if let Some(last) = self
-                    .segments
-                    .iter_mut()
-                    .rev()
-                    .find(|s| matches!(s, OutputSegment::ToolExecuting(_)))
-                {
+            UiCommand::ToolError { name, error } => {
+                if let Some(last) = self.segments.iter_mut().rev().find(
+                    |s| matches!(s, OutputSegment::ToolExecuting { name: n, .. } if *n == name),
+                ) {
                     let summary =
                         match std::mem::replace(last, OutputSegment::Status(String::new())) {
-                            OutputSegment::ToolExecuting(op) => format!("{} → {}", op, error),
+                            OutputSegment::ToolExecuting { summary: op, .. } => {
+                                if op.is_empty() {
+                                    format!("{} → {}", name, error)
+                                } else {
+                                    format!("{} → {}", op, error)
+                                }
+                            }
                             _ => error.clone(),
                         };
                     *last = OutputSegment::ToolError(summary);
                     self.mark_dirty();
                 } else {
-                    self.push(OutputSegment::ToolError(error));
+                    self.push(OutputSegment::ToolError(format!("{} → {}", name, error)));
                 }
             }
             UiCommand::ToolDiff { diff, .. } => {

@@ -24,8 +24,8 @@ pub enum OutputSegment {
     Text(String),
     /// Assistant reasoning / thinking content (displayed dimmed, separate from visible text).
     Reasoning(String),
-    /// Tool invocation — executing (spinner).
-    ToolExecuting(String),
+    /// Tool invocation — executing (spinner). Includes tool name for matching.
+    ToolExecuting { name: String, summary: String },
     /// Tool completed — one-line result summary.
     ToolComplete(String),
     /// Tool error.
@@ -173,7 +173,7 @@ pub fn segment_to_lines(seg: &OutputSegment) -> Vec<Line<'static>> {
                 Span::styled(display, Style::new().fg(theme::TEXT_DIM)),
             ])]
         }
-        OutputSegment::ToolExecuting(summary) => {
+        OutputSegment::ToolExecuting { summary, .. } => {
             vec![Line::from(vec![
                 Span::styled("  ".to_string(), Style::new().fg(theme::ACCENT_DIM)),
                 Span::styled(summary.clone(), Style::new().fg(theme::TEXT_DIM)),
