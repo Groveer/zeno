@@ -1864,6 +1864,594 @@ mod tests {
         assert_eq!(input.text, "hello ");
     }
 
+    // ── Editor primitive tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_editor_prev_grapheme_boundary_ascii() {
+        // ASCII text — boundaries are byte-aligned
+        assert_eq!(editor::prev_grapheme_boundary("hello", 5), 4); // 'o'
+        assert_eq!(editor::prev_grapheme_boundary("hello", 1), 0); // 'h'
+        assert_eq!(editor::prev_grapheme_boundary("hello", 0), 0); // start
+    }
+
+    #[test]
+    fn test_editor_prev_grapheme_boundary_cjk() {
+        // '你好世界' bytes: 你=3, 好=3, 世=3, 界=3 (total 12)
+        let s = "你好世界";
+        assert_eq!(editor::prev_grapheme_boundary(s, 12), 9); // '界' start
+        assert_eq!(editor::prev_grapheme_boundary(s, 9), 6); // '世' start
+        assert_eq!(editor::prev_grapheme_boundary(s, 6), 3); // '好' start
+        assert_eq!(editor::prev_grapheme_boundary(s, 3), 0); // '你' start
+        assert_eq!(editor::prev_grapheme_boundary(s, 0), 0); // start
+
+        // Mid-byte positions (inside a CJK char) should snap to the char's start
+        assert_eq!(editor::prev_grapheme_boundary(s, 10), 9); // inside 界, snap to 界 start
+        assert_eq!(editor::prev_grapheme_boundary(s, 8), 6); // inside 世, snap to 世 start
+        assert_eq!(editor::prev_grapheme_boundary(s, 5), 3); // inside 好, snap to 好 start
+    }
+
+    #[test]
+    fn test_editor_prev_grapheme_boundary_mixed() {
+        let s = "hello过world";
+        // '过' = 3 bytes, total = 5 + 3 + 5 = 13
+        assert_eq!(editor::prev_grapheme_boundary(s, 13), 12); // 'd'
+        assert_eq!(editor::prev_grapheme_boundary(s, 12), 11); // 'l'
+        assert_eq!(editor::prev_grapheme_boundary(s, 8), 5); // after 过 → 过 start
+        assert_eq!(editor::prev_grapheme_boundary(s, 7), 5); // inside 过 → 过 start
+        assert_eq!(editor::prev_grapheme_boundary(s, 6), 5); // inside 过 → 过 start
+        assert_eq!(editor::prev_grapheme_boundary(s, 5), 4); // 'o'
+        assert_eq!(editor::prev_grapheme_boundary(s, 4), 3); // 'l'
+    }
+
+    #[test]
+    fn test_editor_next_grapheme_boundary_ascii() {
+        assert_eq!(editor::next_grapheme_boundary("hello", 0), 1); // 'h' → after 'h'
+        assert_eq!(editor::next_grapheme_boundary("hello", 4), 5); // 'o' → end
+        assert_eq!(editor::next_grapheme_boundary("hello", 5), 5); // at end
+    }
+
+    #[test]
+    fn test_editor_next_grapheme_boundary_cjk() {
+        let s = "你好世界";
+        assert_eq!(editor::next_grapheme_boundary(s, 0), 3); // '你' → after 你
+        assert_eq!(editor::next_grapheme_boundary(s, 3), 6); // '好' → after 好
+        assert_eq!(editor::next_grapheme_boundary(s, 6), 9); // '世' → after 世
+        assert_eq!(editor::next_grapheme_boundary(s, 9), 12); // '界' → end
+        assert_eq!(editor::next_grapheme_boundary(s, 12), 12); // at end
+
+        // Mid-byte positions should advance to the end of the current char
+        assert_eq!(editor::next_grapheme_boundary(s, 7), 9); // inside 世 → 世 end
+        assert_eq!(editor::next_grapheme_boundary(s, 4), 6); // inside 好 → 好 end
+    }
+
+    #[test]
+    fn test_editor_next_grapheme_boundary_mixed() {
+        let s = "hello过world";
+        assert_eq!(editor::next_grapheme_boundary(s, 0), 1); // 'h' → 1
+        assert_eq!(editor::next_grapheme_boundary(s, 5), 8); // 过 → after 过 (bytes 5-7)
+        assert_eq!(editor::next_grapheme_boundary(s, 6), 8); // inside 过 → after 过
+        assert_eq!(editor::next_grapheme_boundary(s, 8), 9); // 'w'
+        assert_eq!(editor::next_grapheme_boundary(s, 13), 13); // end
+    }
+
+    #[test]
+    fn test_editor_next_grapheme_boundary_past_end() {
+        assert_eq!(editor::next_grapheme_boundary("hi", 100), 2); // len=2, min with len
+        assert_eq!(editor::next_grapheme_boundary("hi", 3), 2); // past end
+    }
+
+    // ── CJK cursor_row_col edge cases ──────────────────────────────────
+
+    #[test]
+    fn test_cursor_row_col_cjk_single_line() {
+        let mut input = InputState::with_identity(None);
+        input.text = "你好世界".into();
+
+        // At the start of the first CJK char
+        input.cursor = 0;
+        let (row, col) = input.cursor_row_col();
+        assert_eq!(row, 0);
+        assert_eq!(col, 0);
+
+        // After "你" (bytes 0-2), byte 3
+        input.cursor = 3;
+        let (row, col) = input.cursor_row_col();
+        assert_eq!(row, 0);
+        assert_eq!(col, 3);
+
+        // End of text
+        input.cursor = input.text.len();
+        let (row, col) = input.cursor_row_col();
+        assert_eq!(row, 0);
+        assert_eq!(col, 12);
+    }
+
+    #[test]
+    fn test_cursor_row_col_cjk_inside_char_no_panic() {
+        // Regression: cursor_row_col must never panic when cursor is inside
+        // a multi-byte character — snap_to_char_boundary handles it.
+        let mut input = InputState::with_identity(None);
+        input.text = "你好世界".into();
+
+        // Manually set cursor to mid-byte positions inside CJK chars
+        // 你=bytes 0-2, 好=bytes 3-5, 世=bytes 6-8, 界=bytes 9-11
+        for bad_cursor in [1, 2, 4, 5, 7, 8, 10, 11] {
+            input.cursor = bad_cursor;
+            let (row, col) = input.cursor_row_col(); // must not panic
+            assert!(row == 0, "row should be 0 for bad cursor {bad_cursor}");
+            // col should be a valid byte offset (snapped to prev boundary)
+            assert!(
+                input.text.is_char_boundary(col),
+                "col {col} is not a char boundary (bad cursor was {bad_cursor})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cursor_row_col_cjk_multiline() {
+        let mut input = InputState::with_identity(None);
+        input.text = "你好\n世界".into(); // 你=3, 好=3, \n=1, 世=3, 界=3
+
+        // End of first line "你好"
+        input.cursor = 6;
+        assert_eq!(input.cursor_row_col(), (0, 6));
+
+        // Start of second line "世界"
+        input.cursor = 7;
+        assert_eq!(input.cursor_row_col(), (1, 0));
+
+        // After "世" on line 1
+        input.cursor = 10;
+        assert_eq!(input.cursor_row_col(), (1, 3));
+
+        // End of text
+        input.cursor = 13;
+        assert_eq!(input.cursor_row_col(), (1, 6));
+
+        // Inside multi-byte char on line 1 — must not panic
+        input.cursor = 8;
+        let (row, col) = input.cursor_row_col();
+        assert_eq!(row, 1);
+        assert!(
+            input.text.is_char_boundary(col),
+            "col {col} is not a char boundary"
+        );
+    }
+
+    #[test]
+    fn test_cursor_row_col_mixed_ascii_cjk() {
+        let mut input = InputState::with_identity(None);
+        input.text = "abc你好xyz\n第二行".into();
+        // abc=3, 你=3, 好=3, xyz=3 → total 12 bytes before \n
+        // \n=1, 第=3, 二=3, 行=3 → total 10 bytes
+
+        // Cursor at end of first line
+        input.cursor = 12;
+        assert_eq!(input.cursor_row_col(), (0, 12));
+
+        // Cursor at start of second line
+        input.cursor = 13;
+        assert_eq!(input.cursor_row_col(), (1, 0));
+
+        // Cursor after "第二" on second line
+        input.cursor = 19;
+        assert_eq!(input.cursor_row_col(), (1, 6));
+    }
+
+    #[test]
+    fn test_cursor_row_col_empty_lines() {
+        let mut input = InputState::with_identity(None);
+        input.text = "\n\n".into(); // three empty lines
+
+        input.cursor = 0;
+        assert_eq!(input.cursor_row_col(), (0, 0));
+
+        input.cursor = 1;
+        assert_eq!(input.cursor_row_col(), (1, 0));
+
+        input.cursor = 2;
+        assert_eq!(input.cursor_row_col(), (2, 0));
+    }
+
+    // ── CJK cursor up/down ──────────────────────────────────────────────
+
+    #[test]
+    fn test_move_cursor_up_down_cjk_only_lines() {
+        let mut input = InputState::with_identity(None);
+        // 你好 (6 bytes) 世界 (6 bytes) — two lines of CJK
+        input.text = "你好\n世界".into();
+
+        // Start at end of line 1
+        input.cursor = input.text.len(); // 13
+        assert_eq!(input.cursor_row_col(), (1, 6));
+
+        // Move up — should maintain column position, snapped to char boundary
+        assert!(input.move_cursor_up());
+        let (row, col) = input.cursor_row_col();
+        assert_eq!(row, 0);
+        // Line 0 is 6 bytes long; col 6 is valid (end of "你好")
+        assert_eq!(col, 6);
+
+        // Move up at top — no-op
+        assert!(!input.move_cursor_up());
+
+        // Move down
+        assert!(input.move_cursor_down());
+        assert_eq!(input.cursor_row_col(), (1, 6));
+    }
+
+    #[test]
+    fn test_move_cursor_up_down_cjk_short_upper_line() {
+        let mut input = InputState::with_identity(None);
+        // Upper line shorter than lower — snap to shorter line's end
+        input.text = "hi\n你好世界".into(); // "hi" (2), "\n" (1), "你好世界" (12)
+
+        // On lower line, column 12 (past end of "hi")
+        input.cursor = 15; // "你好世界" end
+        assert_eq!(input.cursor_row_col(), (1, 12));
+
+        // Move up — column should clamp to upper line length (2)
+        assert!(input.move_cursor_up());
+        assert_eq!(input.cursor_row_col(), (0, 2));
+
+        // Move down — target col=2 on lower line → byte 5 (inside '你'), snap to 3 (你 start) → col=0
+        assert!(input.move_cursor_down());
+        let (row, col) = input.cursor_row_col();
+        assert_eq!(row, 1);
+        assert_eq!(col, 0); // snapped to start of '你'
+    }
+
+    #[test]
+    fn test_move_cursor_up_down_cjk_short_lower_line() {
+        let mut input = InputState::with_identity(None);
+        // Upper line longer than lower
+        input.text = "你好世界\nhi".into(); // "你好世界" (12), "\n" (1), "hi" (2)
+
+        // On lower line, column 2
+        input.cursor = 15;
+        assert_eq!(input.cursor_row_col(), (1, 2));
+
+        // Move up — go to upper line, target col=2 falls inside '你' (bytes 0-2), snap to 0
+        assert!(input.move_cursor_up());
+        assert_eq!(input.cursor_row_col(), (0, 0));
+
+        // Move down — target col=0 on lower line
+        assert!(input.move_cursor_down());
+        assert_eq!(input.cursor_row_col(), (1, 0));
+    }
+
+    #[test]
+    fn test_move_cursor_up_down_mixed_width_multiline() {
+        // Three lines: ASCII, CJK, mixed
+        // "abc" (3) + "\n" (1) + "def" (3) + "你" (3) + "好" (3) + "\n" (1) + "ghi" (3) + "世" (3) + "界" (3) + "jkl" (3)
+        // bytes: 0-2, 3, 4-6, 7-9, 10-12, 13, 14-16, 17-19, 20-22, 23-25 = 26 total
+        let text = "abc\ndef你好\nghi世界jkl";
+        let mut input = InputState::with_identity(None);
+        input.text = text.into();
+
+        // Start on line 2, end of line
+        input.cursor = input.text.len(); // 26
+        assert_eq!(input.cursor_row_col(), (2, 12)); // col 12 = end of "ghi世界jkl"
+
+        // Move up to line 1
+        assert!(input.move_cursor_up());
+        let (row, col) = input.cursor_row_col();
+        assert_eq!(row, 1);
+        assert!(
+            input.text.is_char_boundary(input.cursor),
+            "cursor {} is not a char boundary (col={col})",
+            input.cursor,
+        );
+
+        // Move up to line 0
+        assert!(input.move_cursor_up());
+        let (row, col) = input.cursor_row_col();
+        assert_eq!(row, 0);
+        assert!(
+            input.text.is_char_boundary(input.cursor),
+            "cursor {} is not a char boundary (col={col})",
+            input.cursor,
+        );
+    }
+
+    #[test]
+    fn test_move_cursor_up_down_cjk_mid_char_col() {
+        // When moving down from a line where the cursor column falls inside
+        // a CJK char on the next line, snap_to_char_boundary should correct it.
+        let mut input = InputState::with_identity(None);
+        // Upper line:   "abcde" (5 bytes) — cursor at col 4 (inside 'de')
+        // Lower line:   "你" (3 bytes) — col 4 is past end
+        input.text = "abcde\n你".into();
+
+        // On upper line at col 4
+        input.cursor = 4;
+        assert_eq!(input.cursor_row_col(), (0, 4));
+
+        // Move down — col 4 on lower line (len=3), clamp to 3
+        assert!(input.move_cursor_down());
+        let (row, col) = input.cursor_row_col();
+        assert_eq!(row, 1);
+        assert_eq!(col, 3, "should clamp to end of '你'");
+
+        // Move up — back to col 3 on upper line
+        assert!(input.move_cursor_up());
+        assert_eq!(input.cursor_row_col(), (0, 3));
+
+        // Move down again — col 3 on lower line, which is end of '你'
+        assert!(input.move_cursor_down());
+        assert_eq!(input.cursor_row_col(), (1, 3));
+    }
+
+    #[test]
+    fn test_move_cursor_up_down_snap_no_panic() {
+        // Comprehensive test: exercise all multi-byte boundary scenarios
+        // that previously caused panics.
+        let text = "你好\nhello\n世界\nworld";
+        let mut input = InputState::with_identity(None);
+        input.text = text.into();
+
+        // Walk cursor through every byte position to ensure no panic
+        for byte_pos in 0..=text.len() {
+            input.cursor = byte_pos;
+            // Up/down should never panic regardless of cursor position
+            let _ = input.move_cursor_up();
+            let _ = input.move_cursor_down();
+            // After any movement, cursor must be on a char boundary
+            assert!(
+                input.text.is_char_boundary(input.cursor),
+                "cursor {} is not on a char boundary after move (start was {})",
+                input.cursor,
+                byte_pos,
+            );
+        }
+    }
+
+    // ── CJK Home / End ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_home_end_cjk_line() {
+        let mut input = InputState::with_identity(None);
+        input.text = "hello\n你好世界\nxyz".into();
+
+        // Home on CJK line
+        input.cursor = 10; // middle of 你好世界 line
+        input.move_cursor_to_line_start();
+        assert_eq!(input.cursor, 6); // start of "你好世界"
+
+        // End on CJK line
+        input.move_cursor_to_line_end();
+        assert_eq!(input.cursor, 18); // 6 + 12
+
+        // Home on ASCII line after CJK
+        input.cursor = 20; // middle of "xyz"
+        input.move_cursor_to_line_start();
+        assert_eq!(input.cursor, 19); // start of "xyz"
+
+        input.move_cursor_to_line_end();
+        assert_eq!(input.cursor, 22); // end of "xyz"
+    }
+
+    // ── CJK Left / Right arrow via handle_key ───────────────────────────
+
+    #[test]
+    fn test_left_right_arrow_cjk() {
+        let mut input = InputState::with_identity(None);
+        input.text = "你好".into();
+
+        // Start at end
+        input.cursor = 6;
+
+        // Left — should go to start of '好' (byte 3)
+        let key = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+        assert!(input.handle_key(key));
+        assert_eq!(input.cursor, 3, "Left should go to byte 3 (好 start)");
+
+        // Left — should go to start of '你' (byte 0)
+        let key = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+        assert!(input.handle_key(key));
+        assert_eq!(input.cursor, 0, "Left should go to byte 0 (你 start)");
+
+        // Left at start — no-op
+        let key = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+        assert!(input.handle_key(key));
+        assert_eq!(input.cursor, 0);
+
+        // Right — should go to start of '好' (byte 3)
+        let key = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        assert!(input.handle_key(key));
+        assert_eq!(input.cursor, 3, "Right should go to byte 3 (好 start)");
+
+        // Right — should go past '好' to end (byte 6)
+        let key = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        assert!(input.handle_key(key));
+        assert_eq!(input.cursor, 6, "Right should go to byte 6 (end)");
+
+        // Right at end — no-op
+        let key = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        assert!(input.handle_key(key));
+        assert_eq!(input.cursor, 6);
+
+        // Mid-byte position — Left should snap to char start
+        input.cursor = 5; // inside '好' (bytes 3-5)
+        let key = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+        assert!(input.handle_key(key));
+        assert_eq!(
+            input.cursor, 3,
+            "Left from inside '好' should snap to '好' start"
+        );
+    }
+
+    #[test]
+    fn test_left_right_arrow_mixed_cjk_ascii() {
+        let mut input = InputState::with_identity(None);
+        input.text = "abc你好def".into(); // bytes: a(0) b(1) c(2) 你(3-5) 好(6-8) d(9) e(10) f(11)
+
+        // Start at end (byte 12)
+        input.cursor = input.text.len();
+
+        // Walk left through every character boundary
+        // 12→11(f), 11→10(e), 10→9(d), 9→6(好), 6→3(你), 3→2(c), 2→1(b), 1→0(a)
+        let expected_left = [11, 10, 9, 6, 3, 2, 1, 0];
+        for &exp in &expected_left {
+            let key = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+            assert!(input.handle_key(key));
+            assert_eq!(
+                input.cursor, exp,
+                "Left should go to byte {exp}, got {}",
+                input.cursor
+            );
+            assert!(
+                input.text.is_char_boundary(input.cursor),
+                "cursor {} not on char boundary",
+                input.cursor
+            );
+        }
+
+        // Walk right back — each step moves to the next grapheme cluster end
+        // 0→1(a), 1→2(b), 2→3(c), 3→6(你), 6→9(好), 9→10(d), 10→11(e), 11→12(f→end)
+        let expected_right = [1, 2, 3, 6, 9, 10, 11, 12];
+        for &exp in &expected_right {
+            let key = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+            assert!(input.handle_key(key));
+            assert_eq!(
+                input.cursor, exp,
+                "Right should go to byte {exp}, got {}",
+                input.cursor
+            );
+        }
+    }
+
+    // ── CJK Backspace / Delete ──────────────────────────────────────────
+
+    #[test]
+    fn test_backspace_cjk() {
+        let mut input = InputState::with_identity(None);
+        input.text = "你好".into();
+        input.cursor = input.text.len(); // 6
+
+        // Backspace should delete '好' (bytes 3-5)
+        let key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        assert!(input.handle_key(key));
+        assert_eq!(input.text, "你");
+        assert_eq!(input.cursor, 3);
+
+        // Backspace should delete '你' (bytes 0-2)
+        let key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        assert!(input.handle_key(key));
+        assert_eq!(input.text, "");
+        assert_eq!(input.cursor, 0);
+
+        // Backspace at start — no-op
+        let key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        assert!(input.handle_key(key));
+        assert_eq!(input.text, "");
+        assert_eq!(input.cursor, 0);
+    }
+
+    #[test]
+    fn test_backspace_mixed_cjk_ascii() {
+        let mut input = InputState::with_identity(None);
+        input.text = "abc你好xyz".into();
+        input.cursor = input.text.len(); // 12 = 3+6+3
+
+        // Delete 'z'
+        let key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        assert!(input.handle_key(key));
+        assert_eq!(input.text, "abc你好xy");
+        assert_eq!(input.cursor, 11);
+
+        // Delete 'y'
+        let key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        assert!(input.handle_key(key));
+        assert_eq!(input.text, "abc你好x");
+        assert_eq!(input.cursor, 10);
+
+        // Delete 'x'
+        let key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        assert!(input.handle_key(key));
+        assert_eq!(input.text, "abc你好");
+        assert_eq!(input.cursor, 9);
+
+        // Delete '好' (multi-byte CJK)
+        let key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        assert!(input.handle_key(key));
+        assert_eq!(input.text, "abc你");
+        assert_eq!(input.cursor, 6);
+
+        // Delete '你'
+        let key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        assert!(input.handle_key(key));
+        assert_eq!(input.text, "abc");
+        assert_eq!(input.cursor, 3);
+    }
+
+    #[test]
+    fn test_delete_cjk() {
+        let mut input = InputState::with_identity(None);
+        input.text = "你好".into();
+        input.cursor = 0;
+
+        // Delete should remove '你' (bytes 0-2)
+        let key = KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE);
+        assert!(input.handle_key(key));
+        assert_eq!(input.text, "好");
+        assert_eq!(input.cursor, 0);
+
+        // Delete should remove '好' (bytes 0-2)
+        let key = KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE);
+        assert!(input.handle_key(key));
+        assert_eq!(input.text, "");
+        assert_eq!(input.cursor, 0);
+
+        // Delete at end — no-op
+        let key = KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE);
+        assert!(input.handle_key(key));
+        assert_eq!(input.text, "");
+        assert_eq!(input.cursor, 0);
+    }
+
+    #[test]
+    fn test_insert_cjk_characters() {
+        let mut input = InputState::with_identity(None);
+        input.text = "".into();
+        input.cursor = 0;
+
+        // Insert a CJK character
+        input.insert_char('你');
+        assert_eq!(input.text, "你");
+        assert_eq!(input.cursor, 3);
+
+        // Insert another
+        input.insert_char('好');
+        assert_eq!(input.text, "你好");
+        assert_eq!(input.cursor, 6);
+
+        // Insert ASCII
+        input.insert_char('a');
+        assert_eq!(input.text, "你好a");
+        assert_eq!(input.cursor, 7);
+    }
+
+    #[test]
+    fn test_backspace_cjk_at_valid_boundary() {
+        // Backspace correctly deletes multi-byte CJK characters
+        let mut input = InputState::with_identity(None);
+        input.text = "你好世界".into();
+
+        // Cursor after '界' (end of text)
+        input.cursor = 12;
+        let key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        assert!(input.handle_key(key));
+        assert_eq!(input.text, "你好世");
+        assert_eq!(input.cursor, 9, "cursor should be at start of '世'");
+
+        // Backspace again — removes '世'
+        let key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        assert!(input.handle_key(key));
+        assert_eq!(input.text, "你好");
+        assert_eq!(input.cursor, 6);
+    }
+
     #[test]
     fn test_move_cursor_up_down_cjk_no_panic() {
         // Regression: moving cursor up/down between lines with different
