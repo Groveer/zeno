@@ -175,7 +175,7 @@ zn.provider("anthropic", {
 zn.set_provider("anthropic")
 
 -- 条件配置：按目录动态切换权限
-if string.find(zn.cwd(), "/home/guo/Develop/") then
+if string.find(zn.cwd, "/home/guo/Develop/") then
   zn.permissions("allow")
 end
 

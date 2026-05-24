@@ -630,12 +630,12 @@ zn.user_char_limit(1375) -- USER.md character limit (default: 1375)
 -- ═══════════════════════════════════════════════
 
 -- Auto-trust specific development directories
--- if string.find(zn.cwd(), "/home/user/Develop/") then
+-- if string.find(zn.cwd, "/home/user/Develop/") then
 --   zn.trusted_paths({"/home/user/Develop/"})
 -- end
 
 -- Use different provider by hostname
--- if zn.hostname() == "work-laptop" then
+-- if zn.hostname == "work-laptop" then
 --   zn.set_provider("openai")
 -- end
 
@@ -644,6 +644,11 @@ zn.user_char_limit(1375) -- USER.md character limit (default: 1375)
 -- if model_override then
 --   zn.set_model(model_override)
 -- end
+
+-- Locate zeno's own config/data/cache directories (process-lifetime constants)
+-- local zb_config = zn.config_dir   -- e.g. ~/.config/zeno/
+-- local zb_data   = zn.data_dir     -- e.g. ~/.local/share/zeno/
+-- local zb_cache  = zn.cache_dir    -- e.g. ~/.cache/zeno/
 
 -- ═══════════════════════════════════════════════
 -- Finalize

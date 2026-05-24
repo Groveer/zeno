@@ -768,16 +768,15 @@ fn register_zeno_api(lua: &Lua, table: &mlua::Table) -> anyhow::Result<()> {
     )?;
 
     // --- Environment queries (read-only, for conditional config) ---
-    table.set(
-        "cwd",
-        lua.create_function(|_, ()| {
-            Ok(std::env::current_dir()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string())
-        })?,
-    )?;
+    // Computed once during registration — treated as constants for the lifetime
+    // of the process (config is loaded once at startup).
+    let cwd = std::env::current_dir()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    table.set("cwd", cwd)?;
 
+    // zeno.env("VAR_NAME") — takes a parameter, stays as function
     table.set(
         "env",
         lua.create_function(|_, name: String| -> Result<Option<String>, mlua::Error> {
@@ -785,28 +784,34 @@ fn register_zeno_api(lua: &Lua, table: &mlua::Table) -> anyhow::Result<()> {
         })?,
     )?;
 
-    table.set(
-        "os",
-        lua.create_function(|_, ()| {
-            Ok(if cfg!(target_os = "linux") {
-                "linux"
-            } else if cfg!(target_os = "macos") {
-                "macos"
-            } else if cfg!(target_os = "windows") {
-                "windows"
-            } else {
-                "unknown"
-            })
-        })?,
-    )?;
+    let os = if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "unknown"
+    };
+    table.set("os", os)?;
 
+    let hostname = hostname::get()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "unknown".into());
+    table.set("hostname", hostname)?;
+
+    // --- Path queries (read-only, for locating config/data/cache dirs) ---
     table.set(
-        "hostname",
-        lua.create_function(|_, ()| -> Result<String, mlua::Error> {
-            Ok(hostname::get()
-                .map(|h| h.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "unknown".into()))
-        })?,
+        "config_dir",
+        super::paths::config_dir().to_string_lossy().to_string(),
+    )?;
+    table.set(
+        "data_dir",
+        super::paths::data_dir().to_string_lossy().to_string(),
+    )?;
+    table.set(
+        "cache_dir",
+        super::paths::cache_dir().to_string_lossy().to_string(),
     )?;
 
     // --- Hooks ---
@@ -1277,7 +1282,7 @@ zn.provider("anthropic", {
     default_model = "claude-sonnet-4-20250514",
 })
 zn.set_provider("anthropic")
-if zn.os() == "linux" then
+if zn.os == "linux" then
     zn.permissions("allow")
 end
 return zn.config()
