@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::permissions::execpolicy::ExecRule;
@@ -267,6 +269,87 @@ impl Default for ToolsConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Guidelines (inline text and external file references)
+// ---------------------------------------------------------------------------
+
+/// A single guideline entry — inline text or an external file reference.
+///
+/// When it's a file reference, both the text prefix and the file content
+/// contribute to the final guidelines text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum GuidelineEntry {
+    /// Plain inline text.
+    Text(String),
+    /// Text prefix + external file path (`{ text, file_path }` in Lua).
+    Ref((String, PathBuf)),
+}
+
+/// Collection of guidelines, supporting multiple sources.
+///
+/// Accepts either a plain string (backward compatible) or an array of entries:
+/// - `"- Always validate"` (plain string)
+/// - `{ "- Style guide", zn.config_dir .. "style.md" }` (file reference)
+///
+/// Multiple entries can be mixed:
+/// ```lua
+/// zn.role({
+///   guidelines = {
+///     "- Be concise.",
+///     { "- Company rules:", zn.config_dir .. "company.md" },
+///   }
+/// })
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum GuidelinesConfig {
+    /// Single inline text (backward compatible).
+    Single(String),
+    /// Multiple entries — each is inline text or a file reference.
+    Multi(Vec<GuidelineEntry>),
+}
+
+impl GuidelinesConfig {
+    /// Resolve all entries into a single string, reading external files as needed.
+    ///
+    /// Relative file paths are resolved relative to `config_dir`.
+    pub fn resolve(&self, config_dir: &Path) -> anyhow::Result<String> {
+        match self {
+            Self::Single(s) => Ok(s.clone()),
+            Self::Multi(entries) => {
+                let mut parts: Vec<String> = Vec::new();
+                for entry in entries {
+                    match entry {
+                        GuidelineEntry::Text(text) => parts.push(text.clone()),
+                        GuidelineEntry::Ref((text, path)) => {
+                            let full_path = if path.is_relative() {
+                                config_dir.join(path)
+                            } else {
+                                path.clone()
+                            };
+                            let content =
+                                std::fs::read_to_string(&full_path).with_context(|| {
+                                    format!(
+                                        "Failed to read guidelines file: {}",
+                                        full_path.display()
+                                    )
+                                })?;
+                            let combined = if text.is_empty() {
+                                content
+                            } else {
+                                format!("{}\n{}", text, content)
+                            };
+                            parts.push(combined);
+                        }
+                    }
+                }
+                Ok(parts.join("\n\n"))
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Role (identity/persona)
 // ---------------------------------------------------------------------------
 
@@ -279,9 +362,11 @@ pub struct IdentityConfig {
     /// Custom identity text (overrides `RoleConfig.identity`).
     #[serde(default)]
     pub identity: Option<String>,
-    /// Custom guidelines text (overrides `RoleConfig.guidelines`).
+    /// Custom guidelines (overrides `RoleConfig.guidelines`).
+    ///
+    /// Accepts either a plain string or structured entries with file references.
     #[serde(default)]
-    pub guidelines: Option<String>,
+    pub guidelines: Option<GuidelinesConfig>,
 }
 
 /// Customizable role sections for the system prompt.
@@ -293,7 +378,9 @@ pub struct RoleConfig {
     /// Core identity and role declaration (replaces the default "You are zeno..." block).
     pub identity: Option<String>,
     /// Guidelines section (replaces the default guidelines block).
-    pub guidelines: Option<String>,
+    ///
+    /// Accepts either a plain string or structured entries with file references.
+    pub guidelines: Option<GuidelinesConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -468,7 +555,11 @@ mod tests {
             r#"{"identity": "You are a Rust developer", "guidelines": "Use idiomatic Rust"}"#;
         let config: IdentityConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.identity.as_deref(), Some("You are a Rust developer"));
-        assert_eq!(config.guidelines.as_deref(), Some("Use idiomatic Rust"));
+        assert!(
+            matches!(config.guidelines, Some(GuidelinesConfig::Single(ref s)) if s == "Use idiomatic Rust"),
+            "expected Single('Use idiomatic Rust'), got {:?}",
+            config.guidelines
+        );
 
         // Test IdentityConfig with only identity field
         let json = r#"{"identity": "You are a Python developer"}"#;
@@ -483,7 +574,11 @@ mod tests {
         let json = r#"{"guidelines": "Follow PEP 8"}"#;
         let config: IdentityConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.identity, None);
-        assert_eq!(config.guidelines.as_deref(), Some("Follow PEP 8"));
+        assert!(
+            matches!(config.guidelines, Some(GuidelinesConfig::Single(ref s)) if s == "Follow PEP 8"),
+            "expected Single('Follow PEP 8'), got {:?}",
+            config.guidelines
+        );
 
         // Test empty IdentityConfig
         let json = r#"{}"#;
@@ -520,7 +615,11 @@ mod tests {
 
         let dev = settings.identities.get("dev").unwrap();
         assert_eq!(dev.identity.as_deref(), Some("You are a Rust developer"));
-        assert_eq!(dev.guidelines.as_deref(), Some("Use idiomatic Rust"));
+        assert!(
+            matches!(dev.guidelines, Some(GuidelinesConfig::Single(ref s)) if s == "Use idiomatic Rust"),
+            "expected Single('Use idiomatic Rust'), got {:?}",
+            dev.guidelines
+        );
 
         let reviewer = settings.identities.get("reviewer").unwrap();
         assert_eq!(

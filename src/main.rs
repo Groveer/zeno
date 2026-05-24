@@ -393,6 +393,7 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|name| settings.identities.get(name));
     let system_prompt = crate::prompts::system_prompt::build(
         &cwd,
+        &crate::config::paths::config_dir(),
         &registry,
         &skill_registry_guard,
         None::<&str>,

@@ -15,8 +15,9 @@ use mlua::{Lua, LuaOptions, LuaSerdeExt, StdLib, Value};
 
 use super::paths;
 use super::settings::{
-    AuxiliaryConfig, DelegationConfig, EngineConfig, IdentityConfig, McpServerConfig,
-    PermissionMode, ProviderConfig, Settings, SkillsConfig, ToolsConfig, WebSearchConfig,
+    AuxiliaryConfig, DelegationConfig, EngineConfig, GuidelineEntry, GuidelinesConfig,
+    IdentityConfig, McpServerConfig, PermissionMode, ProviderConfig, Settings, SkillsConfig,
+    ToolsConfig, WebSearchConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -380,10 +381,17 @@ fn build_settings(lua: &Lua) -> anyhow::Result<Settings> {
         {
             settings.role.identity = Some(v);
         }
-        if let Ok(v) = role_table.get::<String>("guidelines")
-            && !v.is_empty()
-        {
-            settings.role.guidelines = Some(v);
+        // Handle guidelines: string (backward compat) or table (multi-entry / file refs)
+        if let Ok(v) = role_table.get::<mlua::Value>("guidelines") {
+            match lua.from_value::<GuidelinesConfig>(v) {
+                Ok(GuidelinesConfig::Single(ref s)) if s.trim().is_empty() => {
+                    // Skip empty single string (backward compat with old empty-string check)
+                }
+                Ok(gc) => {
+                    settings.role.guidelines = Some(gc);
+                }
+                Err(e) => tracing::warn!(error = %e, "Failed to parse guidelines from role config"),
+            }
         }
     }
 
@@ -521,17 +529,17 @@ fn register_zeno_api(lua: &Lua, table: &mlua::Table) -> anyhow::Result<()> {
 
     // --- Role ---
     // Bulk: zn.role({ identity = "...", guidelines = "..." })
+    // guidelines can be a string or a table of entries (with file references)
     table.set(
         "role",
         lua.create_function(move |lua, opts: mlua::Table| {
             let role: mlua::Table = get_overrides(lua)?
                 .get::<mlua::Table>("role")
                 .unwrap_or_else(|_| lua.create_table().unwrap());
-            for result in opts.pairs::<String, String>() {
+            // Use Value so table values (e.g. guidelines arrays) are preserved
+            for result in opts.pairs::<String, mlua::Value>() {
                 let (k, v) = result?;
-                if !v.is_empty() {
-                    role.set(k, v)?;
-                }
+                role.set(k, v)?;
             }
             get_overrides(lua)?.set("role", role)?;
             Ok(())
@@ -553,11 +561,11 @@ fn register_zeno_api(lua: &Lua, table: &mlua::Table) -> anyhow::Result<()> {
 
     table.set(
         "guidelines",
-        lua.create_function(move |lua, text: String| {
+        lua.create_function(move |lua, value: mlua::Value| {
             let role: mlua::Table = get_overrides(lua)?
                 .get::<mlua::Table>("role")
                 .unwrap_or_else(|_| lua.create_table().unwrap());
-            role.set("guidelines", text)?;
+            role.set("guidelines", value)?;
             get_overrides(lua)?.set("role", role)?;
             Ok(())
         })?,
@@ -1430,12 +1438,12 @@ return zn.config()
             Some("You are Bob, a data engineer.")
         );
         assert!(
-            settings
-                .role
-                .guidelines
-                .as_ref()
-                .unwrap()
-                .contains("validate data")
+            matches!(
+                settings.role.guidelines,
+                Some(GuidelinesConfig::Single(ref s)) if s.contains("validate data")
+            ),
+            "expected guidelines with 'validate data', got {:?}",
+            settings.role.guidelines
         );
     }
 
@@ -1476,6 +1484,70 @@ return zn.config()
             settings.role.identity.is_none(),
             "empty string should result in None"
         );
+    }
+
+    #[test]
+    fn test_role_config_guidelines_with_file_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        // Write a guidelines file in the same temp dir
+        let guidelines_path = dir.path().join("company.md");
+        std::fs::write(
+            &guidelines_path,
+            "- Follow company policy.\n- Be professional.",
+        )
+        .unwrap();
+        let cfg_dir = dir.path().to_string_lossy().to_string();
+
+        let init_lua = format!(
+            r#"
+            local zn = require 'zeno'
+            zn.provider("anthropic", {{
+                api_key = "ANTHROPIC_API_KEY",
+                base_url = "https://api.anthropic.com",
+            }})
+            zn.set_provider("anthropic")
+            zn.role({{
+                identity = "You are a DevOps engineer.",
+                guidelines = {{
+                    "- Always check logs first.",
+                    {{ "- Company rules:", "{}" .. "/company.md" }},
+                }}
+            }})
+            return zn.config()
+            "#,
+            cfg_dir
+        );
+        std::fs::write(dir.path().join("init.lua"), init_lua).unwrap();
+        let (settings, _hooks, _lua) = load_from_dir(dir.path()).unwrap();
+
+        assert_eq!(
+            settings.role.identity.as_deref(),
+            Some("You are a DevOps engineer.")
+        );
+
+        let guidelines = settings.role.guidelines.unwrap();
+        match guidelines {
+            GuidelinesConfig::Multi(ref entries) => {
+                assert_eq!(entries.len(), 2);
+                assert!(
+                    matches!(&entries[0], GuidelineEntry::Text(s) if s == "- Always check logs first."),
+                    "expected Text entry, got {:?}",
+                    entries[0]
+                );
+                assert!(
+                    matches!(&entries[1], GuidelineEntry::Ref((text, _)) if text == "- Company rules:"),
+                    "expected Ref entry, got {:?}",
+                    entries[1]
+                );
+            }
+            _ => panic!("Expected Multi variant"),
+        }
+
+        // Also verify that resolve() produces the combined content
+        let resolved = guidelines.resolve(dir.path()).unwrap();
+        assert!(resolved.contains("- Always check logs first."));
+        assert!(resolved.contains("- Follow company policy."));
+        assert!(resolved.contains("- Be professional."));
     }
 
     #[test]

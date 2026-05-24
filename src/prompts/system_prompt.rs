@@ -35,8 +35,11 @@ use crate::tools::base::{ToolRegistry, tool_kind};
 ///
 /// When `active_identity` is Some, its fields override the corresponding
 /// `role_config` fields for identity and guidelines.
+///
+/// `config_dir` is used to resolve external file references in guidelines.
 pub fn build(
     cwd: &Path,
+    config_dir: &Path,
     tool_registry: &ToolRegistry,
     skill_registry: &SkillRegistry,
     memory_block: Option<&str>,
@@ -55,9 +58,20 @@ pub fn build(
         None => role_config.clone(),
     };
 
+    // Resolve guidelines to a plain string (reading external files if needed)
+    let guidelines_text = effective_role
+        .guidelines
+        .as_ref()
+        .and_then(|gc| {
+            gc.resolve(config_dir)
+                .inspect_err(|e| tracing::warn!(error = %e, "Failed to resolve guidelines"))
+                .ok()
+        })
+        .filter(|s| !s.trim().is_empty());
+
     let mut parts = vec![
         core_identity(&effective_role, !skill_registry.is_empty()),
-        guidelines(&effective_role),
+        guidelines(guidelines_text.as_deref()),
         tools_block(&tool_registry.names()),
     ];
 
@@ -232,11 +246,11 @@ When there is a conflict, always follow the user's rules below.\n\n\
 }
 
 /// Guidelines — combines built-in and optional user guidelines into one block.
-fn guidelines(role: &RoleConfig) -> String {
+fn guidelines(custom: Option<&str>) -> String {
     let builtin = builtin_guidelines();
-    match role.guidelines {
-        Some(ref custom) if !custom.trim().is_empty() => {
-            format!("{}\n\n{}", builtin, user_guidelines_block(custom))
+    match custom {
+        Some(text) if !text.trim().is_empty() => {
+            format!("{}\n\n{}", builtin, user_guidelines_block(text))
         }
         _ => builtin,
     }
@@ -617,11 +631,8 @@ mod tests {
 
     #[test]
     fn test_custom_guidelines_appended() {
-        let role = RoleConfig {
-            identity: None,
-            guidelines: Some("- Always think step by step.\n- Never guess.".into()),
-        };
-        let p = guidelines(&role);
+        let guidelines_text = "- Always think step by step.\n- Never guess.";
+        let p = guidelines(Some(guidelines_text));
         assert!(p.contains("## Guidelines"));
         // Built-in rules are always present
         assert!(p.contains("Be concise"));
@@ -638,7 +649,7 @@ mod tests {
     fn test_default_role_uses_builtin() {
         let role = RoleConfig::default();
         assert!(core_identity(&role, false).contains("zeno"));
-        assert!(guidelines(&role).contains("Be concise"));
+        assert!(guidelines(None).contains("Be concise"));
     }
 
     // --- New tests for loading workflow ---
@@ -754,6 +765,7 @@ mod tests {
         let skill_registry = SkillRegistry::new();
         let prompt = build(
             std::path::Path::new("/tmp"),
+            std::path::Path::new("/tmp"),
             &tool_registry,
             &skill_registry,
             None,
@@ -777,6 +789,7 @@ mod tests {
         let tool_registry = ToolRegistry::new();
         let skill_registry = SkillRegistry::new();
         let prompt = build(
+            std::path::Path::new("/tmp"),
             std::path::Path::new("/tmp"),
             &tool_registry,
             &skill_registry,

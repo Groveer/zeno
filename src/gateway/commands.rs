@@ -789,6 +789,7 @@ async fn rebuild_after_identity_change(
     let skill_reg = skill_registry.lock().await;
     let new_prompt = crate::prompts::system_prompt::build(
         &eng.cwd,
+        &crate::config::paths::config_dir(),
         &eng.tools,
         &skill_reg,
         Some(&memory_prompt),

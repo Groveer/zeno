@@ -44,9 +44,25 @@ zn.set_model("gpt-5.5")
 --   guidelines = "- Always write tests first.\n- Prefer zero-cost abstractions.",
 -- })
 
--- Or set individually:
+-- Guidelines now supports external file references. Use a table of entries
+-- where each entry is either a plain string or a {text, file_path} pair:
+--   { "prefix text", zn.config_dir .. "rules.md" }
+-- Both the prefix text and the file content are combined into the final guidelines.
+
+-- zn.role({
+--   identity = "You are Alice, a senior Rust engineer.",
+--   guidelines = {
+--     "- Always write tests first.",
+--     { "- Company Rust style:", zn.config_dir .. "rust-style.md" },
+--   },
+-- })
+
+-- Or use the individual setter:
 -- zn.identity("You are a data engineer specializing in ETL pipelines.")
--- zn.guidelines("- Validate all inputs.\n- Prefer SQL for data queries.")
+-- zn.guidelines({
+--   "- Validate all inputs.",
+--   { "- Team conventions:", zn.config_dir .. "team-rules.md" },
+-- })
 
 -- ═══════════════════════════════════════════════
 -- Named Identities (Multiple Personas)
@@ -59,14 +75,22 @@ zn.set_model("gpt-5.5")
 -- when activated.  All fields are optional — unset ones fall back to
 -- the base role config or built-in defaults.
 --
+-- Identities also support the multi-entry guidelines format with file references:
+--
 -- zn.def_identity("dev", {
 --   identity = "You are a senior Rust engineer. You write clean, idiomatic code.",
---   guidelines = "- Always write tests first.\n- Prefer zero-cost abstractions.\n- Use clippy lints.",
+--   guidelines = {
+--     "- Always write tests first.",
+--     { "- Project conventions:", zn.config_dir .. "rust-style.md" },
+--   },
 -- })
 --
 -- zn.def_identity("ops", {
 --   identity = "You are a DevOps engineer specializing in Kubernetes and CI/CD.",
---   guidelines = "- Always check resource limits.\n- Prefer declarative configs.\n- Never store secrets in plain text.",
+--   guidelines = {
+--     "- Always check resource limits.",
+--     { "- Company runbooks:", zn.config_dir .. "ops-runbook.md" },
+--   },
 -- })
 --
 -- zn.def_identity("pm", {
