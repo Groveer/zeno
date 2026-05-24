@@ -19,6 +19,12 @@ use crate::ui::theme;
 ///
 /// Uses a write-through cache: `segment_to_lines()` + `wrap::wrap_line()` are
 /// re-done only when segments change or the terminal width changes.
+///
+/// Lines are pre-wrapped by [`wrap::wrap_line`] to fit `area.width`, so
+/// [`Paragraph`] is rendered **without** `.wrap()` — adding it would re-flow
+/// already-wrapped lines through ratatui's `WordWrapper`, which can produce
+/// *extra* visual rows (one wrapped line → two rows) that push content
+/// off-screen and break scroll‑position tracking.
 pub fn render(frame: &mut Frame, area: Rect, state: &mut OutputState) {
     let visible_height = area.height as usize;
     let width = area.width as usize;
@@ -52,12 +58,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut OutputState) {
 
     let text = Text::from(visible);
 
-    frame.render_widget(
-        Paragraph::new(text)
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .style(Style::new().bg(theme::BG)),
-        area,
-    );
+    frame.render_widget(Paragraph::new(text).style(Style::new().bg(theme::BG)), area);
 
     // Scroll indicator
     if total > visible_height && state.scroll > 0 {

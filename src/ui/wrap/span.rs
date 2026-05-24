@@ -217,4 +217,86 @@ mod tests {
             .map(|s| s.content.as_ref())
             .collect::<String>()
     }
+
+    // ── Full pipeline tests: wrap_spans → Paragraph rendering ─────────────
+    //
+    // These verify that our character-level wrapping (wrap_spans) produces
+    // correct line counts and content.  Lines are pre-wrapped to fit within
+    // `max_width` — Paragraph should NOT be asked to re-wrap them (the
+    // `render` function passes them without `.wrap()` for this reason).
+
+    #[test]
+    fn test_wrap_full_pipeline_ascii() {
+        // 20 ASCII characters, wrapped to width 10 → 2 lines of 10 each.
+        let spans = vec![Span::styled("ABCDEFGHIJKLMNOPQRST", Style::default())];
+        let wrapped = wrap_spans(&spans, 10);
+        assert_eq!(wrapped.len(), 2, "wrap_spans: 20 chars at 10 → 2 lines");
+        assert_eq!(concat_spans(&wrapped[0]), "ABCDEFGHIJ");
+        assert_eq!(concat_spans(&wrapped[1]), "KLMNOPQRST");
+    }
+
+    #[test]
+    fn test_wrap_full_pipeline_cjk() {
+        // 5 CJK chars (width 2 each = total 10) at width 8 → 4+1.
+        let spans = vec![Span::styled("你好世界！", Style::default())];
+        let wrapped = wrap_spans(&spans, 8);
+        assert_eq!(wrapped.len(), 2, "5 CJK at width 8 → 2 lines");
+        assert_eq!(concat_spans(&wrapped[0]), "你好世界", "Line 0: 4 CJK (w=8)");
+        assert_eq!(concat_spans(&wrapped[1]), "！", "Line 1: 1 CJK (w=2)");
+    }
+
+    #[test]
+    fn test_wrap_full_pipeline_cjk_exact() {
+        // 4 mixed chars (width 8 total) at width 8 → 1 line.
+        let spans = vec![Span::styled("ABCD世界", Style::default())];
+        let wrapped = wrap_spans(&spans, 8);
+        assert_eq!(wrapped.len(), 1, "width-8 at width 8 → 1 line");
+        assert_eq!(concat_spans(&wrapped[0]), "ABCD世界");
+    }
+
+    #[test]
+    fn test_wrap_full_pipeline_emoji() {
+        // 5 emoji (width 2 each = total 10) wrapped at width 6 → 3+2.
+        let spans = vec![Span::styled("😀😀😀😀😀", Style::default())];
+        let wrapped = wrap_spans(&spans, 6);
+        assert_eq!(wrapped.len(), 2, "5 emoji at width 6 → 2 lines");
+        assert_eq!(concat_spans(&wrapped[0]), "😀😀😀", "Line 0: 3 emoji");
+        assert_eq!(concat_spans(&wrapped[1]), "😀😀", "Line 1: 2 emoji");
+    }
+
+    #[test]
+    fn test_wrap_full_pipeline_exact_fit() {
+        // Line with exactly width 10 at width 10 — single line.
+        let spans = vec![Span::styled("1234567890", Style::default())];
+        let wrapped = wrap_spans(&spans, 10);
+        assert_eq!(wrapped.len(), 1, "exact fit → 1 line");
+        assert_eq!(concat_spans(&wrapped[0]), "1234567890");
+    }
+
+    #[test]
+    fn test_wrap_full_pipeline_one_past_exact() {
+        // 11 chars at width 10 → 10+1.
+        let spans = vec![Span::styled("ABCDEFGHIJK", Style::default())];
+        let wrapped = wrap_spans(&spans, 10);
+        assert_eq!(wrapped.len(), 2, "11 chars at 10 → 2 lines");
+        assert_eq!(concat_spans(&wrapped[0]), "ABCDEFGHIJ");
+        assert_eq!(concat_spans(&wrapped[1]), "K");
+    }
+
+    #[test]
+    fn test_wrap_full_pipeline_mixed_with_prefix() {
+        // Simulates a UserInput line: prefix + trailing text.
+        // Prefix "◆ " (w=2) + 18 chars (w=18) = width 20 at area width 10.
+        let spans = vec![
+            Span::styled("◆ ", Style::default()),
+            Span::styled("ABCDEFGHIJKLMNOPQR", Style::default()),
+        ];
+        let wrapped = wrap_spans(&spans, 10);
+        // "◆ " (w=2) + "ABCDEFGH" (8) = width 10. Then "IJKLMNOPQR" (10).
+        assert_eq!(wrapped.len(), 2, "prefix+18 at 10 → 2 lines");
+        let s0 = concat_spans(&wrapped[0]);
+        assert!(s0.starts_with("◆ "), "Line 0 has prefix, got: {:?}", s0);
+        assert_eq!(s0.chars().count(), 10, "◆ ABCDEFGH = 10 chars");
+        assert_eq!(concat_spans(&wrapped[1]), "IJKLMNOPQR");
+    }
 }
