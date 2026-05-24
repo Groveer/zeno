@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 
 use super::base::{Tool, ToolContext, ToolError};
 use super::file_content_pool::ReadOutcome;
+use zeno_tools::{JsonToolOutput, ToolOutput};
 
 /// Default number of lines to return when no offset is specified and the file
 /// is large. Increased from 300 to reduce round-trips for medium-sized files.
@@ -49,6 +50,10 @@ impl Tool for ReadTool {
         "read"
     }
 
+    fn supports_parallel(&self) -> bool {
+        true
+    }
+
     fn schema(&self) -> Value {
         json!({
             "type": "function",
@@ -83,7 +88,11 @@ impl Tool for ReadTool {
         })
     }
 
-    async fn execute(&self, arguments: Value, ctx: &ToolContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        arguments: Value,
+        ctx: &ToolContext,
+    ) -> Result<Box<dyn ToolOutput>, ToolError> {
         let path = arguments["path"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing 'path'".into()))?;
@@ -152,13 +161,19 @@ impl Tool for ReadTool {
                         covered_prefix,
                     } => {
                         if lines.is_empty() && start >= total_lines {
-                            return Ok(format!(
+                            return Ok(Box::new(JsonToolOutput::success(format!(
                                 "(file has {} lines, offset {} is past end)",
                                 total_lines,
                                 start + 1
-                            ));
+                            ))));
                         }
-                        return Ok(format_pool_output(lines, s, e, covered_prefix, total_lines));
+                        return Ok(Box::new(JsonToolOutput::success(format_pool_output(
+                            lines,
+                            s,
+                            e,
+                            covered_prefix,
+                            total_lines,
+                        ))));
                     }
                     ReadOutcome::Miss if retries == 0 => {
                         // First miss — read from disk, insert, and retry.
@@ -175,7 +190,9 @@ impl Tool for ReadTool {
                         // reusing content already read above.
                         let content = disk_content.take().unwrap_or_default();
                         let total = content.lines().count();
-                        return format_from_disk_with_content(&content, start, end, total);
+                        return Ok(Box::new(JsonToolOutput::success(
+                            format_from_disk_with_content(&content, start, end, total)?,
+                        )));
                     }
                 }
             }
@@ -184,7 +201,9 @@ impl Tool for ReadTool {
             let content = tokio::fs::read_to_string(&resolved).await?;
             let total_lines = content.lines().count();
             let (start, end) = parse_read_range(&arguments, total_lines);
-            format_from_disk_with_content(&content, start, end, total_lines)
+            Ok(Box::new(JsonToolOutput::success(
+                format_from_disk_with_content(&content, start, end, total_lines)?,
+            )))
         }
     }
 

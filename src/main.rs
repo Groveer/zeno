@@ -201,6 +201,9 @@ async fn main() -> anyhow::Result<()> {
     // Register delegate_task tool (sub-agent support) — always available
     registry.register(Box::new(tools::delegate_task::DelegateTaskTool::new()))?;
 
+    // Register tool_search (Deferred — not shown to model initially)
+    registry.register(Box::new(tools::tool_search::ToolSearchTool::new()))?;
+
     // Create client factory for sub-agents
     let client_factory: Arc<
         dyn Fn(&str, &ProviderConfig) -> Box<dyn api::client::SupportsStreamingMessages>

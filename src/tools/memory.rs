@@ -15,6 +15,7 @@ use tokio::sync::Mutex;
 use super::base::{Tool, ToolContext, ToolError};
 use crate::memory::manager::SharedMemoryManager;
 use crate::memory::store::MemoryStore;
+use zeno_tools::{JsonToolOutput, ToolOutput};
 
 pub struct MemoryTool {
     store: Arc<Mutex<MemoryStore>>,
@@ -71,7 +72,11 @@ impl Tool for MemoryTool {
         })
     }
 
-    async fn execute(&self, arguments: Value, _ctx: &ToolContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        arguments: Value,
+        _ctx: &ToolContext,
+    ) -> Result<Box<dyn ToolOutput>, ToolError> {
         let action = arguments["action"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing 'action'".into()))?;
@@ -79,11 +84,13 @@ impl Tool for MemoryTool {
         let target = arguments["target"].as_str().unwrap_or("memory");
 
         if target != "memory" && target != "user" {
-            return Ok(json!({
-                "success": false,
-                "error": format!("Invalid target '{}'. Use 'memory' or 'user'.", target)
-            })
-            .to_string());
+            return Ok(Box::new(JsonToolOutput::success(
+                json!({
+                    "success": false,
+                    "error": format!("Invalid target '{}'. Use 'memory' or 'user'.", target)
+                })
+                .to_string(),
+            )));
         }
 
         let mut store = self.store.lock().await;
@@ -139,15 +146,16 @@ impl Tool for MemoryTool {
             }
             "read" => store.read(target),
             _ => {
-                return Ok(json!({
+                return Ok(Box::new(JsonToolOutput::success(json!({
                     "success": false,
                     "error": format!("Unknown action '{}'. Use: add, replace, remove, read", action)
                 })
-                .to_string());
+                .to_string())));
             }
         };
 
-        Ok(serde_json::to_string(&result)
-            .unwrap_or_else(|_| r#"{"success":false,"error":"serialization failed"}"#.to_string()))
+        let serialized = serde_json::to_string(&result)
+            .unwrap_or_else(|_| r#"{"success":false,"error":"serialization failed"}"#.to_string());
+        Ok(Box::new(JsonToolOutput::success(serialized)))
     }
 }

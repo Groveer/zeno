@@ -45,6 +45,7 @@ use serde_json::{Value, json};
 use crate::tools::base::{Tool, ToolContext, ToolError};
 
 use super::sandbox::{SandboxError, execute_plugin};
+use zeno_tools::{JsonToolOutput, ToolOutput};
 
 // ---------------------------------------------------------------------------
 // Plugin definition (parsed from Lua)
@@ -252,11 +253,15 @@ impl Tool for PluginTool {
         })
     }
 
-    async fn execute(&self, arguments: Value, ctx: &ToolContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        arguments: Value,
+        ctx: &ToolContext,
+    ) -> Result<Box<dyn ToolOutput>, ToolError> {
         let cwd = ctx.get_cwd().to_string_lossy().to_string();
 
         match execute_plugin(&self.plugin, &arguments, &cwd) {
-            Ok(result) => Ok(result.output),
+            Ok(result) => Ok(Box::new(JsonToolOutput::success(result.output))),
             Err(SandboxError::Execution(msg)) => Err(ToolError::Execution(format!(
                 "Plugin '{}' error: {}",
                 self.plugin.name, msg

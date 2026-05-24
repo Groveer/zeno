@@ -11,7 +11,7 @@ use serde_json::Value;
 ///
 /// This trait enables consistent formatting across all tools while
 /// allowing each tool to customize its output presentation.
-pub trait ToolOutput: Send + Sync {
+pub trait ToolOutput: Send + Sync + std::fmt::Debug {
     /// The full content string to send back to the LLM.
     fn content(&self) -> &str;
 

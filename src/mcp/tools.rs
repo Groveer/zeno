@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 
 use super::manager::McpManager;
 use crate::tools::base::{Tool, ToolContext, ToolError};
+use zeno_tools::{JsonToolOutput, ToolOutput};
 
 // ---------------------------------------------------------------------------
 // Shared helper
@@ -51,10 +52,14 @@ impl Tool for McpListServersTool {
         })
     }
 
-    async fn execute(&self, _arguments: Value, ctx: &ToolContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        _arguments: Value,
+        ctx: &ToolContext,
+    ) -> Result<Box<dyn ToolOutput>, ToolError> {
         let mgr = get_manager(ctx)?;
         let mgr = mgr.lock().await;
-        Ok(mgr.summary())
+        Ok(Box::new(JsonToolOutput::success(mgr.summary())))
     }
 
     fn is_read_only(&self, _: &Value) -> bool {
@@ -100,7 +105,11 @@ impl Tool for McpListToolsTool {
         })
     }
 
-    async fn execute(&self, arguments: Value, ctx: &ToolContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        arguments: Value,
+        ctx: &ToolContext,
+    ) -> Result<Box<dyn ToolOutput>, ToolError> {
         let server_name = arguments
             .get("server_name")
             .and_then(|v| v.as_str())
@@ -108,7 +117,9 @@ impl Tool for McpListToolsTool {
 
         let mgr = get_manager(ctx)?;
         let mut mgr = mgr.lock().await;
-        mgr.discover_tools(server_name).await
+        Ok(Box::new(JsonToolOutput::success(
+            mgr.discover_tools(server_name).await?,
+        )))
     }
 
     fn is_read_only(&self, _: &Value) -> bool {
@@ -158,7 +169,11 @@ impl Tool for McpDescribeToolTool {
         })
     }
 
-    async fn execute(&self, arguments: Value, ctx: &ToolContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        arguments: Value,
+        ctx: &ToolContext,
+    ) -> Result<Box<dyn ToolOutput>, ToolError> {
         let server_name = arguments
             .get("server_name")
             .and_then(|v| v.as_str())
@@ -183,13 +198,15 @@ impl Tool for McpDescribeToolTool {
             .iter()
             .find(|t| t.name.as_str() == tool_name);
         match tool {
-            Some(t) => Ok(serde_json::to_string_pretty(&json!({
-                "server": server_name,
-                "tool": t.name,
-                "description": t.description,
-                "parameters": t.input_schema,
-            }))
-            .map_err(|e| ToolError::Execution(e.to_string()))?),
+            Some(t) => Ok(Box::new(JsonToolOutput::success(
+                serde_json::to_string_pretty(&json!({
+                    "server": server_name,
+                    "tool": t.name,
+                    "description": t.description,
+                    "parameters": t.input_schema,
+                }))
+                .map_err(|e| ToolError::Execution(e.to_string()))?,
+            ))),
             None => Err(ToolError::Execution(format!(
                 "Tool '{}' not found on server '{}'. Available: {}",
                 tool_name,
@@ -255,7 +272,11 @@ impl Tool for McpCallToolTool {
         })
     }
 
-    async fn execute(&self, arguments: Value, ctx: &ToolContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        arguments: Value,
+        ctx: &ToolContext,
+    ) -> Result<Box<dyn ToolOutput>, ToolError> {
         let server_name = arguments
             .get("server_name")
             .and_then(|v| v.as_str())
@@ -279,6 +300,8 @@ impl Tool for McpCallToolTool {
             mgr.ensure_connected(server_name).await?;
         }
 
-        McpManager::call_tool_static(&mgr_clone, server_name, tool_name, tool_args).await
+        Ok(Box::new(JsonToolOutput::success(
+            McpManager::call_tool_static(&mgr_clone, server_name, tool_name, tool_args).await?,
+        )))
     }
 }

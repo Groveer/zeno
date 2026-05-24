@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 
 use super::base::{Tool, ToolContext, ToolError};
 use crate::sandbox::Sandbox;
+use zeno_tools::{JsonToolOutput, ToolOutput};
 
 /// Commands that are known to be read-only (no side effects).
 /// Used by `is_read_only` to skip unnecessary permission confirmations
@@ -348,7 +349,11 @@ impl Tool for BashTool {
                 .any(|cmd| trimmed.starts_with(cmd))
     }
 
-    async fn execute(&self, arguments: Value, ctx: &ToolContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        arguments: Value,
+        ctx: &ToolContext,
+    ) -> Result<Box<dyn ToolOutput>, ToolError> {
         // Rate limit check: prevent runaway bash execution
         if let Some(ref limiter) = ctx.rate_limiter
             && let Ok(mut limiter) = limiter.lock()
@@ -392,7 +397,7 @@ impl Tool for BashTool {
                 if result.is_empty() {
                     result = "(no output)".into();
                 }
-                return Ok(result);
+                return Ok(Box::new(JsonToolOutput::success(result)));
             }
             tracing::debug!(
                 event = "rtk_fallback",
@@ -478,7 +483,7 @@ impl Tool for BashTool {
             }
         }
 
-        Ok(result)
+        Ok(Box::new(JsonToolOutput::success(result)))
     }
 }
 

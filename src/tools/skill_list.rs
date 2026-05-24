@@ -5,6 +5,7 @@ use crate::tools::base::{Tool, ToolContext, ToolError};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
+use zeno_tools::{JsonToolOutput, ToolOutput};
 
 pub struct SkillListTool {
     registry: Arc<Mutex<SkillRegistry>>,
@@ -20,6 +21,10 @@ impl SkillListTool {
 impl Tool for SkillListTool {
     fn name(&self) -> &str {
         "skill_list"
+    }
+
+    fn supports_parallel(&self) -> bool {
+        true
     }
 
     fn is_read_only(&self, _input: &Value) -> bool {
@@ -45,7 +50,11 @@ impl Tool for SkillListTool {
         })
     }
 
-    async fn execute(&self, arguments: Value, _ctx: &ToolContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        arguments: Value,
+        _ctx: &ToolContext,
+    ) -> Result<Box<dyn ToolOutput>, ToolError> {
         let category = arguments.get("category").and_then(|v| v.as_str());
         let registry = self.registry.lock().await;
 
@@ -58,7 +67,7 @@ impl Tool for SkillListTool {
                         .keys()
                         .map(|s| format!("- {}", s))
                         .collect();
-                    return Ok(format!(
+                    return Ok(Box::new(JsonToolOutput::success(format!(
                         "No skills found in category '{}'. Available categories:\n{}",
                         cat,
                         if cats.is_empty() {
@@ -66,35 +75,37 @@ impl Tool for SkillListTool {
                         } else {
                             cats.join("\n")
                         }
-                    ));
+                    ))));
                 }
                 let lines: Vec<String> = skills
                     .iter()
                     .map(|s| format!("- **{}**: {}", s.name, s.description))
                     .collect();
-                Ok(format!(
+                Ok(Box::new(JsonToolOutput::success(format!(
                     "Skills in '{}' ({}):\n{}",
                     cat,
                     skills.len(),
                     lines.join("\n")
-                ))
+                ))))
             }
             None => {
                 let categories = registry.categories();
                 if categories.is_empty() {
                     let skills = registry.list_skills();
                     if skills.is_empty() {
-                        return Ok("No skills available.".into());
+                        return Ok(Box::new(JsonToolOutput::success(String::from(
+                            "No skills available.",
+                        ))));
                     }
                     let lines: Vec<String> = skills
                         .iter()
                         .map(|s| format!("- **{}** ({}) — {}", s.name, s.category, s.description))
                         .collect();
-                    return Ok(format!(
+                    return Ok(Box::new(JsonToolOutput::success(format!(
                         "Available skills ({}):\n{}",
                         skills.len(),
                         lines.join("\n")
-                    ));
+                    ))));
                 }
                 let mut lines = vec![format!(
                     "Skill categories ({} total skills):\n",
@@ -117,7 +128,7 @@ impl Tool for SkillListTool {
                         desc
                     ));
                 }
-                Ok(lines.join("\n"))
+                Ok(Box::new(JsonToolOutput::success(lines.join("\n"))))
             }
         }
     }

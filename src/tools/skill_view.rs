@@ -6,6 +6,7 @@ use crate::tools::base::{Tool, ToolContext, ToolError};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
+use zeno_tools::{JsonToolOutput, ToolOutput};
 
 pub struct SkillViewTool {
     registry: Arc<Mutex<SkillRegistry>>,
@@ -21,6 +22,10 @@ impl SkillViewTool {
 impl Tool for SkillViewTool {
     fn name(&self) -> &str {
         "skill_view"
+    }
+
+    fn supports_parallel(&self) -> bool {
+        true
     }
 
     fn is_read_only(&self, _input: &Value) -> bool {
@@ -51,12 +56,18 @@ impl Tool for SkillViewTool {
         })
     }
 
-    async fn execute(&self, arguments: Value, _ctx: &ToolContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        arguments: Value,
+        _ctx: &ToolContext,
+    ) -> Result<Box<dyn ToolOutput>, ToolError> {
         let name = arguments.get("name").and_then(|v| v.as_str()).unwrap_or("");
         let file_path = arguments.get("file_path").and_then(|v| v.as_str());
 
         if name.is_empty() {
-            return Ok("Specify a skill name to view.".into());
+            return Ok(Box::new(JsonToolOutput::success(String::from(
+                "Specify a skill name to view.",
+            ))));
         }
 
         let registry = self.registry.lock().await;
@@ -70,16 +81,16 @@ impl Tool for SkillViewTool {
                     .map(|s| format!("{} ({})", s.name, s.category))
                     .collect();
                 if available.is_empty() {
-                    return Ok(format!(
+                    return Ok(Box::new(JsonToolOutput::success(format!(
                         "Skill '{}' not found. No skills are currently loaded.",
                         name
-                    ));
+                    ))));
                 }
-                return Ok(format!(
+                return Ok(Box::new(JsonToolOutput::success(format!(
                     "Skill '{}' not found. Available:\n{}",
                     name,
                     available.join("\n")
-                ));
+                ))));
             }
         };
 
@@ -104,7 +115,7 @@ impl Tool for SkillViewTool {
                 let full_path = dir.join(fp);
                 if full_path.exists() {
                     match std::fs::read_to_string(&full_path) {
-                        Ok(content) => return Ok(content),
+                        Ok(content) => return Ok(Box::new(JsonToolOutput::success(content))),
                         Err(e) => {
                             return Err(ToolError::NotFound(format!(
                                 "Cannot read '{}': {}",
@@ -146,13 +157,13 @@ impl Tool for SkillViewTool {
             && let Some(dir) = Path::new(path_str).parent()
             && let Some(linked) = list_linked_files(dir)
         {
-            return Ok(format!(
+            return Ok(Box::new(JsonToolOutput::success(format!(
                 "{}\n\n---\nLinked files (use skill_view with file_path to access):\n{}",
                 content, linked
-            ));
+            ))));
         }
 
-        Ok(content)
+        Ok(Box::new(JsonToolOutput::success(content)))
     }
 }
 

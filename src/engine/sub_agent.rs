@@ -400,6 +400,7 @@ async fn run_single_sub_agent(
         rate_limiter: None,
         tool_stats: None,
         file_content_pool: None,
+        tool_registry: None,
     };
 
     // Create sub-agent's API client
@@ -728,7 +729,7 @@ async fn run_single_sub_agent(
                     match deps.tool_registry.execute(&tu.name, input, &ctx).await {
                         Ok(output) => ContentBlock::ToolResult {
                             tool_use_id: tu.id.clone(),
-                            content: output,
+                            content: output.content().to_string(),
                             is_error: None,
                         },
                         Err(e) => ContentBlock::ToolResult {

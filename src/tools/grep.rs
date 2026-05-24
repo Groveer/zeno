@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use walkdir::WalkDir;
 
 use super::base::{Tool, ToolContext, ToolError};
+use zeno_tools::{JsonToolOutput, ToolOutput};
 
 pub struct GrepTool {
     skip_dirs: Vec<String>,
@@ -23,6 +24,10 @@ impl GrepTool {
 impl Tool for GrepTool {
     fn name(&self) -> &str {
         "grep"
+    }
+
+    fn supports_parallel(&self) -> bool {
+        true
     }
 
     fn schema(&self) -> Value {
@@ -63,7 +68,11 @@ impl Tool for GrepTool {
         })
     }
 
-    async fn execute(&self, arguments: Value, ctx: &ToolContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        arguments: Value,
+        ctx: &ToolContext,
+    ) -> Result<Box<dyn ToolOutput>, ToolError> {
         let pattern = arguments["pattern"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing 'pattern'".into()))?;
@@ -127,17 +136,17 @@ impl Tool for GrepTool {
         .map_err(|e| ToolError::Execution(format!("Task join error: {}", e)))?;
 
         if results.is_empty() {
-            return Ok(format!(
+            return Ok(Box::new(JsonToolOutput::success(format!(
                 "No matches for '{}' in {}",
                 pattern, base_path_display,
-            ));
+            ))));
         }
 
-        Ok(format!(
+        Ok(Box::new(JsonToolOutput::success(format!(
             "Found {} match(es):\n\n{}",
             match_count,
             results.join("\n\n")
-        ))
+        ))))
     }
 
     fn is_read_only(&self, _input: &Value) -> bool {

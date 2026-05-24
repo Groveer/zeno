@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use super::base::{Tool, ToolContext, ToolError};
+use zeno_tools::{JsonToolOutput, ToolOutput};
 
 // ---------------------------------------------------------------------------
 // Internal state
@@ -182,7 +183,11 @@ impl Tool for TodoTool {
         })
     }
 
-    async fn execute(&self, arguments: Value, _ctx: &ToolContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        arguments: Value,
+        _ctx: &ToolContext,
+    ) -> Result<Box<dyn ToolOutput>, ToolError> {
         let action = arguments["action"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing 'action' field".into()))?;
@@ -217,11 +222,11 @@ impl Tool for TodoTool {
                 state.bump_gen();
 
                 let count = state.tasks.len();
-                Ok(format!(
+                Ok(Box::new(JsonToolOutput::success(format!(
                     "Created plan with {} tasks.\n{}",
                     count,
                     state.format_task_list()
-                ))
+                ))))
             }
 
             "add" => {
@@ -245,11 +250,11 @@ impl Tool for TodoTool {
                 }
                 state.bump_gen();
 
-                Ok(format!(
+                Ok(Box::new(JsonToolOutput::success(format!(
                     "Added {} task(s).\n{}",
                     tasks_raw.len(),
                     state.format_task_list()
-                ))
+                ))))
             }
 
             "update" => {
@@ -287,12 +292,12 @@ impl Tool for TodoTool {
                 } // mutable borrow on state ends here
                 state.bump_gen();
 
-                Ok(format!(
+                Ok(Box::new(JsonToolOutput::success(format!(
                     "Updated {} → {}.\n{}",
                     task_id_str,
                     status_str,
                     state.format_task_list()
-                ))
+                ))))
             }
 
             "delete" => {
@@ -311,14 +316,14 @@ impl Tool for TodoTool {
                 }
                 state.bump_gen();
 
-                Ok(format!(
+                Ok(Box::new(JsonToolOutput::success(format!(
                     "Deleted {}.\n{}",
                     task_id,
                     state.format_task_list()
-                ))
+                ))))
             }
 
-            "list" => Ok(state.format_task_list()),
+            "list" => Ok(Box::new(JsonToolOutput::success(state.format_task_list()))),
 
             _ => Err(ToolError::InvalidArguments(format!(
                 "Unknown action '{}'. Use: create, add, update, delete, list",
@@ -356,6 +361,7 @@ mod tests {
             rate_limiter: None,
             tool_stats: None,
             file_content_pool: None,
+            tool_registry: None,
         }
     }
 
@@ -381,7 +387,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.contains("Created plan with 4 tasks"));
+        assert!(result.content().contains("Created plan with 4 tasks"));
     }
 
     #[tokio::test]
@@ -422,7 +428,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.contains("Updated T1 → in_progress"));
+        assert!(result.content().contains("Updated T1 → in_progress"));
 
         // Update T1 to completed
         let result = tool
@@ -433,7 +439,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.contains("Updated T1 → completed"));
+        assert!(result.content().contains("Updated T1 → completed"));
     }
 
     #[tokio::test]
@@ -465,7 +471,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.contains("Added 2 task(s)"));
+        assert!(result.content().contains("Added 2 task(s)"));
     }
 
     #[tokio::test]
@@ -489,7 +495,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.contains("Deleted T2"));
+        assert!(result.content().contains("Deleted T2"));
     }
 
     #[tokio::test]
@@ -499,7 +505,7 @@ mod tests {
 
         let result = tool.execute(json!({"action": "list"}), &ctx).await.unwrap();
 
-        assert!(result.contains("No tasks"));
+        assert!(result.content().contains("No tasks"));
     }
 
     #[tokio::test]
@@ -520,8 +526,8 @@ mod tests {
 
         let result = tool.execute(json!({"action": "list"}), &ctx).await.unwrap();
 
-        assert!(result.contains("T1 Do something"));
-        assert!(result.contains("pending"));
+        assert!(result.content().contains("T1 Do something"));
+        assert!(result.content().contains("pending"));
     }
 
     #[tokio::test]
@@ -578,10 +584,10 @@ mod tests {
 
         let result = tool.execute(json!({"action": "list"}), &ctx).await.unwrap();
 
-        assert!(result.contains("Plan: Test"));
-        assert!(result.contains("T1 A (completed)"));
-        assert!(result.contains("T2 B (completed)"));
-        assert!(result.contains("T3 C (pending)"));
+        assert!(result.content().contains("Plan: Test"));
+        assert!(result.content().contains("T1 A (completed)"));
+        assert!(result.content().contains("T2 B (completed)"));
+        assert!(result.content().contains("T3 C (pending)"));
     }
 
     #[tokio::test]

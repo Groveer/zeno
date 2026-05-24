@@ -727,7 +727,8 @@ impl QueryEngine {
             .with_cancel_token(cancel.clone())
             .with_rate_limiter(self.rate_limiter.clone())
             .with_tool_stats(self.tool_stats.clone())
-            .with_file_content_pool(self.file_content_pool.clone());
+            .with_file_content_pool(self.file_content_pool.clone())
+            .with_tool_registry(self.tools.clone());
 
             if let Some(ref factory) = self.client_factory {
                 let progress_tx = self.sub_agent_tx.clone().unwrap_or_else(|| {
@@ -769,7 +770,7 @@ impl QueryEngine {
                 exec_policy: Some(&self.exec_policy),
             };
 
-            let parallel = should_parallelize(&tool_uses, &self.cwd);
+            let parallel = should_parallelize(&tool_uses, &self.cwd, self.tools.as_ref());
             if !parallel {
                 tracing::info!(
                     tool_count = tool_uses.len(),

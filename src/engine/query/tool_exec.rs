@@ -38,9 +38,10 @@ pub(super) struct CollectedToolUse {
 // Parallel tool-call safety check
 // ---------------------------------------------------------------------------
 
-/// Tools that must never run concurrently (interactive / user-facing).
-const NEVER_PARALLEL_TOOLS: &[&str] = &["ask_user"];
-
+/// Instead of a hard-coded `NEVER_PARALLEL_TOOLS` list, each tool declares
+/// its parallel-safety via `Tool::supports_parallel()`. Tools returning
+/// `false` (e.g. write, edit, bash, ask_user) force sequential execution.
+///
 /// Tools that target a file and need path-scoped conflict detection.
 const PATH_SCOPED_TOOLS: &[&str] = &["read", "edit", "write"];
 
@@ -81,22 +82,27 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
 ///
 /// Logic:
 /// 1. ≤ 1 tool → parallel (trivially safe)
-/// 2. Any `NEVER_PARALLEL_TOOLS` → sequential
+/// 2. Any tool where `supports_parallel() == false` → sequential
 /// 3. Non-JSON / non-object args → sequential (can't inspect)
 /// 4. Path-scoped tools targeting overlapping paths → sequential
 /// 5. Otherwise → parallel
-pub(super) fn should_parallelize(tool_uses: &[CollectedToolUse], cwd: &Path) -> bool {
+pub(super) fn should_parallelize(
+    tool_uses: &[CollectedToolUse],
+    cwd: &Path,
+    registry: &ToolRegistry,
+) -> bool {
     if tool_uses.len() <= 1 {
         return true;
     }
 
-    if tool_uses
-        .iter()
-        .any(|tu| NEVER_PARALLEL_TOOLS.contains(&tu.name.as_str()))
-    {
+    if tool_uses.iter().any(|tu| {
+        registry
+            .get(&tu.name)
+            .is_none_or(|t| !t.supports_parallel())
+    }) {
         tracing::debug!(
-            reason = "interactive_tool",
-            "Parallel safety: falling back to sequential (interactive tool in batch)"
+            reason = "non_parallel_tool",
+            "Parallel safety: falling back to sequential (tool not parallel-safe in batch)"
         );
         return false;
     }
@@ -395,13 +401,16 @@ pub(super) async fn execute_single_tool_tui(
 
     match result {
         Ok(result) => {
+            let is_err = result.is_error();
+            let output_str = result.content().to_string();
+
             // Cache result for read-only tools
             if cacheable_tools.contains(&tu.name.as_str())
                 && let Some(cache) = config.tool_cache
                 && let Ok(mut cache) = cache.lock()
             {
                 let normalized = crate::tools::cache::normalize_for_cache(&tu.name, &input);
-                cache.insert(&tu.name, &normalized, result.clone());
+                cache.insert(&tu.name, &normalized, output_str.clone());
             }
 
             // Invalidate cache on write/edit
@@ -422,7 +431,7 @@ pub(super) async fn execute_single_tool_tui(
             }
 
             let display =
-                super::tool_display::summarize_tool_output(&tu.name, &result, &tu.input_json);
+                super::tool_display::summarize_tool_output(&tu.name, &output_str, &tu.input_json);
             let _ = sender.send(EngineEvent::ToolOutput {
                 name: tu.name.clone(),
                 output: display,
@@ -430,7 +439,7 @@ pub(super) async fn execute_single_tool_tui(
 
             // For edit tool, extract diff from structured JSON result
             if tu.name == "edit"
-                && let Ok(parsed) = serde_json::from_str::<Value>(&result)
+                && let Ok(parsed) = serde_json::from_str::<Value>(&output_str)
                 && let Some(diff_str) = parsed.get("diff").and_then(|d| d.as_str())
                 && !diff_str.is_empty()
             {
@@ -443,7 +452,7 @@ pub(super) async fn execute_single_tool_tui(
                 tool_name = %tu.name,
                 tool_id = %tu.id,
                 tool_result = "success",
-                result_len = result.len(),
+                result_len = output_str.len(),
                 "Tool executed successfully"
             );
 
@@ -457,16 +466,16 @@ pub(super) async fn execute_single_tool_tui(
                     "tool_input",
                     crate::hooks::executor::json_to_lua_value(&he.lua(), &input),
                 );
-                let _ = hook_ctx.set("tool_output", result.clone());
-                let _ = hook_ctx.set("tool_is_error", false);
+                let _ = hook_ctx.set("tool_output", output_str.clone());
+                let _ = hook_ctx.set("tool_is_error", is_err);
                 let _ = hook_ctx.set("cwd", ctx.get_cwd().to_string_lossy().to_string());
                 he.execute(HookEvent::PostToolUse, &hook_ctx).await;
             }
 
             Some(ContentBlock::ToolResult {
                 tool_use_id: tu.id.clone(),
-                content: result,
-                is_error: None,
+                content: output_str,
+                is_error: if is_err { Some(true) } else { None },
             })
         }
         Err(e) => {

@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::base::{Tool, ToolContext, ToolError};
+use zeno_tools::{JsonToolOutput, ToolOutput};
 
 pub struct EditTool;
 
@@ -71,7 +72,11 @@ impl Tool for EditTool {
         })
     }
 
-    async fn execute(&self, arguments: Value, ctx: &ToolContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        arguments: Value,
+        ctx: &ToolContext,
+    ) -> Result<Box<dyn ToolOutput>, ToolError> {
         let path = arguments["path"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing 'path'".into()))?;
@@ -189,14 +194,16 @@ impl Tool for EditTool {
                 strategy_info,
             )
         });
-        Ok(serde_json::to_string(&result).unwrap_or_else(|_| {
-            format!(
-                "Replaced {} occurrence(s) in {}{}",
-                match_count,
-                resolved.display(),
-                strategy_info,
-            )
-        }))
+        Ok(Box::new(JsonToolOutput::success(
+            serde_json::to_string(&result).unwrap_or_else(|_| {
+                format!(
+                    "Replaced {} occurrence(s) in {}{}",
+                    match_count,
+                    resolved.display(),
+                    strategy_info,
+                )
+            }),
+        )))
     }
 }
 

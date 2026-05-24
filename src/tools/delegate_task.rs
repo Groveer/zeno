@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::base::{Tool, ToolContext, ToolError};
 use crate::engine::sub_agent::{run_delegated_task, run_delegated_tasks_batch};
+use zeno_tools::{JsonToolOutput, ToolOutput};
 
 pub struct DelegateTaskTool;
 
@@ -92,7 +93,11 @@ impl Tool for DelegateTaskTool {
         })
     }
 
-    async fn execute(&self, arguments: Value, ctx: &ToolContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        arguments: Value,
+        ctx: &ToolContext,
+    ) -> Result<Box<dyn ToolOutput>, ToolError> {
         let deps = ctx.sub_agent_deps.clone().ok_or_else(|| {
             ToolError::Execution(
                 "Sub-agent dependencies not available. The engine must be configured.".to_string(),
@@ -115,7 +120,9 @@ impl Tool for DelegateTaskTool {
         // Batch mode: tasks array
         if let Some(tasks) = arguments.get("tasks").and_then(|t| t.as_array()) {
             if tasks.is_empty() {
-                return Ok(json!({"error": "tasks array must not be empty"}).to_string());
+                return Ok(Box::new(JsonToolOutput::success(
+                    json!({"error": "tasks array must not be empty"}).to_string(),
+                )));
             }
 
             let task_pairs: Vec<(String, Option<String>)> = tasks
@@ -134,7 +141,9 @@ impl Tool for DelegateTaskTool {
             // Validate all goals are non-empty
             for (i, (goal, _)) in task_pairs.iter().enumerate() {
                 if goal.trim().is_empty() {
-                    return Ok(json!({"error": format!("Task {} has empty goal", i)}).to_string());
+                    return Ok(Box::new(JsonToolOutput::success(
+                        json!({"error": format!("Task {} has empty goal", i)}).to_string(),
+                    )));
                 }
             }
 
@@ -150,8 +159,10 @@ impl Tool for DelegateTaskTool {
                 progress_tx,
             )
             .await;
-            return serde_json::to_string(&results)
-                .map_err(|e| ToolError::Execution(format!("Serialization error: {}", e)));
+            return Ok(Box::new(JsonToolOutput::success(
+                serde_json::to_string(&results)
+                    .map_err(|e| ToolError::Execution(format!("Serialization error: {}", e)))?,
+            )));
         }
 
         // Single task mode
@@ -161,7 +172,9 @@ impl Tool for DelegateTaskTool {
             .ok_or_else(|| ToolError::InvalidArguments("Missing required field 'goal'".into()))?;
 
         if goal.trim().is_empty() {
-            return Ok(json!({"error": "goal must not be empty"}).to_string());
+            return Ok(Box::new(JsonToolOutput::success(
+                json!({"error": "goal must not be empty"}).to_string(),
+            )));
         }
 
         let context = arguments
@@ -193,8 +206,10 @@ impl Tool for DelegateTaskTool {
         )
         .await;
 
-        serde_json::to_string(&result)
-            .map_err(|e| ToolError::Execution(format!("Serialization error: {}", e)))
+        Ok(Box::new(JsonToolOutput::success(
+            serde_json::to_string(&result)
+                .map_err(|e| ToolError::Execution(format!("Serialization error: {}", e)))?,
+        )))
     }
 
     fn is_read_only(&self, _input: &Value) -> bool {

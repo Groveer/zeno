@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 
 use super::base::{Tool, ToolContext, ToolError};
 use crate::memory::manager::MemoryManager;
+use zeno_tools::{JsonToolOutput, ToolOutput};
 
 /// A tool that delegates execution to the external memory provider.
 pub struct MemoryProviderTool {
@@ -42,18 +43,24 @@ impl Tool for MemoryProviderTool {
         self.schema.clone()
     }
 
-    async fn execute(&self, arguments: Value, _ctx: &ToolContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        arguments: Value,
+        _ctx: &ToolContext,
+    ) -> Result<Box<dyn ToolOutput>, ToolError> {
         let manager = self.manager.lock().await;
         match manager
             .handle_external_tool_call(&self.tool_name, &arguments)
             .await
         {
-            Ok(result) => Ok(result),
-            Err(e) => Ok(json!({
-                "success": false,
-                "error": e.to_string()
-            })
-            .to_string()),
+            Ok(result) => Ok(Box::new(JsonToolOutput::success(result))),
+            Err(e) => Ok(Box::new(JsonToolOutput::success(
+                json!({
+                    "success": false,
+                    "error": e.to_string()
+                })
+                .to_string(),
+            ))),
         }
     }
 }

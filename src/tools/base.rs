@@ -29,7 +29,7 @@ pub(crate) fn tool_kind(name: &str) -> &'static str {
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
-use zeno_tools::ToolDefinition;
+use zeno_tools::{ToolDefinition, ToolOutput};
 
 use crate::config::settings::{DelegationConfig, ProviderConfig, Settings};
 use crate::engine::cost_tracker::CostTracker;
@@ -205,6 +205,8 @@ pub struct ToolContext {
     pub tool_stats: Option<crate::tools::tool_stats::SharedToolStats>,
     /// Shared file content pool for avoiding redundant disk reads.
     pub file_content_pool: Option<crate::tools::file_content_pool::SharedFileContentPool>,
+    /// Tool registry for runtime tool discovery (used by tool_search).
+    pub tool_registry: Option<std::sync::Arc<ToolRegistry>>,
 }
 
 impl ToolContext {
@@ -224,6 +226,7 @@ impl ToolContext {
             rate_limiter: None,
             tool_stats: None,
             file_content_pool: None,
+            tool_registry: None,
         }
     }
 
@@ -260,6 +263,12 @@ impl ToolContext {
         pool: crate::tools::file_content_pool::SharedFileContentPool,
     ) -> Self {
         self.file_content_pool = Some(pool);
+        self
+    }
+
+    /// Attach a tool registry for runtime tool discovery (used by tool_search).
+    pub fn with_tool_registry(mut self, registry: std::sync::Arc<ToolRegistry>) -> Self {
+        self.tool_registry = Some(registry);
         self
     }
 
@@ -318,11 +327,34 @@ pub trait Tool: Send + Sync {
     /// JSON Schema describing the tool's parameters.
     fn schema(&self) -> Value;
 
+    /// Exposure level controlling how this tool is visible to the model.
+    ///
+    /// - `Explicit` / `Direct`: always in the tool list (default)
+    /// - `Deferred`: registered but not shown initially; discoverable via `tool_search`
+    /// - `Suggested`: compact summary form
+    /// - `Hidden`: not visible to model; system-only
+    ///
+    /// Default: `ToolExposure::Explicit`.
+    fn exposure(&self) -> zeno_tools::ToolExposure {
+        zeno_tools::ToolExposure::Explicit
+    }
+
+    /// Whether this tool supports parallel execution with other tools.
+    ///
+    /// Returns `true` for read-only tools that don't conflict (e.g. `read`,
+    /// `glob`, `grep`). Returns `false` for tools with side effects or
+    /// user interaction.
+    ///
+    /// Default: `false` (sequential-only, safest default).
+    fn supports_parallel(&self) -> bool {
+        false
+    }
+
     /// Structured definition of this tool (name, description, schemas, metadata).
     ///
     /// Default implementation extracts from `schema()` and `name()`.
     /// Override to provide additional metadata like `output_schema`,
-    /// `exposure`, `supports_parallel`, or `category`.
+    /// `supports_parallel`, or `category`.
     fn definition(&self) -> ToolDefinition {
         let schema = self.schema();
         let name = self.name().to_string();
@@ -342,15 +374,19 @@ pub trait Tool: Send + Sync {
             description,
             input_schema,
             output_schema: None,
-            exposure: zeno_tools::ToolExposure::Explicit,
-            supports_parallel: false,
+            exposure: self.exposure(),
+            supports_parallel: self.supports_parallel(),
             read_only: false,
             category: None,
         }
     }
 
     /// Execute the tool with the given arguments.
-    async fn execute(&self, arguments: Value, ctx: &ToolContext) -> Result<String, ToolError>;
+    async fn execute(
+        &self,
+        arguments: Value,
+        ctx: &ToolContext,
+    ) -> Result<Box<dyn ToolOutput>, ToolError>;
 
     /// Whether this tool is read-only (no side effects).
     /// Default implementation returns false.
@@ -446,6 +482,14 @@ pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
 }
 
+impl std::fmt::Debug for ToolRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolRegistry")
+            .field("tool_count", &self.tools.len())
+            .finish()
+    }
+}
+
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
@@ -475,13 +519,14 @@ impl ToolRegistry {
         Ok(())
     }
 
-    /// Get all tool schemas for the LLM — sorted with MCP tools first.
+    /// Get all tool schemas for the LLM — only tools with `is_visible_to_model()`.
     /// Uses `ToolDefinition::to_function_schema()` which includes `output_schema`
     /// if the tool provides one via `definition()`.
     pub fn schemas(&self) -> Vec<Value> {
         let mut result: Vec<Value> = self
             .tools
             .values()
+            .filter(|t| t.exposure().is_visible_to_model())
             .map(|t| t.definition().to_function_schema())
             .collect();
         result.sort_by(|a, b| {
@@ -503,12 +548,13 @@ impl ToolRegistry {
     }
 
     /// Execute a tool by name. Validates input before execution.
+    /// Returns an error if the tool is not found.
     pub async fn execute(
         &self,
         name: &str,
         args: Value,
         ctx: &ToolContext,
-    ) -> Result<String, ToolError> {
+    ) -> Result<Box<dyn ToolOutput>, ToolError> {
         let start = std::time::Instant::now();
         let tool = self
             .tools
@@ -540,6 +586,39 @@ impl ToolRegistry {
     pub fn names(&self) -> Vec<&str> {
         let mut result: Vec<&str> = self.tools.keys().map(|s| s.as_str()).collect();
         result.sort_by_key(|a| tool_priority(a));
+        result
+    }
+
+    /// Search tools by name/description keyword (fuzzy match).
+    /// Used by the tool_search mechanism to discover Deferred tools.
+    pub fn search_tools(&self, query: &str) -> Vec<ToolDefinition> {
+        let query_lower = query.to_lowercase();
+        let mut result: Vec<ToolDefinition> = self
+            .tools
+            .values()
+            .filter(|t| t.exposure().is_discoverable())
+            .filter(|t| {
+                let name = t.name().to_lowercase();
+                let def = t.definition();
+                name.contains(&query_lower)
+                    || def.description.to_lowercase().contains(&query_lower)
+                    || def
+                        .category
+                        .as_ref()
+                        .is_some_and(|c| c.to_lowercase().contains(&query_lower))
+            })
+            .map(|t| t.definition())
+            .collect();
+        result.sort_by_key(|d| {
+            let name_lower = d.name.to_lowercase();
+            if name_lower == query_lower {
+                0
+            } else if name_lower.starts_with(&query_lower) {
+                1
+            } else {
+                2
+            }
+        });
         result
     }
 }

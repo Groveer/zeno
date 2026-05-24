@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 use crate::config::settings::Settings;
+use zeno_tools::{JsonToolOutput, ToolOutput};
 
 /// Maximum response body size to read (10 MB).
 const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
@@ -73,7 +74,11 @@ impl Tool for WebFetchTool {
         })
     }
 
-    async fn execute(&self, arguments: Value, _ctx: &ToolContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        arguments: Value,
+        _ctx: &ToolContext,
+    ) -> Result<Box<dyn ToolOutput>, ToolError> {
         let raw_url = arguments["url"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing required field 'url'".into()))?;
@@ -211,7 +216,7 @@ impl Tool for WebFetchTool {
             format!("{}\n\n{}", header, content)
         };
 
-        Ok(output)
+        Ok(Box::new(JsonToolOutput::success(output)))
     }
 
     fn is_read_only(&self, _input: &Value) -> bool {

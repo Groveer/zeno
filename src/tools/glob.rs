@@ -3,6 +3,7 @@ use super::base::{Tool, ToolContext, ToolError};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use walkdir::WalkDir;
+use zeno_tools::{JsonToolOutput, ToolOutput};
 
 pub struct GlobTool {
     skip_dirs: Vec<String>,
@@ -17,6 +18,10 @@ impl GlobTool {
 impl Tool for GlobTool {
     fn name(&self) -> &str {
         "glob"
+    }
+
+    fn supports_parallel(&self) -> bool {
+        true
     }
 
     fn schema(&self) -> Value {
@@ -48,7 +53,11 @@ impl Tool for GlobTool {
         })
     }
 
-    async fn execute(&self, arguments: Value, ctx: &ToolContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        arguments: Value,
+        ctx: &ToolContext,
+    ) -> Result<Box<dyn ToolOutput>, ToolError> {
         let pattern = arguments["pattern"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing 'pattern'".into()))?;
@@ -99,17 +108,17 @@ impl Tool for GlobTool {
         .map_err(|e| ToolError::Execution(format!("Task join error: {}", e)))?;
 
         if matches.is_empty() {
-            return Ok(format!(
+            return Ok(Box::new(JsonToolOutput::success(format!(
                 "No files matching '{}' in {}",
                 pattern, base_dir_display
-            ));
+            ))));
         }
 
-        Ok(format!(
+        Ok(Box::new(JsonToolOutput::success(format!(
             "Found {} file(s):\n{}",
             matches.len(),
             matches.join("\n")
-        ))
+        ))))
     }
 
     fn is_read_only(&self, _input: &Value) -> bool {

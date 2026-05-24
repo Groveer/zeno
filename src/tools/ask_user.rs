@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
+use zeno_tools::{JsonToolOutput, ToolOutput};
 
 /// Maximum number of predefined choices the agent can offer.
 /// A 5th "Other (type your answer)" option is always appended by the UI.
@@ -75,7 +76,11 @@ impl Tool for AskUserTool {
         })
     }
 
-    async fn execute(&self, arguments: Value, ctx: &ToolContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        arguments: Value,
+        ctx: &ToolContext,
+    ) -> Result<Box<dyn ToolOutput>, ToolError> {
         let question = arguments["question"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing 'question'".into()))?
@@ -136,7 +141,9 @@ impl Tool for AskUserTool {
                 "choices_offered": choices,
                 "user_response": response.trim(),
             });
-            Ok(serde_json::to_string(&result).unwrap_or(response))
+            Ok(Box::new(JsonToolOutput::success(
+                serde_json::to_string(&result).unwrap_or(response),
+            )))
         } else {
             // Fallback for non-TUI mode (e.g. headless)
             eprint!("[ask] {} ", question);
@@ -154,7 +161,9 @@ impl Tool for AskUserTool {
                 "choices_offered": choices,
                 "user_response": response.trim(),
             });
-            Ok(serde_json::to_string(&result).unwrap_or_else(|_| response.trim().to_string()))
+            Ok(Box::new(JsonToolOutput::success(
+                serde_json::to_string(&result).unwrap_or_else(|_| response.trim().to_string()),
+            )))
         }
     }
 

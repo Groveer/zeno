@@ -17,6 +17,7 @@ use tokio::sync::Mutex;
 use crate::skills::registry::SkillRegistry;
 use crate::skills::validation;
 use crate::tools::base::{Tool, ToolContext, ToolError};
+use zeno_tools::{JsonToolOutput, ToolOutput};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -149,7 +150,11 @@ impl Tool for SkillManageTool {
         })
     }
 
-    async fn execute(&self, arguments: Value, ctx: &ToolContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        arguments: Value,
+        ctx: &ToolContext,
+    ) -> Result<Box<dyn ToolOutput>, ToolError> {
         let action = arguments["action"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing 'action'".into()))?;
@@ -176,18 +181,42 @@ impl Tool for SkillManageTool {
         }
 
         match action {
-            "create" => self.action_create(name, &arguments, ctx).await,
-            "patch" => self.action_patch(name, &arguments).await,
-            "edit" => self.action_edit(name, &arguments).await,
-            "delete" => self.action_delete(name).await,
-            "write_file" => self.action_write_file(name, &arguments).await,
-            "pin" => self.action_pin(name).await,
-            "unpin" => self.action_unpin(name).await,
-            "restore" => self.action_restore(name).await,
-            "list-archived" => self.action_list_archived().await,
-            "curator_pause" => Ok(self.action_curator_pause()),
-            "curator_resume" => Ok(self.action_curator_resume()),
-            "curator_status" => Ok(self.action_curator_status()),
+            "create" => Ok(Box::new(JsonToolOutput::success(
+                self.action_create(name, &arguments, ctx).await?,
+            ))),
+            "patch" => Ok(Box::new(JsonToolOutput::success(
+                self.action_patch(name, &arguments).await?,
+            ))),
+            "edit" => Ok(Box::new(JsonToolOutput::success(
+                self.action_edit(name, &arguments).await?,
+            ))),
+            "delete" => Ok(Box::new(JsonToolOutput::success(
+                self.action_delete(name).await?,
+            ))),
+            "write_file" => Ok(Box::new(JsonToolOutput::success(
+                self.action_write_file(name, &arguments).await?,
+            ))),
+            "pin" => Ok(Box::new(JsonToolOutput::success(
+                self.action_pin(name).await?,
+            ))),
+            "unpin" => Ok(Box::new(JsonToolOutput::success(
+                self.action_unpin(name).await?,
+            ))),
+            "restore" => Ok(Box::new(JsonToolOutput::success(
+                self.action_restore(name).await?,
+            ))),
+            "list-archived" => Ok(Box::new(JsonToolOutput::success(
+                self.action_list_archived().await?,
+            ))),
+            "curator_pause" => Ok(Box::new(JsonToolOutput::success(
+                self.action_curator_pause(),
+            ))),
+            "curator_resume" => Ok(Box::new(JsonToolOutput::success(
+                self.action_curator_resume(),
+            ))),
+            "curator_status" => Ok(Box::new(JsonToolOutput::success(
+                self.action_curator_status(),
+            ))),
             _ => Err(ToolError::InvalidArguments(format!(
                 "Unknown action '{}'. Use: create, patch, edit, delete, write_file, pin, unpin, \
                  restore, list-archived, curator_pause, curator_resume, curator_status.",

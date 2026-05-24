@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::base::{Tool, ToolContext, ToolError};
+use zeno_tools::{JsonToolOutput, ToolOutput};
 
 /// Maximum content size in bytes that write will accept (10 MB).
 /// Prevents LLM from generating extremely large files that could cause OOM.
@@ -47,7 +48,11 @@ impl Tool for WriteTool {
         })
     }
 
-    async fn execute(&self, arguments: Value, ctx: &ToolContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        arguments: Value,
+        ctx: &ToolContext,
+    ) -> Result<Box<dyn ToolOutput>, ToolError> {
         let path = arguments["path"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing 'path'".into()))?;
@@ -117,6 +122,10 @@ impl Tool for WriteTool {
         crate::tools::file_state::note_write(&ctx.task_id, &resolved).await;
 
         let lines = content.lines().count();
-        Ok(format!("Written {} lines to {}", lines, resolved.display()))
+        Ok(Box::new(JsonToolOutput::success(format!(
+            "Written {} lines to {}",
+            lines,
+            resolved.display()
+        ))))
     }
 }

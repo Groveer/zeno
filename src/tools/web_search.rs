@@ -18,6 +18,8 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::{Value, json};
 
+use zeno_tools::{JsonToolOutput, ToolOutput};
+
 const DEFAULT_SEARXNG_URL: &str = "https://searx.be";
 
 pub struct WebSearchTool {
@@ -73,7 +75,11 @@ impl Tool for WebSearchTool {
         })
     }
 
-    async fn execute(&self, arguments: Value, _ctx: &ToolContext) -> Result<String, ToolError> {
+    async fn execute(
+        &self,
+        arguments: Value,
+        _ctx: &ToolContext,
+    ) -> Result<Box<dyn ToolOutput>, ToolError> {
         let query = arguments["query"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing 'query'".into()))?;
@@ -83,20 +89,20 @@ impl Tool for WebSearchTool {
             .unwrap_or(5)
             .min(10) as usize;
 
-        match self.config.provider.as_str() {
-            "brave" => self.search_brave(query, limit).await,
-            "tavily" => self.search_tavily(query, limit).await,
-            "duckduckgo" => self.search_duckduckgo(query, limit).await,
+        let result_string = match self.config.provider.as_str() {
+            "brave" => self.search_brave(query, limit).await?,
+            "tavily" => self.search_tavily(query, limit).await?,
+            "duckduckgo" => self.search_duckduckgo(query, limit).await?,
             // "searxng" or any unknown value: try SearXNG with DuckDuckGo fallback
             _ => match self.search_searxng(query, limit).await {
-                Ok(results) if !results.is_empty() => Ok(results),
+                Ok(results) if !results.is_empty() => results,
                 Ok(_) => {
                     tracing::debug!(
                         event = "search_fallback",
                         reason = "no_results",
                         "SearXNG returned no results, trying DuckDuckGo"
                     );
-                    self.search_duckduckgo(query, limit).await
+                    self.search_duckduckgo(query, limit).await?
                 }
                 Err(e) => {
                     tracing::debug!(
@@ -105,10 +111,11 @@ impl Tool for WebSearchTool {
                         error = %e,
                         "SearXNG search failed, trying DuckDuckGo"
                     );
-                    self.search_duckduckgo(query, limit).await
+                    self.search_duckduckgo(query, limit).await?
                 }
             },
-        }
+        };
+        Ok(Box::new(JsonToolOutput::success(result_string)))
     }
 
     fn is_read_only(&self, _input: &Value) -> bool {
