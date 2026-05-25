@@ -232,18 +232,6 @@ pub struct ToolsConfig {
     /// User additions are appended; the defaults are always included.
     #[serde(default)]
     pub skip_dirs: Vec<String>,
-    /// Commands that are always allowed (auto-approve, skip permission prompt).
-    /// These are appended to the built-in read-only prefixes.
-    #[serde(default)]
-    pub allowed_commands: Vec<String>,
-    /// Commands that always require user confirmation in "ask" mode.
-    /// These are appended to the built-in destructive prefix list.
-    #[serde(default)]
-    pub ask_commands: Vec<String>,
-    /// Commands that are always blocked (denied), even in "allow" mode.
-    /// The LLM cannot execute these under any circumstances.
-    #[serde(default)]
-    pub denied_commands: Vec<String>,
 }
 
 impl Default for ToolsConfig {
@@ -261,9 +249,6 @@ impl Default for ToolsConfig {
             web_search: true,
             web_fetch: true,
             skip_dirs: Vec::new(),
-            allowed_commands: Vec::new(),
-            ask_commands: Vec::new(),
-            denied_commands: Vec::new(),
         }
     }
 }

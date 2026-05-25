@@ -174,18 +174,24 @@ zn.tools({
 -- rm, sudo, dd → Ask; rm -rf / → Deny). User rules are evaluated first,
 -- so they can override any built-in rule.
 --
--- For regex rules, prefix matching with ^ ensures full command match:
---   { pattern = "^cargo publish", action = "ask", is_regex = true }
+-- Use `is_regex = true` when `^` anchors are needed for full command match:
+--   zn.exec_policy({ pattern = "^cargo publish$", action = "ask",
+--                    reason = "Confirm publishing to crates.io",
+--                    is_regex = true })
 --
--- zn.exec_policy({ pattern = "^git push", action = "ask",
---                  reason = "Confirm pushes to remote" })
--- zn.exec_policy({ pattern = "cargo test", action = "auto",
---                  reason = "Running tests is safe" })
--- zn.exec_policy({ pattern = "^sudo rm", action = "deny",
---                  reason = "No sudo rm allowed" })
--- zn.exec_policy({ pattern = "docker compose up", action = "ask",
---                  reason = "Starting containers needs confirmation",
---                  is_regex = true })
+-- Plain prefix matching (no is_regex) — just type the command start:
+--   zn.exec_policy({ pattern = "cargo test", action = "auto",
+--                    reason = "Running tests is safe" })
+--   zn.exec_policy({ pattern = "git push", action = "ask",
+--                    reason = "Confirm pushes to remote" })
+--   zn.exec_policy({ pattern = "git checkout", action = "ask",
+--                    reason = "Confirm checkout" })
+--   zn.exec_policy({ pattern = "sudo rm", action = "deny",
+--                    reason = "No sudo rm allowed" })
+--
+-- ⚠️  DON'T add ^ without is_regex=true — ^ is treated as a literal char!
+--     Wrong:  { pattern = "^git push", action = "ask" }   -- matches "^git push" literally
+--     Right:  { pattern = "git push", action = "ask" }    -- matches "git push" naturally
 
 -- ═══════════════════════════════════════════════
 -- Sandbox (Secure Command Execution)

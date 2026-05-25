@@ -149,15 +149,6 @@ impl QueryEngine {
         // User rules are placed FIRST so they match before built-in rules
         // (first-match-wins evaluation).
         let mut merged_rules = settings.exec_policy_rules.clone();
-        // Legacy `zn.commands({ ask = {...} })` commands — convert to Ask rules.
-        for cmd in &settings.tools.ask_commands {
-            merged_rules.push(crate::permissions::execpolicy::ExecRule {
-                pattern: cmd.clone(),
-                action: crate::permissions::execpolicy::PolicyAction::Ask,
-                reason: "User-configured ask command".into(),
-                is_regex: false,
-            });
-        }
         merged_rules.extend(crate::permissions::execpolicy::builtin_rules());
         let exec_policy = Arc::new(ExecPolicy::from_rules(merged_rules));
 

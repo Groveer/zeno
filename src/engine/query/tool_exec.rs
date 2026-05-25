@@ -141,7 +141,6 @@ pub(super) struct ToolExecConfig<'a> {
     pub tools: &'a ToolRegistry,
     pub hook_executor: Option<&'a HookExecutor>,
     pub tool_cache: Option<&'a std::sync::Mutex<crate::tools::cache::ToolCache>>,
-    pub denied_commands: &'a [String],
     pub safe_paths: &'a [String],
     pub exec_policy: Option<&'a ExecPolicy>,
 }
@@ -279,7 +278,6 @@ pub(super) async fn execute_single_tool_tui(
             resolved.command.as_deref(),
             &cwd,
             config.safe_paths,
-            config.denied_commands,
             config.exec_policy,
         );
 

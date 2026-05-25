@@ -239,7 +239,6 @@ pub fn evaluate_permission(
     command: Option<&str>,
     cwd: &Path,
     safe_paths: &[String],
-    denied_commands: &[String],
     exec_policy: Option<&ExecPolicy>,
 ) -> PermissionDecision {
     // 0. Trusted path check — bypasses all other checks
@@ -260,33 +259,6 @@ pub fn evaluate_permission(
             requires_confirmation: false,
             reason: "Path is under trusted path".to_string(),
         };
-    }
-
-    // Denied commands: blocked unconditionally, before mode check
-    if tool_name == "bash"
-        && let Some(cmd) = command
-    {
-        let trimmed = cmd.trim();
-        for denied in denied_commands {
-            if trimmed.contains(denied) {
-                tracing::warn!(
-                    tool_name = "bash",
-                    permission_decision = "denied",
-                    reason = "denied_command",
-                    command = %cmd,
-                    denied_pattern = %denied,
-                    "Command blocked by denied_commands"
-                );
-                return PermissionDecision {
-                    allowed: false,
-                    requires_confirmation: false,
-                    reason: format!(
-                        "Command '{}' is blocked by policy",
-                        cmd.chars().take(80).collect::<String>()
-                    ),
-                };
-            }
-        }
     }
 
     match mode {
@@ -734,7 +706,6 @@ mod tests {
             None,
             Path::new("/tmp/work"),
             &[],
-            &[],
             None,
         )
     }
@@ -750,7 +721,6 @@ mod tests {
             Some(cmd),
             Path::new(cwd),
             &[],
-            &[],
             test_policy().as_ref(),
         )
     }
@@ -765,7 +735,6 @@ mod tests {
             Some(Path::new(path)),
             None,
             Path::new(cwd),
-            &[],
             &[],
             None,
         )
@@ -1108,7 +1077,6 @@ mod tests {
             Some(Path::new("/data/projects/lib/main.rs")),
             None,
             Path::new("/home/user/proj"),
-            &[],
             &[],
             None,
         );

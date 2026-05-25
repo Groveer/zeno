@@ -793,7 +793,6 @@ impl QueryEngine {
                 tools: self.tools.as_ref(),
                 hook_executor: self.hook_executor.as_ref(),
                 tool_cache: Some(&*self.tool_cache),
-                denied_commands: &self.settings.tools.denied_commands,
                 safe_paths: &self.settings.safe_paths,
                 exec_policy: Some(&self.exec_policy),
             };

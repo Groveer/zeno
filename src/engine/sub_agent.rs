@@ -1105,7 +1105,6 @@ async fn check_sub_agent_permission(
         resolved.command.as_deref(),
         cwd,
         &deps.settings.safe_paths,
-        &deps.settings.tools.denied_commands,
         deps.exec_policy.as_deref(),
     );
 

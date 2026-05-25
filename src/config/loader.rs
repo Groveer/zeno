@@ -19,6 +19,7 @@ use super::settings::{
     McpServerConfig, PermissionMode, ProviderConfig, Settings, SkillsConfig, ToolsConfig,
     WebSearchConfig,
 };
+use crate::permissions::execpolicy::ExecRule;
 
 // ---------------------------------------------------------------------------
 // Safe StdLib combination (excludes io/os/debug/ffi)
@@ -361,19 +362,6 @@ fn build_settings(lua: &Lua) -> anyhow::Result<Settings> {
         }
     }
 
-    // --- commands (nested table into tools fields) ---
-    if let Ok(cmd_table) = overrides.get::<mlua::Table>("commands") {
-        if let Ok(cmds) = cmd_table.get::<Vec<String>>("allow") {
-            settings.tools.allowed_commands = cmds;
-        }
-        if let Ok(cmds) = cmd_table.get::<Vec<String>>("ask") {
-            settings.tools.ask_commands = cmds;
-        }
-        if let Ok(cmds) = cmd_table.get::<Vec<String>>("deny") {
-            settings.tools.denied_commands = cmds;
-        }
-    }
-
     // --- role (nested table with non-empty checks) ---
     if let Ok(role_table) = overrides.get::<mlua::Table>("role") {
         if let Ok(v) = role_table.get::<String>("identity")
@@ -438,6 +426,11 @@ fn build_settings(lua: &Lua) -> anyhow::Result<Settings> {
     );
     load_serde!("mcp_servers", settings.mcp.servers, HashMap<String, McpServerConfig>);
     load_serde!("model_contexts", settings.model_contexts, HashMap<String, u32>);
+    load_serde!(
+        "exec_policy_rules",
+        settings.exec_policy_rules,
+        Vec<ExecRule>
+    );
     load_serde!("skills", settings.skills, SkillsConfig);
     load_serde!("engine", settings.engine, EngineConfig);
     load_serde!("delegation", settings.delegation, DelegationConfig);
@@ -503,26 +496,48 @@ fn register_zeno_api(lua: &Lua, table: &mlua::Table) -> anyhow::Result<()> {
         })?,
     )?;
 
-    // --- Commands ---
-    // zn.commands({ allow = {...}, ask = {...}, deny = {...} })
-    // Separated from zn.tools for cleaner semantics.
+    // --- Exec Policy (rule-based command authorization) ---
+    // zn.exec_policy({ pattern = "^git push", action = "ask",
+    //                   reason = "Confirm pushes to remote" })
     //
-    //   zn.commands({
-    //     allow = { "pnpm list", "just --list" },   -- always auto-allow
-    //     ask   = { "git checkout", "git restore" }, -- require confirmation
-    //     deny  = { "some-dangerous-cmd" },          -- always blocked
+    // Accepts a single rule table or an array of rules:
+    //   -- Single rule:
+    //   zn.exec_policy({ pattern = "cargo test", action = "auto" })
+    //   -- Multiple rules:
+    //   zn.exec_policy({
+    //     { pattern = "^git push", action = "ask" },
+    //     { pattern = "cargo test", action = "auto" },
     //   })
+    //
+    // Multiple calls accumulate (rules are appended). Supported actions:
+    // "auto" (auto-allow), "ask" (require confirmation), "deny" (block unconditionally).
+    // Set is_regex = true for regex pattern matching (default: prefix matching).
     table.set(
-        "commands",
-        lua.create_function(move |lua, opts: mlua::Table| {
-            let commands: mlua::Table = get_overrides(lua)?
-                .get::<mlua::Table>("commands")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
-            for result in opts.pairs::<String, mlua::Value>() {
-                let (k, v) = result?;
-                commands.set(k, v)?;
+        "exec_policy",
+        lua.create_function(move |lua, input: mlua::Table| {
+            let has_pattern = input.contains_key("pattern").unwrap_or(false);
+            if has_pattern {
+                // Single rule table — wrap into array
+                let arr = lua.create_table()?;
+                arr.set(1, input)?;
+                let existing: mlua::Table = get_overrides(lua)?
+                    .get::<mlua::Table>("exec_policy_rules")
+                    .unwrap_or_else(|_| lua.create_table().unwrap());
+                let base = existing.len()?;
+                existing.set(base + 1, arr.get::<mlua::Value>(1)?)?;
+                get_overrides(lua)?.set("exec_policy_rules", existing)?;
+            } else {
+                // Array of rules — append each
+                let existing: mlua::Table = get_overrides(lua)?
+                    .get::<mlua::Table>("exec_policy_rules")
+                    .unwrap_or_else(|_| lua.create_table().unwrap());
+                let base = existing.len()?;
+                for (i, val) in input.sequence_values::<mlua::Value>().enumerate() {
+                    let val = val?;
+                    existing.set(base + i as i64 + 1, val)?;
+                }
+                get_overrides(lua)?.set("exec_policy_rules", existing)?;
             }
-            get_overrides(lua)?.set("commands", commands)?;
             Ok(())
         })?,
     )?;

@@ -152,16 +152,22 @@ async fn main() -> anyhow::Result<()> {
     // Build tool registry
     let mut registry = ToolRegistry::new();
     let tc = &settings.tools;
+
+    // Prepare ExecPolicy for bash tool so `is_read_only` respects user policy
+    let mut merged_rules = settings.exec_policy_rules.clone();
+    merged_rules.extend(crate::permissions::execpolicy::builtin_rules());
+    let exec_policy = Arc::new(crate::permissions::execpolicy::ExecPolicy::from_rules(
+        merged_rules,
+    ));
+
     if tc.bash {
         let bash_sandbox = crate::sandbox::create_sandbox(&settings.sandbox);
         registry.register(Box::new(tools::bash::BashTool::new(
             tc.use_rtk,
             tc.bash_env.clone(),
             tc.bash_max_lines,
-            tc.allowed_commands.clone(),
-            tc.ask_commands.clone(),
-            tc.denied_commands.clone(),
             bash_sandbox,
+            Some(exec_policy.clone()),
         )))?;
     }
     if tc.read {

@@ -76,15 +76,11 @@ pub struct BashTool {
     /// Maximum output lines before head/tail truncation.
     /// 0 = no truncation.
     max_output_lines: usize,
-    /// Commands always allowed (merged with built-in read-only prefixes).
-    allowed_commands: Vec<String>,
-    /// Commands requiring confirmation (merged with built-in destructive prefixes).
-    ask_commands: Vec<String>,
-    /// Commands always denied (blocked unconditionally).
-    denied_commands: Vec<String>,
     /// Sandbox for secure command execution (optional).
     /// When set, commands are wrapped with isolation (bwrap, nsjail, etc.).
     sandbox: Box<dyn Sandbox>,
+    /// Execution policy for accurately determining read-only status dynamically.
+    exec_policy: Option<std::sync::Arc<crate::permissions::execpolicy::ExecPolicy>>,
 }
 
 impl BashTool {
@@ -92,20 +88,16 @@ impl BashTool {
         use_rtk: bool,
         env: HashMap<String, String>,
         max_output_lines: usize,
-        allowed_commands: Vec<String>,
-        ask_commands: Vec<String>,
-        denied_commands: Vec<String>,
         sandbox: Box<dyn Sandbox>,
+        exec_policy: Option<std::sync::Arc<crate::permissions::execpolicy::ExecPolicy>>,
     ) -> Self {
         Self {
             use_rtk,
             timeout_secs: 120,
             env,
             max_output_lines,
-            allowed_commands,
-            ask_commands,
-            denied_commands,
             sandbox,
+            exec_policy,
         }
     }
 
@@ -284,7 +276,18 @@ impl Tool for BashTool {
                 return false;
             }
         }
-        // Commands that are always destructive — not read-only regardless of flags
+
+        // Consult the execution policy if available
+        if let Some(ref policy) = self.exec_policy {
+            if let Some(decision) = policy.evaluate(trimmed) {
+                return decision.action == crate::permissions::execpolicy::PolicyAction::Auto;
+            }
+            // If no rule matches, default to true so it gets treated as safe
+            // (evaluate_permission will auto-allow in relaxed mode anyway).
+            return true;
+        }
+
+        // Fallback for tests/environments without exec_policy
         const BUILTIN_DESTRUCTIVE: &[&str] = &[
             "rm ",
             "mv ",
@@ -319,18 +322,8 @@ impl Tool for BashTool {
             "systemctl ",
             "service ",
         ];
-        // Check denied commands first — blocked unconditionally
-        for denied in &self.denied_commands {
-            if trimmed.contains(denied) {
-                return false;
-            }
-        }
-        // Check built-in destructive + user ask_commands
-        for destructive in BUILTIN_DESTRUCTIVE
-            .iter()
-            .copied()
-            .chain(self.ask_commands.iter().map(|s| s.as_str()))
-        {
+        // Check built-in destructive
+        for destructive in BUILTIN_DESTRUCTIVE.iter().copied() {
             if trimmed.contains(destructive) {
                 return false;
             }
@@ -343,10 +336,6 @@ impl Tool for BashTool {
         READONLY_PREFIXES
             .iter()
             .any(|prefix| trimmed.starts_with(prefix))
-            || self
-                .allowed_commands
-                .iter()
-                .any(|cmd| trimmed.starts_with(cmd))
     }
 
     async fn execute(
@@ -583,7 +572,7 @@ mod rtk_tests {
     #[tokio::test]
     async fn test_rtk_route_with_redirect_stripped() {
         let nosb = Box::new(crate::sandbox::NoSandbox);
-        let tool = BashTool::new(true, HashMap::new(), 0, vec![], vec![], vec![], nosb);
+        let tool = BashTool::new(true, HashMap::new(), 0, nosb, None);
         let result = tool.maybe_rtk_route("git status 2>&1").await;
         assert!(result.is_some(), "rtk should route despite 2>&1 redirect");
     }
@@ -591,7 +580,7 @@ mod rtk_tests {
     #[tokio::test]
     async fn test_rtk_route_with_pipe_and_redirect() {
         let nosb = Box::new(crate::sandbox::NoSandbox);
-        let tool = BashTool::new(true, HashMap::new(), 0, vec![], vec![], vec![], nosb);
+        let tool = BashTool::new(true, HashMap::new(), 0, nosb, None);
         // rtk natively handles pipes — it rewrites the left side and preserves
         // shell operators, so compound commands should route through rtk.
         let result = tool.maybe_rtk_route("cargo test 2>&1 | grep error").await;
@@ -609,7 +598,7 @@ mod rtk_tests {
     #[tokio::test]
     async fn test_rtk_route_unsupported_returns_none() {
         let nosb = Box::new(crate::sandbox::NoSandbox);
-        let tool = BashTool::new(true, HashMap::new(), 0, vec![], vec![], vec![], nosb);
+        let tool = BashTool::new(true, HashMap::new(), 0, nosb, None);
         let result = tool.maybe_rtk_route("foobar xyz").await;
         assert!(
             result.is_none(),
