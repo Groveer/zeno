@@ -318,7 +318,7 @@ fn tools_block(names: &[&str]) -> String {
 /// Three placeholders ({tier0}, {tier1}, {if_unsure}) are filled based on
 /// whether skills are organized into categories or flat.
 const SKILL_LOADING_WORKFLOW: &str = "\
-### Loading Workflow (MANDATORY)
+## Loading Workflow (MANDATORY)
 
 You **MUST** load relevant skills before attempting non-trivial tasks.
 
@@ -752,8 +752,8 @@ mod tests {
 
         // Category index and loading workflow are separated by double newline
         assert!(
-            block.contains("\n\n### Loading Workflow"),
-            "Loading workflow should be a separate ### section after the category index"
+            block.contains("\n\n## Loading Workflow"),
+            "Loading workflow should be a separate ## section after the category index"
         );
     }
 

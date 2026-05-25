@@ -36,7 +36,7 @@ impl Tool for SkillListTool {
             "type": "function",
             "function": {
                 "name": "skill_list",
-                "description": "Browse skills by category or tag.",
+                "description": "Tier 1: Browse skills by category to find relevant knowledge guides. Call this BEFORE starting non-trivial tasks to discover if relevant skills exist. Use skill_view (Tier 2) to load a skill's full instructions.",
                 "parameters": {
                     "type": "object",
                     "properties": {
