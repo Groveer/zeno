@@ -80,6 +80,9 @@ similar = "2"
 notify = { version = "8", default-features = false, features = ["macos_kqueue"] }
 agent-client-protocol = "0.12.1"
 uuid = "1.23.1"
+tree-sitter = "0.25.10"
+tree-sitter-bash = "0.25"
+libc = "0.2.186"
 
 [dev-dependencies]
 tempfile = "3"

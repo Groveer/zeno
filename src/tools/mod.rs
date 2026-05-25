@@ -4,6 +4,7 @@ pub mod ask_user;
 pub mod base;
 pub mod bash;
 pub mod cache;
+pub mod command_safety;
 pub mod delegate_task;
 pub mod edit;
 pub mod file_content_pool;

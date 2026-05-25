@@ -950,13 +950,6 @@ fn extract_subagent_summary(history: &ConversationHistory) -> String {
                 if let ContentBlock::Text { text } = block {
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
-                        if trimmed.len() > 2000 {
-                            let end = trimmed
-                                .char_indices()
-                                .nth(2000)
-                                .map_or(trimmed.len(), |(i, _)| i);
-                            return format!("{}...", &trimmed[..end]);
-                        }
                         return trimmed.to_string();
                     }
                 }

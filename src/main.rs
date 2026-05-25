@@ -86,11 +86,66 @@ fn extract_image_paths(query_text: &str) -> (String, Vec<(String, String)>) {
 }
 
 // ---------------------------------------------------------------------------
+// Process hardening — called early in main() to reduce attack surface.
+// ---------------------------------------------------------------------------
+
+/// Apply process-level hardening early in main():
+/// - Disable ptrace attach / mark process non-dumpable (Linux)
+/// - Disable core dumps
+/// - Clear dangerous environment variables (LD_PRELOAD, etc.)
+///
+/// Defense-in-depth: even if sandbox isolation is bypassed, these
+/// measures make it harder for an attacker to extract data from the
+/// main process. Inspired by Codex's `process-hardening` crate.
+fn pre_main_hardening() {
+    // Disable ptrace attach / mark process non-dumpable on Linux.
+    // Prevents same-user processes from attaching with ptrace.
+    #[cfg(target_os = "linux")]
+    {
+        let ret = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            tracing::warn!(error = %err, "prctl(PR_SET_DUMPABLE) failed — ptrace protection not active");
+        }
+    }
+
+    // Disable core dumps — prevent sensitive memory from being written to disk.
+    let rlim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    let ret = unsafe { libc::setrlimit(libc::RLIMIT_CORE, &rlim) };
+    if ret != 0 {
+        let err = std::io::Error::last_os_error();
+        tracing::warn!(error = %err, "setrlimit(RLIMIT_CORE) failed");
+    }
+
+    // Clear dangerous/leaky environment variables.
+    // LD_PRELOAD could inject arbitrary shared libraries.
+    // Other *_PRELOAD / *_LIBRARY_PATH vars are risky.
+    for var in &[
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_FRAMEWORK_PATH",
+    ] {
+        // SAFETY: remove_var is unsafe because concurrent access from other
+        // threads can cause undefined behavior. We call it early in main()
+        // before any other threads are spawned, so it's safe.
+        unsafe { std::env::remove_var(var) };
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Process-level hardening before anything else.
+    // Disables core dumps, ptrace, and clears dangerous env vars.
+    pre_main_hardening();
+
     // Initialize structured JSON logging to file (avoids corrupting the TUI).
     // JSON format enables machine-readable log analysis — filter by field
     // values like `tool_name`, `permission_decision`, `compact_method`, etc.

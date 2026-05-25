@@ -161,23 +161,21 @@ pub fn builtin_rules() -> Vec<ExecRule> {
         ("more ", "Paging through files is safe"),
         ("file ", "Checking file type is safe"),
         ("wc ", "Counting words/lines is safe"),
-        // Search
+        // Search — rg and find removed because they have destructive flags
+        // (--pre, -exec, -delete) that can't be checked via prefix matching.
+        // AST analysis handles them correctly in Step 2.
         ("grep ", "Searching file contents is read-only"),
-        ("rg ", "Searching with ripgrep is read-only"),
         ("ag ", "Searching with the_silver_searcher is read-only"),
         ("ack ", "Searching with ack is read-only"),
-        ("find ", "Finding files is read-only"),
-        ("fd ", "Finding files with fd is safe"),
         ("locate ", "Locating files is read-only"),
-        // Git read-only
+        // Git read-only — only git status/diff/log/show are always safe
+        // `git branch`, `git tag`, `git remote` removed because they have
+        // destructive subcommands (-D, -d, remove) that can't be distinguished
+        // by prefix matching. AST analysis handles them correctly in Step 2.
         ("git status", "Git status is read-only"),
         ("git diff", "Git diff is read-only"),
         ("git log", "Git log is read-only"),
         ("git show", "Git show is read-only"),
-        ("git branch", "Git branch listing is read-only"),
-        ("git tag", "Git tag listing is read-only"),
-        ("git remote", "Git remote listing is read-only"),
-        ("gh ", "GitHub CLI is read-only"),
         // System info
         ("echo ", "Echoing text is safe"),
         ("printf ", "Printing formatted text is safe"),
@@ -185,7 +183,6 @@ pub fn builtin_rules() -> Vec<ExecRule> {
         ("whoami", "Printing user name is safe"),
         ("hostname", "Printing hostname is safe"),
         ("uname", "Printing system info is safe"),
-        ("env ", "Printing environment vars is safe"),
         ("printenv ", "Printing environment vars is safe"),
         ("set ", "Printing shell vars is safe"),
         // Cargo read-only
@@ -203,7 +200,7 @@ pub fn builtin_rules() -> Vec<ExecRule> {
         ("uniq ", "Deduplicating data is read-only"),
         ("cut ", "Cutting fields is read-only"),
         ("tr ", "Translating characters is read-only"),
-        ("awk ", "Text processing with awk is read-only"),
+        // `awk` removed — can execute shell commands and write files
         ("sed -n", "Sed with -n flag is read-only (no side effects)"),
         ("xargs -n", "Xargs with -n flag is safer"),
         // Utility
