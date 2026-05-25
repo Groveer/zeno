@@ -66,7 +66,6 @@ pub enum ToolError {
 /// Dependencies needed to spawn sub-agents from tools.
 /// Carried in `ToolContext` so the `delegate_task` tool can create sub-agents.
 #[derive(Clone)]
-#[allow(dead_code, reason = "used by delegate_task tool via ToolContext")]
 pub struct SubAgentDeps {
     /// Factory to create API clients for sub-agents.
     pub client_factory: Arc<
@@ -508,15 +507,6 @@ impl ToolRegistry {
         Self {
             tools: HashMap::new(),
         }
-    }
-
-    /// Wrap in `Arc` for shared ownership.
-    #[allow(
-        dead_code,
-        reason = "used by sub-agent engine for ToolRegistry sharing"
-    )]
-    pub fn into_arc(self) -> Arc<Self> {
-        Arc::new(self)
     }
 
     /// Register a tool. Returns an error if a tool with the same name is already registered.

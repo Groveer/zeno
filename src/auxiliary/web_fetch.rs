@@ -1,10 +1,8 @@
 //! Web page content extraction — uses an auxiliary model to extract and
 //! summarize web page content.
 //!
-//! `extract_web_content()` and `extract_html()` are internal helpers used
-//! by the `web_fetch` tool pipeline. They are called through the auxiliary
-//! dispatch, not directly from outside this module.
-#![allow(dead_code, reason = "called through auxiliary dispatch, not directly")]
+//! `extract_web_content()` is an internal helper used by the `web_fetch`
+//! tool pipeline, called through the auxiliary dispatch.
 
 use crate::config::settings::Settings;
 
@@ -72,19 +70,6 @@ pub async fn extract_web_content(
 
     let result = call_auxiliary(settings, AuxiliaryTask::WebExtract, messages).await?;
     Ok(result.content)
-}
-
-/// Extract and summarize content from raw HTML using html2text conversion first.
-///
-/// This is a convenience function that converts HTML to plain text before
-/// sending to the auxiliary model.
-pub async fn extract_html(
-    settings: &Settings,
-    url: &str,
-    html: &str,
-) -> Result<String, AuxiliaryError> {
-    let text = html2text::from_read(html.as_bytes(), 120).unwrap_or_else(|_| html.to_string());
-    extract_web_content(settings, url, &text).await
 }
 
 #[cfg(test)]

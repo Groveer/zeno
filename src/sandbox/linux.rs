@@ -206,6 +206,7 @@ impl Sandbox for BwrapSandbox {
 }
 
 /// Check if `path` is under any of the given `roots`.
+#[allow(dead_code, reason = "used by check_path_access which is trait API")]
 fn is_path_under(path: &Path, roots: &[String]) -> bool {
     roots.iter().any(|root| path.starts_with(root))
 }

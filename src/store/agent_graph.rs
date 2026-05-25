@@ -92,21 +92,6 @@ pub trait SubAgentGraphStore: Send + Sync {
     async fn set_edge_status(&self, child_id: &str, status: EdgeStatus) -> StoreResult<()>;
 
     /// List direct children of a parent agent.
-    ///
-    /// When `status_filter` is `Some`, only edges with that exact status are
-    /// returned. When `None`, all children regardless of status are returned.
-    ///
-    /// Prefer `list_children_with_details` when full edge metadata is needed.
-    #[allow(
-        dead_code,
-        reason = "public API — used in tests, kept for trait completeness"
-    )]
-    async fn list_children(
-        &self,
-        parent_id: &str,
-        status_filter: Option<EdgeStatus>,
-    ) -> StoreResult<Vec<String>>;
-
     /// List direct children of a parent agent, returning full edge records.
     ///
     /// Semantically identical to `list_children` but avoids the N+1 query
@@ -118,28 +103,6 @@ pub trait SubAgentGraphStore: Send + Sync {
         parent_id: &str,
         status_filter: Option<EdgeStatus>,
     ) -> StoreResult<Vec<EdgeRecord>>;
-
-    /// List descendant agent ids breadth-first by creation order.
-    ///
-    /// `status_filter` applies to every traversed edge. For example,
-    /// `Some(Open)` walks only open edges, so descendants under a closed edge
-    /// are excluded even if their own edge is open. `None` walks every edge.
-    #[allow(
-        dead_code,
-        reason = "public API — unused currently but part of the trait contract"
-    )]
-    async fn list_descendants(
-        &self,
-        root_id: &str,
-        status_filter: Option<EdgeStatus>,
-    ) -> StoreResult<Vec<String>>;
-
-    /// Look up the full edge record for a child agent.
-    #[allow(
-        dead_code,
-        reason = "public API — unused currently but part of the trait contract"
-    )]
-    async fn get_edge(&self, child_id: &str) -> StoreResult<Option<EdgeRecord>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -171,31 +134,11 @@ impl SubAgentGraphStore for NoopGraphStore {
         Ok(())
     }
 
-    async fn list_children(
-        &self,
-        _parent_id: &str,
-        _status_filter: Option<EdgeStatus>,
-    ) -> StoreResult<Vec<String>> {
-        Ok(Vec::new())
-    }
-
     async fn list_children_with_details(
         &self,
         _parent_id: &str,
         _status_filter: Option<EdgeStatus>,
     ) -> StoreResult<Vec<EdgeRecord>> {
         Ok(Vec::new())
-    }
-
-    async fn list_descendants(
-        &self,
-        _root_id: &str,
-        _status_filter: Option<EdgeStatus>,
-    ) -> StoreResult<Vec<String>> {
-        Ok(Vec::new())
-    }
-
-    async fn get_edge(&self, _child_id: &str) -> StoreResult<Option<EdgeRecord>> {
-        Ok(None)
     }
 }

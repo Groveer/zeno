@@ -98,10 +98,6 @@ pub struct ToolTraceEntry {
 
 /// Events emitted by a running sub-agent for parent progress display.
 #[derive(Debug, Clone)]
-#[allow(
-    dead_code,
-    reason = "event fields are consumed by the TUI integration layer"
-)]
 pub enum SubAgentEvent {
     Started {
         task_index: usize,
@@ -120,7 +116,6 @@ pub enum SubAgentEvent {
     ToolCompleted {
         task_index: usize,
         tool: String,
-        result_bytes: usize,
         is_error: bool,
     },
     Status {
@@ -135,19 +130,11 @@ pub enum SubAgentEvent {
 
 /// Errors from sub-agent operations.
 #[derive(Debug, thiserror::Error)]
-#[allow(
-    dead_code,
-    reason = "reserved for future sub-agent lifecycle management"
-)]
 pub enum SubAgentError {
     #[error("Client creation failed: {0}")]
     ClientCreation(String),
     #[error("No provider available")]
     NoProvider,
-    #[error("Sub-agent timed out after {0}s")]
-    Timeout(f64),
-    #[error("Cancelled")]
-    Cancelled,
 }
 
 // ---------------------------------------------------------------------------
@@ -200,7 +187,6 @@ pub async fn run_delegated_task(
 ///
 /// Each task runs in its own `tokio::task::spawn` with a shared `CancellationToken`.
 /// Results are returned in task order.
-#[allow(dead_code, reason = "used by delegate_task tool in batch mode")]
 pub async fn run_delegated_tasks_batch(
     deps: SubAgentDeps,
     cwd: PathBuf,
@@ -703,7 +689,6 @@ async fn run_single_sub_agent(
                 let _ = progress_tx.send(SubAgentEvent::ToolCompleted {
                     task_index,
                     tool: tu.name.clone(),
-                    result_bytes: 0,
                     is_error: true,
                 });
                 continue;
@@ -783,7 +768,6 @@ async fn run_single_sub_agent(
             let _ = progress_tx.send(SubAgentEvent::ToolCompleted {
                 task_index,
                 tool: tu.name.clone(),
-                result_bytes,
                 is_error,
             });
 

@@ -570,12 +570,6 @@ impl App {
                     }
                 }
             }
-            input::InputAction::Cancel => {
-                self.cancel_token.cancel();
-                if self.mode == AppMode::WaitingInput {
-                    self.permission_overlay.clear();
-                }
-            }
         }
     }
 
@@ -594,8 +588,6 @@ impl App {
             | UiCommand::ToolComplete { .. }
             | UiCommand::ToolError { .. }
             | UiCommand::ToolDiff { .. }
-            | UiCommand::ScrollBy(_)
-            | UiCommand::ScrollToBottom
             | UiCommand::ShowStatus(_)
             | UiCommand::SubAgentStarted { .. }
             | UiCommand::SubAgentProgress { .. } => {
@@ -665,29 +657,15 @@ impl App {
                 });
                 self.mode = AppMode::WaitingInput;
             }
-            UiCommand::HideOverlay => {
-                self.permission_overlay.update(UiCommand::HideOverlay);
-                if self.mode == AppMode::WaitingInput {
-                    self.mode = AppMode::Running;
-                }
-            }
 
             // ── Steer ────────────────────────────────────────────
             UiCommand::ClearSteerQueue => {
                 self.steer_queue.clear();
                 self.status.steer_count = 0;
             }
-            UiCommand::SteerSlot { steer_count } => {
-                self.status.steer_count = steer_count;
-            }
 
             // ── Input — delegate to Component trait ─────────────────
-            UiCommand::PasteImage { .. }
-            | UiCommand::SetInputText(_)
-            | UiCommand::SetInputPlaceholder(_)
-            | UiCommand::SetInputIdentity(_)
-            | UiCommand::FocusInput
-            | UiCommand::BlurInput => {
+            UiCommand::PasteImage { .. } | UiCommand::SetInputIdentity(_) => {
                 self.input.update(cmd);
             }
         }

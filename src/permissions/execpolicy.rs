@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Execution policy — rule-based command authorization.
 //!
 //! Inspired by Codex's `execpolicy` crate: provides fine-grained control
@@ -67,8 +66,6 @@ pub struct ExecRule {
 pub struct PolicyDecision {
     pub action: PolicyAction,
     pub reason: String,
-    /// Which rule matched (for logging).
-    pub matched_rule: Option<String>,
 }
 
 /// The execution policy engine.
@@ -123,21 +120,10 @@ impl ExecPolicy {
                     } else {
                         compiled.rule.reason.clone()
                     },
-                    matched_rule: Some(compiled.rule.pattern.clone()),
                 });
             }
         }
         None
-    }
-
-    /// Add a rule to the policy.
-    pub fn add_rule(&mut self, rule: ExecRule) {
-        let regex = if rule.is_regex {
-            Regex::new(&rule.pattern).ok()
-        } else {
-            None
-        };
-        self.rules.push(CompiledRule { rule, regex });
     }
 }
 
@@ -367,46 +353,9 @@ mod tests {
     }
 
     #[test]
-    fn test_regex_match() {
-        let mut policy = ExecPolicy::new();
-        policy.add_rule(ExecRule {
-            pattern: r"^docker\s+rm\s+".into(),
-            action: PolicyAction::Ask,
-            reason: "Removing containers requires confirmation".into(),
-            is_regex: true,
-        });
-
-        let decision = policy.evaluate("docker rm my_container").unwrap();
-        assert_eq!(decision.action, PolicyAction::Ask);
-
-        assert!(policy.evaluate("docker ps").is_none());
-    }
-
-    #[test]
     fn test_no_match() {
         let policy = ExecPolicy::new();
         assert!(policy.evaluate("arbitrary command").is_none());
-    }
-
-    #[test]
-    fn test_first_match_wins() {
-        let mut policy = ExecPolicy::new();
-        policy.add_rule(ExecRule {
-            pattern: "git".into(),
-            action: PolicyAction::Auto,
-            reason: "Git is safe".into(),
-            is_regex: false,
-        });
-        policy.add_rule(ExecRule {
-            pattern: "git push".into(),
-            action: PolicyAction::Deny,
-            reason: "No pushing".into(),
-            is_regex: false,
-        });
-
-        // First rule matches "git push" because "git" is a prefix of "git push"
-        let decision = policy.evaluate("git push").unwrap();
-        assert_eq!(decision.action, PolicyAction::Auto);
     }
 
     #[test]

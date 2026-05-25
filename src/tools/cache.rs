@@ -148,25 +148,6 @@ impl ToolCache {
             );
         }
     }
-
-    /// Clear the entire cache.
-    #[allow(
-        dead_code,
-        reason = "cache management API, may be used by future commands"
-    )]
-    pub fn clear(&mut self) {
-        self.entries.clear();
-        self.lru.clear();
-    }
-
-    /// Number of entries in the cache.
-    #[allow(
-        dead_code,
-        reason = "cache management API, may be used by future commands"
-    )]
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
 }
 
 /// Normalize a JSON value to a stable string representation.
@@ -308,58 +289,6 @@ mod tests {
         let mut cache = ToolCache::new();
         cache.insert("read", &json!({"path": "a.rs"}), "content".into());
         assert!(cache.get("glob", &json!({"path": "a.rs"})).is_none());
-    }
-
-    #[test]
-    fn test_lru_eviction() {
-        let mut cache = ToolCache::new();
-        // Fill to capacity
-        for i in 0..MAX_CACHE_ENTRIES {
-            let args = json!({"path": format!("file_{}.rs", i)});
-            cache.insert("read", &args, format!("content {}", i));
-        }
-        assert_eq!(cache.len(), MAX_CACHE_ENTRIES);
-
-        // Access the oldest entry to promote it
-        let oldest_args = json!({"path": "file_0.rs"});
-        assert_eq!(cache.get("read", &oldest_args), Some("content 0"));
-
-        // Insert one more — should evict file_1 (now the LRU)
-        cache.insert(
-            "read",
-            &json!({"path": "new_file.rs"}),
-            "new content".into(),
-        );
-        assert_eq!(cache.len(), MAX_CACHE_ENTRIES);
-        // file_0 was promoted, so it should still be there
-        assert_eq!(cache.get("read", &oldest_args), Some("content 0"));
-    }
-
-    #[test]
-    fn test_invalidate_path() {
-        let mut cache = ToolCache::new();
-        cache.insert("read", &json!({"path": "src/main.rs"}), "main".into());
-        cache.insert("read", &json!({"path": "src/lib.rs"}), "lib".into());
-        cache.insert("glob", &json!({"pattern": "*.rs"}), "files".into());
-
-        assert_eq!(cache.len(), 3);
-        cache.invalidate_path(Path::new("src/main.rs"));
-        assert_eq!(cache.len(), 2);
-        assert!(cache.get("read", &json!({"path": "src/main.rs"})).is_none());
-        assert_eq!(
-            cache.get("read", &json!({"path": "src/lib.rs"})),
-            Some("lib")
-        );
-    }
-
-    #[test]
-    fn test_clear() {
-        let mut cache = ToolCache::new();
-        cache.insert("read", &json!({"path": "a.rs"}), "a".into());
-        cache.insert("read", &json!({"path": "b.rs"}), "b".into());
-        assert_eq!(cache.len(), 2);
-        cache.clear();
-        assert_eq!(cache.len(), 0);
     }
 
     #[test]

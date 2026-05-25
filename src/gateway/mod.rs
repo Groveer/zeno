@@ -47,7 +47,6 @@ use self::transport::Transport;
 /// The root `App` component dispatches these to child components
 /// in its `update()` method.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Protocol fields (name, size_kb) and pre-wired variants (Scroll*, Input*, HideOverlay)
 pub enum UiCommand {
     // ── OutputPanel ──────────────────────────────────────
     /// Append text to the output (streaming delta).
@@ -68,7 +67,6 @@ pub enum UiCommand {
     },
     /// Diff output from an edit tool.
     ToolDiff {
-        name: String,
         diff: String,
     },
     /// A tool call errored.
@@ -76,10 +74,6 @@ pub enum UiCommand {
         name: String,
         error: String,
     },
-    /// Scroll the output area by a delta (positive = up).
-    ScrollBy(i32),
-    /// Scroll to the bottom of the output.
-    ScrollToBottom,
 
     // ── StatusBar ────────────────────────────────────────
     /// Set the application mode.
@@ -106,18 +100,8 @@ pub enum UiCommand {
         question: String,
         response_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
     },
-    /// Hide the current overlay (permission/ask_user).
-    HideOverlay,
 
     // ── InputPanel ───────────────────────────────────────
-    /// Set input text (e.g. from command history).
-    SetInputText(String),
-    /// Set input placeholder text (e.g. for permission prompts).
-    SetInputPlaceholder(String),
-    /// Focus the input panel.
-    FocusInput,
-    /// Blur the input panel.
-    BlurInput,
 
     // ── Steer ────────────────────────────────────────────
     /// Clear the steer queue (when query ends or steer is consumed).
@@ -133,11 +117,6 @@ pub enum UiCommand {
         line: String,
     },
 
-    // ── Steer ────────────────────────────────────────────
-    SteerSlot {
-        steer_count: usize,
-    },
-
     // ── InputPanel ───────────────────────────────────────
     /// Switch identity scope for input history.
     SetInputIdentity(Option<String>),
@@ -146,7 +125,6 @@ pub enum UiCommand {
     PasteImage {
         media_type: String,
         base64_data: String,
-        size_kb: usize,
     },
 
     // ── Misc ─────────────────────────────────────────────

@@ -70,7 +70,6 @@ impl Gateway {
                 task_index,
                 tool,
                 is_error,
-                ..
             } => {
                 if is_error {
                     vec![UiCommand::SubAgentProgress {

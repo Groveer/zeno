@@ -15,12 +15,6 @@ use super::UiCommand;
 pub trait Transport: Send {
     /// Send a UiCommand to the UI. Returns true on success.
     fn send(&self, cmd: &UiCommand) -> bool;
-
-    /// Close the transport, releasing any I/O resources.
-    /// Called during shutdown to signal the receiving end that no more
-    /// commands will be sent.
-    #[allow(dead_code)]
-    fn close(&self) {}
 }
 
 /// In-process channel transport (default).
@@ -40,11 +34,5 @@ impl ChannelTransport {
 impl Transport for ChannelTransport {
     fn send(&self, cmd: &UiCommand) -> bool {
         self.tx.send(cmd.clone()).is_ok()
-    }
-
-    fn close(&self) {
-        // Dropping the sender's clone is enough — mpsc detects disconnect
-        // on the receiver side (TryRecvError::Disconnected).
-        // ChannelTransport has no external I/O to flush.
     }
 }

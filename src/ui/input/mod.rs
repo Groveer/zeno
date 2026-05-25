@@ -13,7 +13,6 @@ pub mod clipboard;
 pub mod completion;
 pub mod editor;
 pub mod history;
-pub mod paste;
 
 use completion::CompletionPopup;
 use completion::CompletionType;
@@ -53,9 +52,6 @@ pub enum InputAction {
     Steer(String),
     /// User responded to ask_user / permission prompt (WaitingInput mode Enter).
     Respond { text: String },
-    /// Ctrl+C or Escape — interrupt / cancel (reserved for future InputPanel-level handling).
-    #[allow(dead_code)]
-    Cancel,
     /// Ctrl+D with empty input — hard quit.
     HardQuit,
 }
@@ -1252,19 +1248,6 @@ impl Component for InputState {
 
     fn update(&mut self, cmd: UiCommand) {
         match cmd {
-            UiCommand::SetInputText(text) => {
-                self.text = text;
-                self.cursor = self.text.len();
-            }
-            UiCommand::SetInputPlaceholder(_text) => {
-                // Placeholder would need additional state; reserved for future use
-            }
-            UiCommand::FocusInput => {
-                self.active = true;
-            }
-            UiCommand::BlurInput => {
-                self.active = false;
-            }
             UiCommand::PasteImage {
                 media_type,
                 base64_data,

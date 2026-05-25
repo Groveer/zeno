@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Sandbox system for secure command execution.
 //!
 //! Inspired by Codex's multi-platform sandbox architecture:
@@ -22,6 +21,7 @@ use std::path::Path;
 
 /// Result of a sandbox access check.
 #[derive(Debug, Clone)]
+#[allow(dead_code, reason = "part of Sandbox trait API, used in tests")]
 pub struct AccessCheck {
     pub allowed: bool,
     pub reason: Option<String>,
@@ -31,6 +31,7 @@ pub struct AccessCheck {
 /// with isolation primitives (bwrap, Seatbelt, etc.).
 pub trait Sandbox: Send + Sync {
     /// The current sandbox mode.
+    #[allow(dead_code, reason = "Sandbox trait API, used in tests")]
     fn mode(&self) -> SandboxMode;
 
     /// Wrap a command with sandbox isolation.
@@ -41,12 +42,15 @@ pub trait Sandbox: Send + Sync {
     fn wrap_command(&self, command: &str, cwd: &Path) -> Vec<String>;
 
     /// Check if a filesystem path is accessible for the given operation.
+    #[allow(dead_code, reason = "Sandbox trait API, used in tests")]
     fn check_path_access(&self, path: &Path, write: bool) -> AccessCheck;
 
     /// Check if network access is allowed.
+    #[allow(dead_code, reason = "Sandbox trait API, used in tests")]
     fn is_network_allowed(&self) -> bool;
 
     /// Environment variables to set for sandboxed execution.
+    #[allow(dead_code, reason = "Sandbox trait API, used in tests")]
     fn env_vars(&self) -> Vec<(String, String)> {
         Vec::new()
     }

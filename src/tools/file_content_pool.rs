@@ -188,12 +188,6 @@ impl FileContentPool {
         self.files.get(resolved_path).map(|f| f.lines.len())
     }
 
-    /// Number of files in the pool.
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        self.files.len()
-    }
-
     /// Build a concise summary of all files that have been read in this session.
     ///
     /// Returns `None` when no files have read ranges (pool empty or nothing read).
@@ -496,26 +490,6 @@ mod tests {
             ReadOutcome::Miss => {}
             _ => panic!("expected miss after remove"),
         }
-    }
-
-    #[test]
-    fn test_lru_eviction() {
-        let mut pool = FileContentPool::new();
-        // Set a low limit for testing
-        // (We can't easily change MAX_FILES, so test with fewer files)
-        for i in 0..MAX_FILES {
-            pool.insert_preserving_ranges(&format!("/file_{}.rs", i), &format!("content {}", i));
-        }
-        assert_eq!(pool.len(), MAX_FILES);
-
-        // Access file_0 to promote it
-        pool.read_range("/file_0.rs", 0, 1);
-
-        // Insert one more — should evict the LRU (file_1, since file_0 was promoted)
-        pool.insert_preserving_ranges("/new.rs", "new content");
-        assert_eq!(pool.len(), MAX_FILES);
-        assert!(pool.contains("/file_0.rs")); // Promoted — still present
-        assert!(pool.contains("/new.rs")); // Newly inserted
     }
 
     #[test]

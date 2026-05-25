@@ -25,21 +25,10 @@ pub enum InteractionType {
 
 /// A queued permission/ask_user request (used for both active and queued entries).
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct ActivePermission {
     pub prompt_type: InteractionType,
-    /// Tool name (for permission requests) or empty (for ask_user).
-    pub tool_name: String,
-    /// Reason for the permission request or context for the question.
-    pub reason: String,
-    /// Detail/input data shown to the user for context.
-    pub detail: String,
     pub response_tx: Arc<Mutex<Option<oneshot::Sender<String>>>>,
 }
-
-/// Type alias for queued entries (semantic alias, structurally identical).
-#[allow(dead_code)]
-pub type PendingPermission = ActivePermission;
 
 /// Result of enqueuing a new prompt request.
 pub enum PromptResult {
@@ -133,9 +122,9 @@ impl PermissionOverlay {
     fn enqueue(
         &mut self,
         prompt_type: InteractionType,
-        tool_name: String,
-        reason: String,
-        detail: String,
+        _tool_name: String,
+        _reason: String,
+        _detail: String,
         response_tx: Arc<Mutex<Option<oneshot::Sender<String>>>>,
     ) -> PromptResult {
         // AskUser is never auto-approved
@@ -148,9 +137,6 @@ impl PermissionOverlay {
 
         let entry = ActivePermission {
             prompt_type,
-            tool_name,
-            reason,
-            detail,
             response_tx,
         };
 
@@ -266,9 +252,6 @@ impl Component for PermissionOverlay {
                 if let Some(tx) = tx {
                     let _ = self.enqueue_ask_user(question, Arc::new(Mutex::new(Some(tx))));
                 }
-            }
-            UiCommand::HideOverlay => {
-                self.clear();
             }
             _ => {}
         }

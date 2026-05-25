@@ -25,9 +25,6 @@ pub const MAX_SKILL_CONTENT_CHARS: usize = 100_000;
 /// Result of frontmatter validation.
 #[derive(Debug, Clone)]
 pub struct FrontmatterInfo {
-    /// Parsed `name` field (if present and valid).
-    #[allow(dead_code, reason = "public API field, consumed by skill_manage tool")]
-    pub name: Option<String>,
     /// Parsed `description` field (if present and valid).
     pub description: Option<String>,
 }
@@ -94,7 +91,7 @@ pub fn validate_frontmatter(content: &str) -> Result<FrontmatterInfo, String> {
         .and_then(|v| v.as_str())
         .map(|s| s.trim().to_string());
 
-    let name = match name {
+    let _name = match name {
         Some(n) if !n.is_empty() => {
             if n.len() > MAX_NAME_LENGTH {
                 return Err(format!(
@@ -149,7 +146,6 @@ pub fn validate_frontmatter(content: &str) -> Result<FrontmatterInfo, String> {
     }
 
     Ok(FrontmatterInfo {
-        name: Some(name),
         description: Some(description),
     })
 }
@@ -167,7 +163,6 @@ mod tests {
         let content =
             "---\nname: my-skill\ndescription: A test skill\n---\n# My Skill\nContent here";
         let info = validate_frontmatter(content).unwrap();
-        assert_eq!(info.name.unwrap(), "my-skill");
         assert_eq!(info.description.unwrap(), "A test skill");
     }
 

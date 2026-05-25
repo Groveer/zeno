@@ -4,10 +4,8 @@
 //! - [`prefix::take_prefix_by_width`] — raw width-based split (private)
 //! - [`word::word_wrap`] — plain-text word-wrap with URL protection
 //! - [`span::wrap_spans`] — style-preserving wrap for ratatui [`Span`]s
-//! - [`stream::RowBuilder`] — incremental streaming wrap
 
 pub mod span;
-pub mod stream;
 pub mod word;
 
 mod prefix;

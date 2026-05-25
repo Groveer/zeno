@@ -42,8 +42,8 @@ impl Gateway {
                 // split into ToolOutputChunk and ToolCompleted.
                 vec![UiCommand::ToolComplete { name, output }]
             }
-            EngineEvent::ToolDiff { name, diff } => {
-                vec![UiCommand::ToolDiff { name, diff }]
+            EngineEvent::ToolDiff { name: _, diff } => {
+                vec![UiCommand::ToolDiff { diff }]
             }
             EngineEvent::ToolError { name, error } => {
                 vec![UiCommand::ToolError { name, error }]
@@ -128,12 +128,11 @@ impl Gateway {
             EngineEvent::ImagePasted {
                 media_type,
                 base64_data,
-                size_kb,
+                size_kb: _,
             } => {
                 vec![UiCommand::PasteImage {
                     media_type,
                     base64_data,
-                    size_kb,
                 }]
             }
             EngineEvent::ImagePasteFailed => {

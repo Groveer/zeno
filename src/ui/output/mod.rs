@@ -177,17 +177,6 @@ impl Component for OutputState {
             UiCommand::ToolDiff { diff, .. } => {
                 self.push(OutputSegment::Diff(diff));
             }
-            UiCommand::ScrollBy(delta) => {
-                if delta > 0 {
-                    self.scroll_up(delta as usize);
-                } else {
-                    self.scroll_down((-delta) as usize);
-                }
-            }
-            UiCommand::ScrollToBottom => {
-                self.scroll = 0;
-                self.auto_scroll = true;
-            }
             UiCommand::ShowError(err) => {
                 self.push(OutputSegment::Error(err));
             }

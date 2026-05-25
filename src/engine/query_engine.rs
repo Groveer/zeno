@@ -5,7 +5,7 @@ use crate::config::settings::{PermissionMode, ProviderConfig, Settings};
 use crate::engine::carryover::Carryover;
 use crate::engine::compact::CompactConfig;
 use crate::engine::cost_tracker::CostTracker;
-use crate::engine::messages::{ConversationEntry, ConversationHistory};
+use crate::engine::messages::ConversationHistory;
 use crate::hooks::executor::HookExecutor;
 use crate::memory::manager::SharedMemoryManager;
 use crate::permissions::execpolicy::ExecPolicy;
@@ -236,19 +236,6 @@ impl QueryEngine {
         Ok(())
     }
 
-    /// Update the system prompt for future turns.
-    #[allow(dead_code, reason = "called via Lua config script")]
-    pub fn set_system_prompt(&mut self, prompt: String) {
-        self.system_prompt = prompt;
-    }
-
-    /// Update the maximum number of agentic turns per user input.
-    /// Enforces a minimum of 1.
-    #[allow(dead_code, reason = "called via Lua config script")]
-    pub fn set_max_turns(&mut self, max_turns: u32) {
-        self.max_turns = max_turns.max(1);
-    }
-
     // -----------------------------------------------------------------------
     // Mid-run user input (steer)
     // -----------------------------------------------------------------------
@@ -270,19 +257,6 @@ impl QueryEngine {
             .lock()
             .expect("pending_steer: mutex poisoned");
         *guard = None;
-    }
-
-    // -----------------------------------------------------------------------
-    // Session restore
-    // -----------------------------------------------------------------------
-
-    /// Replace the in-memory conversation history with pre-existing entries.
-    /// Sanitizes the loaded messages and resets the cost tracker.
-    #[allow(dead_code, reason = "called via Lua config script")]
-    pub fn load_messages(&mut self, entries: Vec<ConversationEntry>) {
-        self.history = ConversationHistory::from_entries(entries);
-        self.history.sanitize();
-        self.cost_tracker = CostTracker::default();
     }
 
     /// Resolve the effective max_output_tokens for API calls.
