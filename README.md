@@ -10,12 +10,14 @@ zeno 是一个面向开发者的终端 AI 编程助手，受 [Hermes Agent](http
 
 ### ⚡ 毫秒启动 · 单二进制
 
-纯 Rust 实现，编译为单个静态链接二进制文件。无 Node.js 运行时、无 Python 解释器、无 Docker 依赖。启动即用，零等待。
+纯 Rust 实现，编译为单个静态链接二进制文件。无 Node.js 运行时、无 Python 解释器、无 Docker 依赖。毫秒级冷启动，零等待进入 TUI。
 
 ```bash
 $ cargo install --path .
 $ zeno    # 瞬间进入全屏 TUI
 ```
+
+> **提示**：首次启动需先配置 `~/.config/zeno/init.lua`（含 API Key），详见下方[快速开始](#快速开始)。
 
 ### 🖥️ 全屏 TUI 交互
 
@@ -291,7 +293,7 @@ zeno --acp
 │  session mgmt · sub-agent · curator                   │
 ├──────────────────┬────────────────────────────────────┤
 │  Tool Registry   │  bash / read / write / edit /      │
-│  (24 tools)      │  glob / grep / web_search / fetch  │
+│  (21 个内置工具)  │  glob / grep / web_search / fetch  │
 │                  │  todo / delegate_task / skill_manage│
 ├──────────────────┴────────────────────────────────────┤
 │  API Clients (reqwest + SSE)                          │
