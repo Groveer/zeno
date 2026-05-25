@@ -30,6 +30,13 @@ pub fn char_width(ch: char, next: Option<char>) -> usize {
     if ch == '\u{FFFC}' {
         return 5;
     }
+    // Paste marker — rendered as e.g. "[📋 pasted 24 lines: "snippet…"]"
+    // Returns a generous upper bound (60 cols ≈ longest possible summary).
+    // The exact width is computed per-marker in PasteData::display_width and
+    // used by visual_cursor_row_col for precise cursor positioning.
+    if ch == '\u{E002}' {
+        return 60;
+    }
     // Fall back to unicode-width for all other characters
     unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0)
 }

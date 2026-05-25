@@ -96,10 +96,10 @@ pub struct App {
 
 impl App {
     /// Maximum height the input area can grow to (in rows including border).
-    const MAX_INPUT_HEIGHT: u16 = 16;
+    const MAX_INPUT_HEIGHT: u16 = 10;
 
-    /// Minimum height for the input area (1 border + 1 content line).
-    const MIN_INPUT_HEIGHT: u16 = 3;
+    /// Minimum height for the input area (1 border + 4 content lines).
+    const MIN_INPUT_HEIGHT: u16 = 5;
 
     /// Create App with an initial active identity for scoped input history.
     pub fn with_identity(
@@ -347,11 +347,31 @@ impl App {
     /// Handle a bracketed-paste event: insert the pasted text into the input
     /// widget without triggering submit. Newlines are kept as-is.
     ///
+    /// Multi-line pastes (≥5 lines) are automatically collapsed to a compact
+    /// single-line reference like `[📋 pasted 24 lines: "snippet…"]` with the
+    /// original content stored for expansion before submission.
+    ///
     /// Also checks the clipboard for image data — if the clipboard contains
     /// an image alongside text, it's added as a pending image to attach to
     /// the next message.
     pub fn handle_paste(&mut self, text: String) {
+        // Pre-compute the first line of the pasted content so collapse_paste
+        // can show an accurate summary (the pasted content's first line, not
+        // the whole text buffer's first line).
+        let snippet: String = text
+            .split('\n')
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(30)
+            .collect();
+        if !snippet.is_empty() {
+            self.input.pending_paste_snippet = Some(snippet);
+        }
+        self.input.pending_paste_text_len = Some(text.len());
         self.input.insert_str(&text);
+        // Collapse multi-line paste to single-line reference
+        self.input.collapse_paste();
         // Also check clipboard for image data (terminal paste may carry both
         // text and image representations — e.g. wl-paste or xclip).
         let tx = self.gateway_event_tx.clone();
@@ -815,8 +835,12 @@ impl App {
             let text_width = input_area.width.saturating_sub(PROMPT_WIDTH);
             let (visual_row, visual_col) = self.input.visual_cursor_row_col(text_width);
 
+            // Apply same scroll offset as render() to keep cursor visible
+            let visible_height = input_area.height.saturating_sub(1); // -1 for border
+            let scroll_offset = self.input.cursor_scroll_offset(text_width, visible_height);
+
             let cursor_x = input_area.x + PROMPT_WIDTH + visual_col as u16;
-            let cursor_y = input_area.y + 1 + visual_row as u16;
+            let cursor_y = input_area.y + 1 + (visual_row as u16) - scroll_offset;
 
             frame.set_cursor_position((cursor_x, cursor_y));
         }

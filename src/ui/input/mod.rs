@@ -80,6 +80,31 @@ const COMMANDS: &[&str] = &[
 /// Renders as a styled "[img]" span in the input area. Deletable like normal chars.
 pub const IMAGE_MARKER: char = '\u{FFFC}'; // Object Replacement Character
 
+/// Marker character for a collapsed multi-line paste.
+/// Renders as a styled summary in the input area. Deletable like normal chars.
+/// The original content is stored in `paste_data` and expanded before submit.
+///
+/// Uses a Private Use Area character (U+E002) to avoid collision with the Unicode
+/// Replacement Character (U+FFFD) which commonly appears in terminal encoding errors.
+pub const PASTE_MARKER: char = '\u{E002}';
+/// &str form of PASTE_MARKER for string-slice comparisons.
+pub const PASTE_MARKER_STR: &str = "\u{E002}";
+
+/// Data for a collapsed multi-line paste.
+struct PasteData {
+    /// The original pasted content.
+    content: String,
+    /// Summary string for display (e.g. "24 lines: "fn process…"").
+    summary: String,
+    /// Display width of the rendered marker span (e.g. `[📋 pasted 24 lines: …]`).
+    /// Used for accurate cursor positioning in `visual_cursor_row_col`.
+    display_width: usize,
+    /// Saved cursor position within `content` at collapse time.
+    /// Restored during `expand_paste_refs` so the cursor lands at the same
+    /// logical position (end of pasted content) after expansion.
+    saved_cursor: usize,
+}
+
 /// The input widget state.
 pub struct InputState {
     /// Full text buffer (may contain \n).
@@ -115,6 +140,17 @@ pub struct InputState {
     ghost_text: Option<String>,
     /// Current app mode, synced from App for use in view() and dispatch_key().
     app_mode: AppMode,
+    /// Collapsed multi-line paste data — one entry per PASTE_MARKER in text.
+    /// Expanded back to full content before submission.
+    paste_data: Vec<PasteData>,
+    /// When set, the next `collapse_paste` call uses this as the snippet for the
+    /// paste summary (showing the pasted content's first line rather than the
+    /// entire text buffer's first line). Set by `handle_paste` before collapsing.
+    pub(crate) pending_paste_snippet: Option<String>,
+    /// When set, the next `collapse_paste` uses this to compute the pasted
+    /// content boundaries, collapsing only the pasted portion while keeping
+    /// pre/post text and existing markers visible.
+    pub(crate) pending_paste_text_len: Option<usize>,
 }
 
 impl InputState {
@@ -135,6 +171,9 @@ impl InputState {
             identity_names: Vec::new(),
             ghost_text: None,
             app_mode: AppMode::default(),
+            paste_data: Vec::new(),
+            pending_paste_snippet: None,
+            pending_paste_text_len: None,
             active_identity,
         }
     }
@@ -340,14 +379,25 @@ impl InputState {
             } => {
                 if self.cursor > 0 {
                     let prev = self.prev_grapheme_boundary();
+                    let deleted = &self.text[prev..self.cursor];
                     // If deleting an image marker, remove the corresponding image data
-                    if self.text[prev..self.cursor] == *"\u{FFFC}" {
+                    if deleted == "\u{FFFC}" {
                         let idx = self.text[..prev]
                             .chars()
                             .filter(|&c| c == '\u{FFFC}')
                             .count();
                         if idx < self.images.len() {
                             self.images.remove(idx);
+                        }
+                    }
+                    // If deleting a paste marker, remove corresponding paste data
+                    if deleted == PASTE_MARKER_STR {
+                        let idx = self.text[..prev]
+                            .chars()
+                            .filter(|&c| c == PASTE_MARKER)
+                            .count();
+                        if idx < self.paste_data.len() {
+                            self.paste_data.remove(idx);
                         }
                     }
                     self.text.drain(prev..self.cursor);
@@ -380,6 +430,16 @@ impl InputState {
                             .count();
                         if idx < self.images.len() {
                             self.images.remove(idx);
+                        }
+                    }
+                    // If deleting a paste marker, remove corresponding paste data
+                    if c == PASTE_MARKER {
+                        let idx = self.text[..self.cursor]
+                            .chars()
+                            .filter(|&c| c == PASTE_MARKER)
+                            .count();
+                        if idx < self.paste_data.len() {
+                            self.paste_data.remove(idx);
                         }
                     }
                     let next = self.next_grapheme_boundary();
@@ -427,7 +487,7 @@ impl InputState {
             AppMode::Running => {
                 let _ = self.handle_key(key);
                 if self.submitted {
-                    let text = self.text.trim().to_string();
+                    let text = self.expand_and_extract_text();
                     self.reset();
                     if !text.is_empty() {
                         InputAction::Steer(text)
@@ -441,7 +501,7 @@ impl InputState {
             AppMode::WaitingInput => {
                 let _ = self.handle_key(key);
                 if self.submitted {
-                    let text = self.text.trim().to_string();
+                    let text = self.expand_and_extract_text();
                     self.reset_without_history();
                     InputAction::Respond { text }
                 } else {
@@ -488,6 +548,7 @@ impl InputState {
         self.draft = None;
         self.images.clear();
         self.ghost_text = None;
+        self.paste_data.clear();
 
         // Persist: re-read latest disk state, merge new entry, save.
         // This prevents overwriting entries from other concurrent Zeno instances.
@@ -512,6 +573,7 @@ impl InputState {
         self.history_index = None;
         self.draft = None;
         self.ghost_text = None;
+        self.paste_data.clear();
     }
 
     // Multi-line cursor helpers
@@ -1096,6 +1158,7 @@ impl InputState {
 
         let mut visual_row = 0usize;
         let mut display_col: u16 = 0;
+        let mut paste_idx = 0usize;
 
         for (byte_idx, c) in self.text.char_indices() {
             if byte_idx >= cursor {
@@ -1108,9 +1171,23 @@ impl InputState {
                 continue;
             }
 
-            let rest = &self.text[byte_idx + c.len_utf8()..];
-            let next = rest.chars().next();
-            let cw = crate::utils::char_width(c, next) as u16;
+            let cw = if c == PASTE_MARKER {
+                // Use the exact display width from paste_data for accurate cursor positioning.
+                // PASTE_MARKER is rendered as a variable-length span like
+                // `[📋 pasted 24 lines: "snippet…"]` — the fixed char_width
+                // estimate (60) is intentionally generous but imprecise.
+                let w = self
+                    .paste_data
+                    .get(paste_idx)
+                    .map(|p| p.display_width as u16)
+                    .unwrap_or(60);
+                paste_idx += 1;
+                w
+            } else {
+                let rest = &self.text[byte_idx + c.len_utf8()..];
+                let next = rest.chars().next();
+                crate::utils::char_width(c, next) as u16
+            };
 
             if display_col + cw > text_area_width && display_col > 0 {
                 visual_row += 1;
@@ -1121,6 +1198,20 @@ impl InputState {
         }
 
         (visual_row, display_col as usize)
+    }
+
+    /// Compute the scroll offset needed to keep the cursor visible.
+    ///
+    /// Returns the number of visual rows to scroll up so that the cursor's visual
+    /// row falls within the visible area. Used by both [`render`] and [`App::view`]
+    /// to keep cursor positioning in sync with the rendered text.
+    pub fn cursor_scroll_offset(&self, text_area_width: u16, visible_height: u16) -> u16 {
+        let (visual_row, _) = self.visual_cursor_row_col(text_area_width);
+        if (visual_row as u16) >= visible_height {
+            (visual_row as u16) - visible_height + 1
+        } else {
+            0
+        }
     }
 
     /// Remove the last image marker from text and images.
@@ -1156,11 +1247,27 @@ impl InputState {
     }
 
     /// Extract all image data from the text buffer, removing markers.
+    /// Also expands any collapsed paste references back to original content.
     /// Returns (image_data, cleaned_text_without_markers).
     pub fn extract_images(&mut self) -> (Vec<(String, String)>, String) {
+        // Expand collapsed paste references before extraction
+        self.expand_paste_refs();
+
         let images = std::mem::take(&mut self.images);
         let cleaned: String = self.text.chars().filter(|&c| c != IMAGE_MARKER).collect();
         (images, cleaned)
+    }
+
+    /// Expand paste refs and strip all markers, returning just the text.
+    /// Used by Running and WaitingInput modes (which don't handle images).
+    fn expand_and_extract_text(&mut self) -> String {
+        self.expand_paste_refs();
+        self.text
+            .chars()
+            .filter(|&c| c != IMAGE_MARKER && c != PASTE_MARKER)
+            .collect::<String>()
+            .trim()
+            .to_string()
     }
 
     /// Number of image markers currently in the text buffer.
@@ -1178,6 +1285,16 @@ impl InputState {
         }
     }
 
+    /// Safety net: ensure `paste_data` has exactly as many entries as PASTE_MARKER
+    /// chars in the text. Mirrors `sync_images`. Catches any text mutation path
+    /// that removes paste markers without cleaning up their `paste_data` entries.
+    fn sync_paste_data(&mut self) {
+        let count = self.text.chars().filter(|&c| c == PASTE_MARKER).count();
+        while self.paste_data.len() > count {
+            self.paste_data.pop();
+        }
+    }
+
     /// Insert a string at the cursor position (used for bracketed paste).
     /// Newlines in the pasted text are kept as-is (not treated as submit).
     pub fn insert_str(&mut self, s: &str) {
@@ -1185,11 +1302,187 @@ impl InputState {
         self.cursor += s.len();
     }
 
+    /// Detect multi-line paste content and collapse it to a single PASTE_MARKER
+    /// character with a brief content summary. The original content is stored in
+    /// `paste_data` and expanded back before submission.
+    ///
+    /// Uses a heuristic threshold: ≥5 newlines triggers collapse. This avoids
+    /// collapsing manual Shift+Enter line breaks during normal typing.
+    ///
+    /// Two collapse modes:
+    /// - **Partial** (via `handle_paste` with `pending_paste_text_len`): only the
+    ///   pasted portion is collapsed to a marker. Pre/post text and existing paste
+    ///   markers remain visible in the text buffer. This preserves visual context.
+    /// - **Full** (tests, no `pending_paste_text_len`): the entire text buffer is
+    ///   collapsed into one marker. Existing markers are expanded first to prevent
+    ///   nesting — all content is consolidated into a single entry.
+    pub fn collapse_paste(&mut self) {
+        let pasted_len = self.pending_paste_text_len.take();
+
+        if let Some(pasted_len) = pasted_len {
+            // ── Partial collapse: only the pasted portion ──────────────────
+            let paste_end = self.cursor;
+            let paste_start = paste_end.saturating_sub(pasted_len);
+            let pasted_slice = &self.text[paste_start..paste_end];
+
+            let newline_count = pasted_slice.chars().filter(|&c| c == '\n').count();
+            if newline_count < 5 {
+                return;
+            }
+            let line_count = newline_count + 1;
+
+            // Generate summary (uses pending_paste_snippet from handle_paste)
+            let max_snippet = 30;
+            let snippet_source = self
+                .pending_paste_snippet
+                .take()
+                .unwrap_or_else(|| pasted_slice.split('\n').next().unwrap_or("").to_string());
+            let snippet: String = snippet_source.chars().take(max_snippet).collect();
+            let suffix = if snippet_source.chars().count() > max_snippet {
+                "…"
+            } else {
+                ""
+            };
+
+            let summary = format!(
+                "📋 pasted {} line{}: \"{}{}\"",
+                line_count,
+                if line_count > 1 { "s" } else { "" },
+                snippet,
+                suffix,
+            );
+
+            let rendered_span = format!("[{}]", summary);
+            let display_width = crate::utils::display_width(&rendered_span);
+            let saved_cursor = pasted_slice.len();
+
+            // Count existing markers before the paste range to determine index
+            let idx = self.text[..paste_start]
+                .chars()
+                .filter(|&c| c == PASTE_MARKER)
+                .count();
+
+            // Replace only the pasted range with a marker, keeping pre/post text
+            let pasted_owned = self.text[paste_start..paste_end].to_string();
+            self.text
+                .replace_range(paste_start..paste_end, PASTE_MARKER_STR);
+            self.cursor = paste_start + PASTE_MARKER.len_utf8();
+
+            self.paste_data.insert(
+                idx,
+                PasteData {
+                    content: pasted_owned,
+                    summary,
+                    display_width,
+                    saved_cursor,
+                },
+            );
+        } else {
+            // ── Full collapse (tests, no paste boundary info) ──────────────
+            let newline_count = self.text.chars().filter(|&c| c == '\n').count();
+            if newline_count < 5 {
+                return;
+            }
+
+            self.expand_paste_refs();
+
+            let line_count = newline_count + 1;
+            let max_snippet = 30;
+            let snippet_source = self
+                .pending_paste_snippet
+                .take()
+                .unwrap_or_else(|| self.text.split('\n').next().unwrap_or("").to_string());
+            let snippet: String = snippet_source.chars().take(max_snippet).collect();
+            let suffix = if snippet_source.chars().count() > max_snippet {
+                "…"
+            } else {
+                ""
+            };
+
+            let summary = format!(
+                "📋 pasted {} line{}: \"{}{}\"",
+                line_count,
+                if line_count > 1 { "s" } else { "" },
+                snippet,
+                suffix,
+            );
+
+            let rendered_span = format!("[{}]", summary);
+            let display_width = crate::utils::display_width(&rendered_span);
+
+            let full_content = std::mem::take(&mut self.text);
+            let cursor = self.cursor.min(full_content.len());
+            let idx = full_content[..cursor]
+                .chars()
+                .filter(|&c| c == PASTE_MARKER)
+                .count();
+            let saved_cursor = cursor;
+            self.text.insert(0, PASTE_MARKER);
+            self.cursor = PASTE_MARKER.len_utf8();
+            self.paste_data.insert(
+                idx,
+                PasteData {
+                    content: full_content,
+                    summary,
+                    display_width,
+                    saved_cursor,
+                },
+            );
+        }
+    }
+
+    /// Expand collapsed paste markers back to original content in order.
+    /// Called before submission to restore the full text.
+    fn expand_paste_refs(&mut self) {
+        if self.paste_data.is_empty() {
+            return;
+        }
+        // Safety: ensure paste_data entries match markers in text before proceeding.
+        self.sync_paste_data();
+
+        // Replace each PASTE_MARKER with its corresponding content, in order.
+        // We process left-to-right so positions stay valid for later markers.
+        let mut byte_offset: isize = 0;
+        let paste_count = self.paste_data.len();
+        for i in 0..paste_count {
+            // Find the i-th PASTE_MARKER in the (potentially shifted) text
+            let search_from = if byte_offset >= 0 {
+                byte_offset as usize
+            } else {
+                0
+            };
+            let search_in = &self.text[search_from..];
+            if let Some(rel_pos) = search_in.find(PASTE_MARKER) {
+                let abs_pos = search_from + rel_pos;
+                let content = std::mem::take(&mut self.paste_data[i].content);
+                let old_len = PASTE_MARKER.len_utf8();
+                self.text
+                    .replace_range(abs_pos..abs_pos + old_len, &content);
+                // Adjust byte offset for subsequent searches
+                let content_len = content.len();
+                byte_offset += content_len as isize - old_len as isize;
+                // Restore cursor: combine saved position within paste content with
+                // any offset the user typed after the marker since collapse.
+                if self.cursor > abs_pos {
+                    let post_marker_offset = self.cursor.saturating_sub(abs_pos + old_len);
+                    self.cursor = abs_pos + self.paste_data[i].saved_cursor + post_marker_offset;
+                    self.cursor = editor::snap_to_char_boundary(&self.text, self.cursor);
+                }
+            }
+        }
+        self.paste_data.clear();
+    }
+
     /// Delete the word before the cursor (Ctrl+W behavior).
     ///
     /// Scans backwards from cursor, first deleting any trailing whitespace,
     /// then deleting the word preceding it — equivalent to how readline /
     /// bash handle Ctrl+W (delete back to the previous whitespace boundary).
+    ///
+    /// Correctly handles paste markers: for each PASTE_MARKER in the deleted
+    /// range, the corresponding `paste_data` entry is removed by index (based
+    /// on its position before deletion), avoiding the index mismatch that
+    /// would occur with a post-hoc sync.
     fn delete_word_backwards(&mut self) {
         if self.cursor == 0 {
             return;
@@ -1207,9 +1500,34 @@ impl InputState {
         while pos > 0 && !before.as_bytes()[pos - 1].is_ascii_whitespace() {
             pos -= 1;
         }
+
+        // Remove paste_data entries for any markers in the deleted range.
+        // Scan each char in the range, compute its marker index by counting
+        // markers before `pos`, and remove the corresponding entry.
+        // We scan left-to-right but remove rightmost-first to keep indices valid.
+        let deleted_range: Vec<usize> = self.text[pos..self.cursor]
+            .char_indices()
+            .filter(|&(_, c)| c == PASTE_MARKER)
+            .map(|(i, _)| {
+                // Count markers before this position in the full text (before deletion)
+                self.text[..pos + i]
+                    .chars()
+                    .filter(|&ch| ch == PASTE_MARKER)
+                    .count()
+            })
+            .collect();
+
+        // Remove in reverse order so indices stay valid
+        for idx in deleted_range.into_iter().rev() {
+            if idx < self.paste_data.len() {
+                self.paste_data.remove(idx);
+            }
+        }
+
         self.text.drain(pos..self.cursor);
         self.cursor = pos;
         self.sync_images();
+        self.sync_paste_data();
     }
 
     fn prev_grapheme_boundary(&self) -> usize {
@@ -1277,20 +1595,34 @@ impl Component for InputState {
 // Rendering
 
 /// Split a single physical line into visual segments that fit within `max_width`.
-fn wrap_physical_line<'a>(line: &'a str, max_width: u16) -> Vec<&'a str> {
-    let full_width = crate::utils::display_width(line) as u16;
-    if full_width <= max_width {
-        return vec![line];
-    }
-
+///
+/// Uses `paste_data` and `paste_offset` to look up the actual display width of
+/// paste markers (rather than the conservative `char_width` estimate of 60),
+/// ensuring wrapping boundaries match [`InputState::visual_cursor_row_col`].
+fn wrap_physical_line<'a>(
+    line: &'a str,
+    max_width: u16,
+    paste_data: &[PasteData],
+    paste_offset: usize,
+) -> Vec<&'a str> {
     let mut segments: Vec<&str> = Vec::new();
     let mut seg_start: usize = 0;
     let mut display_col: u16 = 0;
+    let mut local_paste_idx = paste_offset;
 
     for (byte_idx, c) in line.char_indices() {
-        let rest = &line[byte_idx + c.len_utf8()..];
-        let next = rest.chars().next();
-        let cw = crate::utils::char_width(c, next) as u16;
+        let cw = if c == PASTE_MARKER {
+            let w = paste_data
+                .get(local_paste_idx)
+                .map(|p| p.display_width as u16)
+                .unwrap_or(60);
+            local_paste_idx += 1;
+            w
+        } else {
+            let rest = &line[byte_idx + c.len_utf8()..];
+            let next = rest.chars().next();
+            crate::utils::char_width(c, next) as u16
+        };
 
         if display_col + cw > max_width && display_col > 0 {
             segments.push(&line[seg_start..byte_idx]);
@@ -1368,13 +1700,19 @@ pub fn render(
     let all_lines: Vec<&str> = display_text.split('\n').collect();
     let mut lines: Vec<Line> = Vec::new();
     let mut is_first_visual_line = true;
+    let mut paste_counter = 0usize;
 
     for line_str in &all_lines {
-        let visual_segments = wrap_physical_line(line_str, text_area_width);
+        let visual_segments =
+            wrap_physical_line(line_str, text_area_width, &state.paste_data, paste_counter);
 
         for segment in &visual_segments {
-            // Build spans for this segment, splitting by image markers
-            let spans = build_line_spans(segment, text_color);
+            // Build spans for this segment, splitting by image/paste markers.
+            // paste_counter tracks the cumulative paste marker index across
+            // visual segments so that markers on wrapped lines correctly
+            // index into paste_data (not resetting to 0 per segment).
+            let spans =
+                build_line_spans(segment, text_color, &state.paste_data, &mut paste_counter);
 
             // First visual line gets the prompt prefix; continuation lines are indented
             let mut prefix_spans: Vec<Span<'static>> = if is_first_visual_line {
@@ -1404,15 +1742,26 @@ pub fn render(
 
     let p = Paragraph::new(Text::from(lines)).style(Style::new().bg(theme::BG).fg(theme::TEXT));
 
+    // Scroll to keep cursor visible when content exceeds visible area
+    let visible_height = content_area.height;
+    let scroll_offset = state.cursor_scroll_offset(text_area_width, visible_height);
+    let p = p.scroll((scroll_offset, 0));
+
     frame.render_widget(p, content_area);
 
-    // Draw border with inline image indicator
+    // Draw border with inline image/paste indicators
     let image_suffix = if state.image_count() > 0 {
         format!(" {} ", state.image_count())
     } else {
         String::new()
     };
-    draw_border(frame, area, border_color, &image_suffix);
+    let paste_suffix = if !state.paste_data.is_empty() {
+        format!(" 📋{} ", state.paste_data.len())
+    } else {
+        String::new()
+    };
+    let combined_suffix = format!("{}{}", image_suffix, paste_suffix);
+    draw_border(frame, area, border_color, &combined_suffix);
 
     // Draw completion popup if active
     if let Some(ref popup) = state.popup {
@@ -1420,15 +1769,47 @@ pub fn render(
     }
 }
 
-/// Split a line by IMAGE_MARKER chars, returning spans with `[img]` styled inline.
-fn build_line_spans(line: &str, text_color: Color) -> Vec<Span<'static>> {
-    if !line.contains(IMAGE_MARKER) {
+/// Split a line by IMAGE_MARKER and PASTE_MARKER chars, returning styled spans.
+///
+/// `paste_counter` tracks the cumulative paste marker index across all visual
+/// segments of a physical line. It is mutated in place as PASTE_MARKERs are
+/// encountered, ensuring each marker correctly indexes into `paste_data`
+/// regardless of line wrapping.
+fn build_line_spans(
+    line: &str,
+    text_color: Color,
+    paste_data: &[PasteData],
+    paste_counter: &mut usize,
+) -> Vec<Span<'static>> {
+    if !line.contains(IMAGE_MARKER) && !line.contains(PASTE_MARKER) {
         return vec![Span::styled(line.to_string(), Style::new().fg(text_color))];
     }
 
     let mut spans = Vec::new();
     let mut remaining = line;
-    while let Some(pos) = remaining.find(IMAGE_MARKER) {
+
+    while !remaining.is_empty() {
+        // Find the next occurrence of either marker
+        let img_pos = remaining.find(IMAGE_MARKER);
+        let paste_pos = remaining.find(PASTE_MARKER);
+
+        let (pos, marker_type) = match (img_pos, paste_pos) {
+            (Some(ip), Some(pp)) if ip <= pp => (ip, IMAGE_MARKER),
+            (Some(_), Some(pp)) => (pp, PASTE_MARKER),
+            (Some(ip), None) => (ip, IMAGE_MARKER),
+            (None, Some(pp)) => (pp, PASTE_MARKER),
+            (None, None) => {
+                // No more markers; emit remaining text
+                if !remaining.is_empty() {
+                    spans.push(Span::styled(
+                        remaining.to_string(),
+                        Style::new().fg(text_color),
+                    ));
+                }
+                break;
+            }
+        };
+
         // Text before the marker
         if pos > 0 {
             spans.push(Span::styled(
@@ -1436,23 +1817,43 @@ fn build_line_spans(line: &str, text_color: Color) -> Vec<Span<'static>> {
                 Style::new().fg(text_color),
             ));
         }
-        // The marker itself → render as styled "[img]"
-        spans.push(Span::styled(
-            "[img]",
-            Style::new()
-                .fg(theme::ACCENT)
-                .bg(theme::BG)
-                .add_modifier(Modifier::BOLD),
-        ));
-        remaining = &remaining[pos + IMAGE_MARKER.len_utf8()..];
+
+        match marker_type {
+            IMAGE_MARKER => {
+                // Render as styled "[img]"
+                spans.push(Span::styled(
+                    "[img]",
+                    Style::new()
+                        .fg(theme::ACCENT)
+                        .bg(theme::BG)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            PASTE_MARKER => {
+                // Render with paste summary
+                let summary = paste_data
+                    .get(*paste_counter)
+                    .map(|p| p.summary.as_str())
+                    .unwrap_or("pasted content");
+                spans.push(Span::styled(
+                    format!("[{}]", summary),
+                    Style::new()
+                        .fg(theme::WARNING)
+                        .bg(theme::BG)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                *paste_counter += 1;
+            }
+            // Wildcard required for compiler exhaustiveness on `char` type,
+            // though logically unreachable (marker_type is always one of the two).
+            _ => unreachable!(),
+        }
+
+        // Advance past the marker character
+        let marker_len = marker_type.len_utf8();
+        remaining = &remaining[pos + marker_len..];
     }
-    // Trailing text after the last marker
-    if !remaining.is_empty() {
-        spans.push(Span::styled(
-            remaining.to_string(),
-            Style::new().fg(text_color),
-        ));
-    }
+
     spans
 }
 
@@ -2699,6 +3100,352 @@ mod tests {
             input.ghost_text.as_deref(),
             Some("lo world"),
             "ghost text should show after retyping a prefix of history"
+        );
+    }
+
+    // ── Paste collapse / expand tests ───────────────────────────────
+
+    const MANY_LINES: &str = "\
+line1
+line2
+line3
+line4
+line5
+line6";
+
+    #[test]
+    fn test_collapse_paste_multi_line() {
+        // ≥5 newlines → collapsed to single marker
+        let mut input = InputState::with_identity(None);
+        input.insert_str(MANY_LINES);
+        input.collapse_paste();
+
+        assert_eq!(
+            input.text.chars().filter(|&c| c == PASTE_MARKER).count(),
+            1,
+            "should have exactly one paste marker"
+        );
+        assert_eq!(input.paste_data.len(), 1, "one paste_data entry");
+        assert!(
+            input.paste_data[0].summary.contains("6 lines"),
+            "summary should mention 6 lines"
+        );
+        assert!(
+            input.paste_data[0].display_width > 10,
+            "display_width should be computed (was {})",
+            input.paste_data[0].display_width
+        );
+    }
+
+    #[test]
+    fn test_no_collapse_short_paste() {
+        // <5 newlines → no collapse
+        let mut input = InputState::with_identity(None);
+        input.insert_str("hello\nworld\n");
+        input.collapse_paste();
+
+        assert_eq!(
+            input.text.chars().filter(|&c| c == PASTE_MARKER).count(),
+            0,
+            "short paste should not be collapsed"
+        );
+        assert!(input.paste_data.is_empty(), "no paste_data entries");
+    }
+
+    #[test]
+    fn test_collapse_and_expand_roundtrip() {
+        // Full roundtrip: collapse → expand → original content restored
+        let mut input = InputState::with_identity(None);
+        let original = format!("prefix\n{}\nsuffix", MANY_LINES);
+        input.text = original.clone();
+        input.cursor = input.text.len();
+
+        input.collapse_paste();
+        assert_eq!(
+            input.text.chars().filter(|&c| c == PASTE_MARKER).count(),
+            1,
+            "should be collapsed"
+        );
+
+        input.expand_paste_refs();
+        assert_eq!(input.text, original, "expanded text should match original");
+        assert!(input.paste_data.is_empty(), "paste_data should be cleared");
+    }
+
+    #[test]
+    fn test_collapse_paste_sequential_no_nesting() {
+        // Sequential pastes: first collapse, then paste another large block.
+        // The second collapse should expand the existing marker first,
+        // then re-collapse everything into a single marker.
+        let mut input = InputState::with_identity(None);
+
+        // First paste
+        input.insert_str("aaa\nbbb\nccc\nddd\neee\nfff\n");
+        input.collapse_paste();
+        assert_eq!(input.paste_data.len(), 1, "first collapse → 1 entry");
+
+        // Second paste (simulated via direct collapse call like handle_paste does)
+        input.insert_str("ggg\nhhh\niii\njjj\nkkk\nlll\n");
+        input.collapse_paste();
+        // After expansion + re-collapse, should have 1 consolidated entry
+        assert_eq!(
+            input.paste_data.len(),
+            1,
+            "second collapse should consolidate into 1 entry"
+        );
+
+        // Expand and verify ALL content is preserved
+        input.expand_paste_refs();
+        assert!(input.text.contains("aaa"), "round 1 content preserved");
+        assert!(input.text.contains("ggg"), "round 2 content preserved");
+        assert!(input.text.contains("fff"), "round 1 content preserved");
+        assert!(input.text.contains("lll"), "round 2 content preserved");
+        assert!(input.paste_data.is_empty(), "paste_data cleared");
+    }
+
+    #[test]
+    fn test_backspace_paste_marker() {
+        // Backspace removes marker + corresponding paste_data entry
+        let mut input = InputState::with_identity(None);
+        input.text = format!("hello{PASTE_MARKER}world");
+        input.paste_data.push(PasteData {
+            content: "a\nb\nc\nd\ne\nf".into(),
+            summary: "pasted 6 lines: \"a\"".into(),
+            display_width: 30,
+            saved_cursor: 0,
+        });
+        input.cursor = input.text.len();
+
+        // Cursor at end, backspace should delete 'd' past 'world' then the marker
+        // Type: "hello{PASTE_MARKER}worl[d ← deleted][marker ← deleted]"
+        // First backspace to remove 'd'
+        for _ in 0..5 {
+            // delete "world" backwards
+            input.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        }
+        // Cursor should be after the paste marker (which is before "world" in original)
+        assert_eq!(
+            input.text[..input.cursor]
+                .chars()
+                .filter(|&c| c == PASTE_MARKER)
+                .count(),
+            1,
+            "cursor after marker after deleting 'world'"
+        );
+        assert_eq!(input.paste_data.len(), 1, "paste_data entry still present");
+
+        // Backspace removes the marker itself
+        input.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(
+            input.text.chars().filter(|&c| c == PASTE_MARKER).count(),
+            0,
+            "marker removed from text"
+        );
+        assert!(input.paste_data.is_empty(), "paste_data entry removed");
+    }
+
+    #[test]
+    fn test_delete_paste_marker() {
+        // Forward delete removes marker + paste_data entry
+        let mut input = InputState::with_identity(None);
+        input.text = format!("hello{PASTE_MARKER}world");
+        input.paste_data.push(PasteData {
+            content: "a\nb\nc\nd\ne\nf".into(),
+            summary: "pasted 6 lines: \"a\"".into(),
+            display_width: 30,
+            saved_cursor: 0,
+        });
+        input.cursor = 5; // after "hello", before the marker
+
+        // Delete the marker
+        input.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(
+            input.text.chars().filter(|&c| c == PASTE_MARKER).count(),
+            0,
+            "marker removed from text"
+        );
+        assert!(input.paste_data.is_empty(), "paste_data entry removed");
+        assert_eq!(input.text, "helloworld", "text rejoined correctly");
+    }
+
+    #[test]
+    fn test_multiple_paste_markers_expand_in_order() {
+        // Multiple markers coexist and expand in order
+        let mut input = InputState::with_identity(None);
+        input.text = format!("start{PASTE_MARKER}middle{PASTE_MARKER}end");
+        input.paste_data = vec![
+            PasteData {
+                content: "[PASTE_ONE]".into(),
+                summary: "pasted 1 line: \"[PASTE_ONE]\"".into(),
+                display_width: 30,
+                saved_cursor: 0,
+            },
+            PasteData {
+                content: "[PASTE_TWO]".into(),
+                summary: "pasted 1 line: \"[PASTE_TWO]\"".into(),
+                display_width: 30,
+                saved_cursor: 0,
+            },
+        ];
+        input.cursor = input.text.len();
+
+        input.expand_paste_refs();
+        assert_eq!(input.text, "start[PASTE_ONE]middle[PASTE_TWO]end");
+        assert!(input.paste_data.is_empty());
+    }
+
+    #[test]
+    fn test_paste_marker_with_image_marker() {
+        // Paste and image markers coexist
+        let mut input = InputState::with_identity(None);
+        input.text = format!("text{PASTE_MARKER}more{IMAGE_MARKER}end");
+        input.paste_data.push(PasteData {
+            content: "a\nb\nc\nd\ne\nf".into(),
+            summary: "pasted 6 lines: \"a\"".into(),
+            display_width: 30,
+            saved_cursor: 0,
+        });
+        input.images.push(("image/png".into(), "base64data".into()));
+
+        // extract_images should expand paste refs and strip both markers
+        let (images, cleaned) = input.extract_images();
+        assert_eq!(
+            cleaned, "texta\nb\nc\nd\ne\nfmoreend",
+            "both markers stripped, paste expanded"
+        );
+        assert_eq!(images.len(), 1, "image preserved");
+        assert!(input.paste_data.is_empty(), "paste_data cleared");
+    }
+
+    #[test]
+    fn test_expand_and_extract_text() {
+        // The expand_and_extract_text helper used by non-image modes
+        let mut input = InputState::with_identity(None);
+        input.text = format!("{PASTE_MARKER} trailing ");
+        input.paste_data.push(PasteData {
+            content: "hello\nworld\nfoo\nbar\nbaz\nqux".into(),
+            summary: "pasted 6 lines: \"hello\"".into(),
+            display_width: 30,
+            saved_cursor: 0,
+        });
+
+        let text = input.expand_and_extract_text();
+        assert_eq!(
+            text, "hello\nworld\nfoo\nbar\nbaz\nqux trailing",
+            "expanded and trimmed"
+        );
+        assert!(input.paste_data.is_empty(), "paste_data cleared");
+    }
+
+    #[test]
+    fn test_delete_word_backwards_with_paste_marker() {
+        // Ctrl+W removes correct paste_data entry when a marker is in the deleted word
+        let mut input = InputState::with_identity(None);
+        input.text = format!("aaa bbb{PASTE_MARKER}ccc ddd");
+        input.paste_data = vec![PasteData {
+            content: "x\nx\nx\nx\nx\nx".into(),
+            summary: "pasted 6 lines: \"x\"".into(),
+            display_width: 30,
+            saved_cursor: 0,
+        }];
+        // Cursor after "ddd", Ctrl+W should delete "ddd" but not the marker
+        input.cursor = input.text.len();
+        input.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(
+            input.text.chars().filter(|&c| c == PASTE_MARKER).count(),
+            1,
+            "marker should remain"
+        );
+        assert_eq!(input.paste_data.len(), 1, "paste_data should remain");
+
+        // Now cursor is after the marker + "ccc". Ctrl+W to delete the marker word
+        input.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(
+            input.text.chars().filter(|&c| c == PASTE_MARKER).count(),
+            0,
+            "marker should be deleted"
+        );
+        assert!(
+            input.paste_data.is_empty(),
+            "paste_data entry should be removed"
+        );
+    }
+
+    #[test]
+    fn test_downwards_marker_nesting_safety() {
+        // Regression: expanding paste refs when no paste_data exists is a no-op
+        let mut input = InputState::with_identity(None);
+        input.text = "hello world".into();
+        input.expand_paste_refs(); // should not panic or change anything
+        assert_eq!(input.text, "hello world");
+    }
+
+    #[test]
+    fn test_sequential_paste_via_handle_paste_then_submit() {
+        // Simulate the real handle_paste flow: paste → collapse → paste → collapse → submit
+        let mut input = InputState::with_identity(None);
+
+        // First paste — a 6-line block
+        let paste1 = "111\n222\n333\n444\n555\n666\n";
+        input.pending_paste_snippet = Some(
+            paste1
+                .split('\n')
+                .next()
+                .unwrap()
+                .chars()
+                .take(30)
+                .collect(),
+        );
+        input.pending_paste_text_len = Some(paste1.len());
+        input.insert_str(paste1);
+        input.collapse_paste();
+
+        // Second paste — a different 6-line block
+        let paste2 = "AAA\nBBB\nCCC\nDDD\nEEE\nFFF\n";
+        input.pending_paste_snippet = Some(
+            paste2
+                .split('\n')
+                .next()
+                .unwrap()
+                .chars()
+                .take(30)
+                .collect(),
+        );
+        input.pending_paste_text_len = Some(paste2.len());
+        input.insert_str(paste2);
+        input.collapse_paste();
+
+        // Verify two markers and two separate summaries
+        assert_eq!(
+            input.text.chars().filter(|&c| c == PASTE_MARKER).count(),
+            2,
+            "should have two paste markers"
+        );
+        assert_eq!(input.paste_data.len(), 2, "two paste_data entries");
+        assert!(
+            input.paste_data[0].summary.contains("111"),
+            "first summary mentions '111'"
+        );
+        assert!(
+            input.paste_data[1].summary.contains("AAA"),
+            "second summary mentions 'AAA'"
+        );
+
+        // Now submit (simulate extract_images / expand_and_extract_text)
+        input.expand_paste_refs();
+
+        // Check: NO duplication — each content appears exactly once
+        let count_111 = input.text.matches("111").count();
+        let count_AAA = input.text.matches("AAA").count();
+        assert_eq!(count_111, 1, "'111' should appear exactly once");
+        assert_eq!(count_AAA, 1, "'AAA' should appear exactly once");
+
+        // Check total length matches sum of both pastes (no extra/missing bytes)
+        let expected_len = paste1.len() + paste2.len();
+        assert_eq!(
+            input.text.len(),
+            expected_len,
+            "total length should match sum of pasted content"
         );
     }
 }
