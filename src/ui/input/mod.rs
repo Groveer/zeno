@@ -1441,16 +1441,11 @@ impl InputState {
         self.sync_paste_data();
 
         // Replace each PASTE_MARKER with its corresponding content, in order.
-        // We process left-to-right so positions stay valid for later markers.
-        let mut byte_offset: isize = 0;
+        // We process left-to-right, advancing the search start past each
+        // replacement so it always lands on a valid char boundary.
         let paste_count = self.paste_data.len();
+        let mut search_from: usize = 0;
         for i in 0..paste_count {
-            // Find the i-th PASTE_MARKER in the (potentially shifted) text
-            let search_from = if byte_offset >= 0 {
-                byte_offset as usize
-            } else {
-                0
-            };
             let search_in = &self.text[search_from..];
             if let Some(rel_pos) = search_in.find(PASTE_MARKER) {
                 let abs_pos = search_from + rel_pos;
@@ -1458,9 +1453,9 @@ impl InputState {
                 let old_len = PASTE_MARKER.len_utf8();
                 self.text
                     .replace_range(abs_pos..abs_pos + old_len, &content);
-                // Adjust byte offset for subsequent searches
-                let content_len = content.len();
-                byte_offset += content_len as isize - old_len as isize;
+                // Next search starts at the end of the content just inserted,
+                // which is guaranteed to be a valid char boundary.
+                search_from = abs_pos + content.len();
                 // Restore cursor: combine saved position within paste content with
                 // any offset the user typed after the marker since collapse.
                 if self.cursor > abs_pos {
