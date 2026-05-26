@@ -251,8 +251,19 @@ impl Tool for BashTool {
         // commands (rm -rf, dd, mkfs.*, etc.) before they reach the sandbox.
         if command_safety::is_dangerous_command(cmd) {
             tracing::warn!(command = %cmd, "Blocked potentially destructive command");
+            // Truncate the command in the user-facing error to avoid overwhelming
+            // output from multiline / heredoc commands.
+            const MAX_CMD_DISPLAY: usize = 200;
+            let display_cmd = if cmd.len() > MAX_CMD_DISPLAY {
+                let cut = cmd.floor_char_boundary(MAX_CMD_DISPLAY);
+                let mut s = cmd[..cut].to_string();
+                s.push_str("...");
+                s
+            } else {
+                cmd.to_string()
+            };
             return Err(ToolError::InvalidArguments(format!(
-                "command detected as potentially destructive and was blocked: {cmd}"
+                "command detected as potentially destructive and was blocked: {display_cmd}"
             )));
         }
 
