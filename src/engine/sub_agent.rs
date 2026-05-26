@@ -1,10 +1,10 @@
 //! Sub-agent engine for delegated tasks.
 //!
-//! Spawns a child agent with isolated conversation context, restricted toolset,
+//! Spawns a child agent with isolated conversation context, full tool access,
 //! and its own API client. Each sub-agent gets:
 //! - A fresh conversation (no parent history)
 //! - Its own API client (from the parent's client_factory)
-//! - A restricted toolset (configurable)
+//! - Full tool access (only `delegate_task` is blocked to prevent recursion)
 //! - A focused system prompt built from the delegated goal + context
 //!
 //! The parent's context only sees the delegation call and the summary result,
@@ -39,18 +39,13 @@ use crate::tools::base::{SubAgentDeps, ToolContext};
 // SUBAGENT_MAX_AUTO_CONTINUE is now configurable via delegation_config.max_auto_continue.
 
 /// Built-in tools that sub-agents must never have access to.
+///
+/// Only `delegate_task` is blocked to prevent recursive delegation (infinite loops).
+/// All other tools — including `ask_user`, `memory`, and `skill_manage` — are
+/// available to sub-agents since they can now prompt the user for confirmation.
 const BUILTIN_SUBAGENT_BLOCKED_TOOLS: &[&str] = &[
     "delegate_task", // No recursive delegation
-    "ask_user",      // No user interaction from sub-agents
-    "memory",        // No writes to shared memory
-    "skill_manage",  // No modification to skill system
 ];
-
-/// Built-in default tools available to sub-agents.
-/// `bash` is included because sub-agents now have permission checking
-/// (via `check_sub_agent_permission`) — dangerous commands require user confirmation.
-const BUILTIN_SUBAGENT_TOOLS: &[&str] =
-    &["read", "glob", "grep", "web_search", "web_fetch", "bash"];
 
 // ---------------------------------------------------------------------------
 // Types
@@ -102,7 +97,6 @@ pub enum SubAgentEvent {
     Started {
         task_index: usize,
         goal: String,
-        tools: Vec<String>,
     },
     Thinking {
         task_index: usize,
@@ -150,19 +144,12 @@ pub async fn run_delegated_task(
     task_id: &str,
     goal: String,
     context: Option<String>,
-    extra_tools: Vec<String>,
     cancel: CancellationToken,
     progress_tx: tokio::sync::mpsc::UnboundedSender<SubAgentEvent>,
 ) -> SubAgentResult {
-    let allowed_tools = build_effective_tools(
-        &extra_tools,
-        &deps.delegation_config.default_tools,
-        &deps.delegation_config.blocked_tools,
-    );
     let _ = progress_tx.send(SubAgentEvent::Started {
         task_index: 0,
         goal: goal.clone(),
-        tools: allowed_tools.clone(),
     });
     let result = run_single_sub_agent(
         deps,
@@ -171,7 +158,6 @@ pub async fn run_delegated_task(
         task_id,
         &goal,
         context.as_deref(),
-        &allowed_tools,
         &cancel,
         &progress_tx,
     )
@@ -192,7 +178,6 @@ pub async fn run_delegated_tasks_batch(
     cwd: PathBuf,
     child_ids: Vec<String>,
     tasks: Vec<(String, Option<String>)>, // (goal, context) pairs
-    extra_tools: Vec<String>,
     max_concurrent: usize,
     cancel: CancellationToken,
     progress_tx: tokio::sync::mpsc::UnboundedSender<SubAgentEvent>,
@@ -202,11 +187,6 @@ pub async fn run_delegated_tasks_batch(
         return vec![];
     }
 
-    let allowed_tools = build_effective_tools(
-        &extra_tools,
-        &deps.delegation_config.default_tools,
-        &deps.delegation_config.blocked_tools,
-    );
     let max_concurrent = max_concurrent.max(1);
 
     // Use a semaphore to limit concurrency
@@ -229,7 +209,6 @@ pub async fn run_delegated_tasks_batch(
         let permit = semaphore.clone().acquire_owned().await;
         let deps = deps.clone();
         let cwd = cwd.clone();
-        let allowed_tools = allowed_tools.clone();
         let pt = progress_tx.clone();
         let bc = batch_cancel.clone();
         let child_id = child_ids[i].clone();
@@ -240,7 +219,6 @@ pub async fn run_delegated_tasks_batch(
             let _ = pt.send(SubAgentEvent::Started {
                 task_index: i,
                 goal: goal.clone(),
-                tools: allowed_tools.clone(),
             });
 
             let result = run_single_sub_agent(
@@ -250,7 +228,6 @@ pub async fn run_delegated_tasks_batch(
                 &child_id,
                 &goal,
                 context.as_deref(),
-                &allowed_tools,
                 &bc,
                 &pt,
             )
@@ -311,39 +288,6 @@ pub async fn run_delegated_tasks_batch(
     results
 }
 
-/// Build the effective tool list for sub-agents: defaults + extras - blocked.
-/// If the user configured `default_tools` or `blocked_tools` in DelegationConfig,
-/// those override the built-in defaults.
-pub fn build_effective_tools(
-    extra_tools: &[String],
-    config_default_tools: &[String],
-    config_blocked_tools: &[String],
-) -> Vec<String> {
-    // Use user-configured defaults if provided, otherwise built-in
-    let mut tools: Vec<String> = if config_default_tools.is_empty() {
-        BUILTIN_SUBAGENT_TOOLS
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
-    } else {
-        config_default_tools.to_vec()
-    };
-
-    let blocked: Vec<&str> = BUILTIN_SUBAGENT_BLOCKED_TOOLS
-        .iter()
-        .copied()
-        .chain(config_blocked_tools.iter().map(|s| s.as_str()))
-        .collect();
-
-    for tool in extra_tools {
-        if !blocked.contains(&tool.as_str()) && !tools.contains(tool) {
-            tools.push(tool.clone());
-        }
-    }
-
-    tools
-}
-
 // ---------------------------------------------------------------------------
 // Internal
 // ---------------------------------------------------------------------------
@@ -367,25 +311,24 @@ async fn run_single_sub_agent(
     task_id: &str,
     goal: &str,
     context: Option<&str>,
-    allowed_tools: &[String],
     cancel: &CancellationToken,
     progress_tx: &tokio::sync::mpsc::UnboundedSender<SubAgentEvent>,
 ) -> SubAgentResult {
     let start = std::time::Instant::now();
 
     // Build sub-agent system prompt
-    let system_prompt = build_subagent_system_prompt(goal, context, allowed_tools);
+    let system_prompt = build_subagent_system_prompt(goal, context);
 
     // Create a fresh conversation history
     let mut history = ConversationHistory::new();
     history.push_user(goal);
 
-    // Build tool context (no ask_user channel for sub-agents)
+    // Build tool context — wire ask_sender so sub-agents can use ask_user.
     // Pass sub_agent_deps through so skill_manage can read write_origin provenance.
     let ctx = ToolContext {
         cwd: Arc::new(std::sync::RwLock::new(cwd)),
         task_id: task_id.to_string(),
-        ask_sender: None,
+        ask_sender: deps.tui_event_sender.clone(),
         mcp_manager: None,
         sub_agent_deps: Some(deps.clone()),
         cancel_token: None,
@@ -413,7 +356,9 @@ async fn run_single_sub_agent(
         }
     };
 
-    let tool_schemas = deps.tool_registry.schemas_for(allowed_tools);
+    let tool_schemas = deps
+        .tool_registry
+        .schemas_except(BUILTIN_SUBAGENT_BLOCKED_TOOLS);
 
     let mut turn = 0u32;
     let mut auto_continue_count = 0u32;
@@ -669,15 +614,11 @@ async fn run_single_sub_agent(
                 };
             }
 
-            // Check if tool is allowed
-            if !allowed_tools.contains(&tu.name) {
+            // Safety check: block tools that sub-agents must never use (e.g. recursive delegation)
+            if BUILTIN_SUBAGENT_BLOCKED_TOOLS.contains(&tu.name.as_str()) {
                 tool_results.push(ContentBlock::ToolResult {
                     tool_use_id: tu.id.clone(),
-                    content: format!(
-                        "Tool '{}' is not available to sub-agents. Allowed tools: {}",
-                        tu.name,
-                        allowed_tools.join(", ")
-                    ),
+                    content: format!("Tool '{}' is blocked for sub-agents.", tu.name,),
                     is_error: Some(true),
                 });
                 tool_trace.push(ToolTraceEntry {
@@ -829,11 +770,7 @@ async fn run_single_sub_agent(
 // ---------------------------------------------------------------------------
 
 /// Build a focused system prompt for a sub-agent.
-fn build_subagent_system_prompt(
-    goal: &str,
-    context: Option<&str>,
-    allowed_tools: &[String],
-) -> String {
+fn build_subagent_system_prompt(goal: &str, context: Option<&str>) -> String {
     let mut parts = vec![
         "You are a focused sub-agent working on a specific delegated task.".into(),
         String::new(),
@@ -844,14 +781,6 @@ fn build_subagent_system_prompt(
         && !ctx.trim().is_empty()
     {
         parts.push(format!("\nCONTEXT:\n{}", ctx));
-    }
-
-    // List available tools so the LLM knows what it can use
-    if !allowed_tools.is_empty() {
-        parts.push(format!(
-            "\n## Available Tools\n\n{}",
-            allowed_tools.join(", ")
-        ));
     }
 
     parts.push(

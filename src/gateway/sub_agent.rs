@@ -21,23 +21,9 @@ impl Gateway {
     /// is translated into one or more UI commands for display in the output panel.
     pub fn handle_sub_agent_event(&self, event: SubAgentEvent) -> Vec<UiCommand> {
         match event {
-            SubAgentEvent::Started {
-                task_index,
-                goal,
-                tools,
-            } => {
-                let tools_str = if tools.is_empty() {
-                    String::new()
-                } else {
-                    format!(" [tools: {}]", tools.join(", "))
-                };
+            SubAgentEvent::Started { task_index, goal } => {
                 vec![UiCommand::SubAgentStarted {
-                    summary: format!(
-                        "sub-agent #{}: {}{}",
-                        task_index,
-                        truncate(&goal, 60),
-                        tools_str,
-                    ),
+                    summary: format!("sub-agent #{}: {}", task_index, truncate(&goal, 60),),
                 }]
             }
             SubAgentEvent::Thinking { task_index, text } => {

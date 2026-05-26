@@ -540,12 +540,13 @@ impl ToolRegistry {
         result
     }
 
-    /// Get schemas only for the specified tool names.
-    /// Used by sub-agents so they only see their allowed tools.
-    pub fn schemas_for(&self, names: &[String]) -> Vec<Value> {
-        names
-            .iter()
-            .filter_map(|n| self.tools.get(n.as_str()))
+    /// Get schemas for all visible tools except those in `blocked`.
+    /// Used by sub-agents which now have access to all tools except a small blocklist.
+    pub fn schemas_except(&self, blocked: &[&str]) -> Vec<Value> {
+        self.tools
+            .values()
+            .filter(|t| t.exposure().is_visible_to_model())
+            .filter(|t| !blocked.contains(&t.definition().name.as_str()))
             .map(|t| t.definition().to_function_schema())
             .collect()
     }

@@ -247,17 +247,6 @@ When done, write a summary of what was consolidated."#,
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
-        // Intentionally no "bash" — background tasks should never execute
-        // arbitrary commands. See hermes-agent _bg_review_auto_deny pattern.
-        let extra_tools = vec![
-            "skill_view".to_string(),
-            "skill_list".to_string(),
-            "skill_manage".to_string(),
-            "read".to_string(),
-            "grep".to_string(),
-            "glob".to_string(),
-        ];
-
         let cancel = if let Some(ref pc) = parent_cancel {
             let child = tokio_util::sync::CancellationToken::new();
             let child_link = child.clone();
@@ -272,14 +261,7 @@ When done, write a summary of what was consolidated."#,
         };
 
         let result = crate::engine::sub_agent::run_delegated_task(
-            &deps,
-            cwd,
-            "curator",
-            goal,
-            None,
-            extra_tools,
-            cancel,
-            tx,
+            &deps, cwd, "curator", goal, None, cancel, tx,
         )
         .await;
 

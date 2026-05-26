@@ -377,8 +377,6 @@ zn.compact_threshold(0.5)
 --   max_concurrent_children = 3,   -- max parallel sub-agents
 --   max_turns = 30,                -- max tool-calling turns per sub-agent
 --   max_auto_continue = 2,         -- auto-continue retries for empty responses
---   blocked_tools = {},            -- additional tools to block (added to built-in block list)
---   default_tools = {},            -- override default sub-agent tools (replaces built-in set)
 -- })
 
 -- ═══════════════════════════════════════════════

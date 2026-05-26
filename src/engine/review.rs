@@ -80,16 +80,6 @@ pub fn spawn_background_review(
         // Build a progress channel (dropped — we don't display background progress)
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
-        // Allow skill_view, skill_list, skill_manage, read, grep, glob
-        let extra_tools = vec![
-            "skill_view".to_string(),
-            "skill_list".to_string(),
-            "skill_manage".to_string(),
-            "read".to_string(),
-            "grep".to_string(),
-            "glob".to_string(),
-        ];
-
         let cancel = if let Some(ref pc) = parent_cancel {
             let child = CancellationToken::new();
             let child_link = child.clone();
@@ -107,7 +97,7 @@ pub fn spawn_background_review(
         let result = if let Some(ref pc) = parent_cancel {
             tokio::select! {
                 result = run_delegated_task(
-                    &deps, cwd, "skill_review", goal, None, extra_tools, cancel, tx,
+                    &deps, cwd, "skill_review", goal, None, cancel, tx,
                 ) => Some(result),
                 _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
                     tracing::warn!("Background skill review timed out after 300s");
@@ -121,7 +111,7 @@ pub fn spawn_background_review(
         } else {
             tokio::select! {
                 result = run_delegated_task(
-                    &deps, cwd, "skill_review", goal, None, extra_tools, cancel, tx,
+                    &deps, cwd, "skill_review", goal, None, cancel, tx,
                 ) => Some(result),
                 _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
                     tracing::warn!("Background skill review timed out after 300s");

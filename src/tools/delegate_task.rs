@@ -2,7 +2,7 @@
 //!
 //! Allows the LLM to decompose complex tasks into independent subtasks
 //! that run via sub-agents. Each sub-agent gets a fresh conversation,
-//! its own API client, and a restricted toolset.
+//! its own API client, and full tool access (only `delegate_task` is blocked).
 //!
 //! Reference: hermes-agent `tools/delegate_tool.py`
 
@@ -172,14 +172,14 @@ impl Tool for DelegateTaskTool {
             "function": {
                 "name": "delegate_task",
                 "description": "Spawn a sub-agent to handle a delegated task independently. \
-                    The sub-agent gets a fresh context and a restricted set of tools. \
+                    The sub-agent gets a fresh context and full tool access. \
                     Use this ONLY when you have MULTIPLE independent subtasks that can run \
                     in parallel (batch mode with 'tasks' array).\n\n\
                     DO NOT use for single tool calls — call tools like web_search, web_fetch, \
                     read, grep, bash directly instead. Delegating a single tool call wastes \
                     tokens and loses the original result.\n\n\
                     Two modes:\n\
-                    - Single task: provide 'goal' (+ optional 'context', 'tools')\n\
+                    - Single task: provide 'goal' (+ optional 'context')\n\
                     - Batch: provide 'tasks' array for parallel execution\n\n\
                     Each result includes 'summary' (the sub-agent's final report), 'api_calls', \
                     'exit_reason', and 'tool_trace'.",
@@ -211,15 +211,6 @@ impl Tool for DelegateTaskTool {
                                 },
                                 "required": ["goal"]
                             }
-                        },
-                        "tools": {
-                            "type": "array",
-                            "description": "Additional tools beyond the defaults (read, glob, grep, web_search, web_fetch, bash) that the sub-agent may use. \
-                                Allowed: write, edit. Blocked: delegate_task, ask_user, memory, skill_manage.",
-                            "items": {
-                                "type": "string",
-                                "enum": ["write", "edit"]
-                            }
                         }
                     },
                     "anyOf": [
@@ -241,16 +232,6 @@ impl Tool for DelegateTaskTool {
                 "Sub-agent dependencies not available. The engine must be configured.".to_string(),
             )
         })?;
-
-        let extra_tools: Vec<String> = arguments
-            .get("tools")
-            .and_then(|t| t.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
 
         // Link to parent's cancellation token so Ctrl+C propagates to sub-agents
         let parent_cancel = ctx.cancel_token.clone();
@@ -317,7 +298,6 @@ impl Tool for DelegateTaskTool {
                 ctx.get_cwd(),
                 child_ids,
                 task_pairs,
-                extra_tools,
                 max_concurrent,
                 parent_cancel.unwrap_or_default(),
                 progress_tx,
@@ -377,7 +357,6 @@ impl Tool for DelegateTaskTool {
             &child_id,
             goal.to_string(),
             context,
-            extra_tools,
             child_cancel,
             deps.progress_tx.clone(),
         )

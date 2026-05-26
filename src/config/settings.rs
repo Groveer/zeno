@@ -753,12 +753,6 @@ pub struct DelegationConfig {
     pub max_turns: u32,
     /// Max auto-continuations for sub-agent.
     pub max_auto_continue: u32,
-    /// Tools that sub-agents must never have access to.
-    #[serde(default)]
-    pub blocked_tools: Vec<String>,
-    /// Default tools available to sub-agents.
-    #[serde(default)]
-    pub default_tools: Vec<String>,
 }
 
 impl Default for DelegationConfig {
@@ -767,8 +761,6 @@ impl Default for DelegationConfig {
             max_concurrent_children: 3,
             max_turns: 30,
             max_auto_continue: 2,
-            blocked_tools: Vec::new(),
-            default_tools: Vec::new(),
         }
     }
 }
