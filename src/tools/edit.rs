@@ -1,23 +1,22 @@
 //! Edit tool — find-and-replace within a file.
 //!
-//! Implements a 9-strategy fuzzy matching chain (inspired by Hermes Agent)
-//! to handle common LLM errors when generating old_string:
+//! Implements a multi-strategy fuzzy matching chain to handle common LLM errors
+//! when generating old_string. Inspired by codex's seek_sequence approach.
 //!
 //! Strategy chain (tried in order):
 //! 1. Exact match
-//! 2. Strip line-number prefixes (from read output)
-//! 3. Normalize trailing whitespace
-//! 4. Indentation shift (±8 spaces)
-//! 5. Tab ↔ space normalization
-//! 6. Whitespace collapse (multiple spaces → single space)
+//! 2. Trailing-newline normalization
+//! 3. Strip line-number prefixes (from read output)
+//! 4. Line-sequence match (progressive per-line: exact → rstrip → trim → unicode)
+//! 5. Whitespace collapse (multiple spaces → single space, with position mapping)
+//! 6. Unicode normalization (fancy quotes/dashes/spaces → ASCII)
 //! 7. Escape sequence normalization (\\n literal → real newline)
-//! 8. Trimmed boundary (trim first/last line only)
-//! 9. Block anchor (first+last line exact, middle similarity)
+//! 8. Block anchor (first+last line exact trimmed, middle word-similarity)
 //!
 //! Safety features:
 //! - Escape-drift detection: prevents `\'` serialization artifacts from corrupting files
 //! - Post-write verification: re-reads file to confirm write succeeded
-//! - Did-you-mean hints: SequenceMatcher-based closest match suggestions
+//! - Did-you-mean hints: word-similarity based closest match suggestions
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -208,12 +207,12 @@ impl Tool for EditTool {
 }
 
 // ===========================================================================
-// Core: fuzzy_find_and_replace — the 9-strategy chain
+// Core: fuzzy_find_and_replace — the 10-strategy chain
 // ===========================================================================
 
 /// Result of the fuzzy matching chain.
 /// On success: (new_content, match_count, strategy_name, None)
-/// On failure: (original_content, 0, None, error_message)
+/// On failure: (original_content, 0, "none", error_message)
 pub(crate) type FuzzyResult = (String, usize, &'static str, Option<String>);
 
 pub(crate) fn fuzzy_find_and_replace(
@@ -223,65 +222,65 @@ pub(crate) fn fuzzy_find_and_replace(
     replace_all: bool,
 ) -> Result<FuzzyResult, ToolError> {
     // Strategy 1: Exact match
-    if let Some(result) = try_exact_replace(content, old_string, new_string, replace_all)? {
-        return Ok((result.new_content, result.count, "exact", None));
+    if let Some((new_content, count)) =
+        try_exact_replace(content, old_string, new_string, replace_all)?
+    {
+        return Ok((new_content, count, "exact", None));
+    }
+
+    // Pre-normalize: trailing newline mismatch (e.g., LLM adds \n but file lacks it at EOF)
+    // Only handles the case where old_string has \n but content doesn't (common LLM error).
+    if old_string.ends_with('\n') && !content.ends_with('\n') {
+        let adj_old = &old_string[..old_string.len() - 1];
+        let adj_new = new_string.strip_suffix('\n').unwrap_or(new_string);
+        if let Some((new_content, count)) =
+            try_exact_replace(content, adj_old, adj_new, replace_all)?
+        {
+            return Ok((new_content, count, "trailing-newline-norm", None));
+        }
     }
 
     // Strategy 2: Strip line-number prefixes
     if let Some(cleaned) = strip_line_number_prefixes(old_string)
-        && let Some(result) = try_exact_replace(content, &cleaned, new_string, replace_all)?
+        && let Some((new_content, count)) =
+            try_exact_replace(content, &cleaned, new_string, replace_all)?
     {
-        return Ok((result.new_content, result.count, "strip-line-numbers", None));
+        return Ok((new_content, count, "strip-line-numbers", None));
     }
 
-    // Strategy 3: Normalize trailing whitespace
+    // Strategy 3: Line-sequence match (codex-style progressive per-line matching)
+    // Handles: trailing whitespace, indentation shifts (±any amount), tab↔space,
+    // trimmed boundaries, and Unicode typography — all in one clean pass.
+    // Only activates for multi-line old_string (single-line handled by other strategies).
     {
-        let norm_old = normalize_trailing_whitespace(old_string);
-        let norm_content = normalize_trailing_whitespace(content);
-        if (norm_old != old_string || norm_content != content)
-            && let Some(result) =
-                try_exact_replace(&norm_content, &norm_old, new_string, replace_all)?
-        {
-            // Map back: line structure is identical, so we can find
-            // the norm_old in content via try_apply_on_original.
-            if let Some(result2) = try_apply_on_original(
-                content,
-                &norm_old,
-                new_string,
-                replace_all,
-                "strip-trailing-ws",
-            )? {
-                return Ok((
-                    result2.new_content,
-                    result2.count,
-                    "strip-trailing-ws",
-                    None,
-                ));
+        let old_lines: Vec<&str> = old_string.lines().collect();
+        if old_lines.len() >= 2 {
+            let content_lines: Vec<&str> = content.lines().collect();
+            if let Some(matches) =
+                find_line_sequence_matches(&content_lines, &old_lines, replace_all)
+            {
+                let count = matches.len();
+                let new_c =
+                    apply_line_matches(content, &content_lines, &matches, new_string, old_string);
+                return Ok((new_c, count, "line-sequence", None));
             }
-            // Fallback: use normalized content result
-            return Ok((result.new_content, result.count, "strip-trailing-ws", None));
         }
     }
 
-    // Strategy 4: Indentation shift (±8 spaces)
-    if let Some(result) = try_indent_fuzzy(content, old_string, new_string, replace_all)? {
-        return Ok((result.new_content, result.count, result.method, None));
-    }
-
-    // Strategy 5: Tab ↔ space normalization
-    if let Some(result) = try_tab_space_normalize(content, old_string, new_string, replace_all)? {
-        return Ok((result.new_content, result.count, result.method, None));
-    }
-
-    // Strategy 6: Whitespace collapse (multiple spaces/tabs → single space)
+    // Strategy 4: Whitespace collapse (multiple spaces/tabs → single space)
+    // Uses position mapping to apply at original content positions.
     {
         let norm_old = collapse_whitespace(old_string);
         let norm_content = collapse_whitespace(content);
         if norm_old != old_string || norm_content != content {
             let norm_matches = find_all_exact(&norm_content, &norm_old);
             if !norm_matches.is_empty() {
+                // Escape-drift check on normalized content positions.
+                // This is correct because collapse_whitespace preserves relative
+                // positions of non-whitespace chars — \' sequences are at the
+                // same logical positions in both norm_content and content.
                 if let Some(err) = check_escape_drift(
-                    content,
+                    &norm_content,
                     &norm_matches,
                     old_string,
                     new_string,
@@ -300,64 +299,64 @@ pub(crate) fn fuzzy_find_and_replace(
                         )),
                     ));
                 }
-                // Try to map back to original positions
-                if let Some(result) = map_normalized_to_original(
+                if let Some((new_content, count)) = map_normalized_to_original(
                     content,
                     &norm_content,
                     &norm_matches,
                     new_string,
                     replace_all,
-                    "whitespace-normalized",
+                    /*expand_trailing_ws*/ true,
                 )? {
-                    return Ok((
-                        result.new_content,
-                        result.count,
-                        "whitespace-normalized",
-                        None,
-                    ));
+                    return Ok((new_content, count, "whitespace-normalized", None));
                 }
-                // Fallback: apply on normalized content directly
-                let new_c = apply_byte_matches(&norm_content, &norm_matches, new_string);
-                return Ok((new_c, norm_matches.len(), "whitespace-normalized", None));
             }
         }
     }
 
-    // Strategy 7: Escape sequence normalization (\\n → real newline, etc.)
+    // Strategy 5: Unicode normalization (fancy quotes/dashes/spaces → ASCII)
     {
-        let unescaped = unescape_common(old_string);
-        if unescaped != old_string
-            && let Some(result) = try_exact_replace(content, &unescaped, new_string, replace_all)?
-        {
-            return Ok((result.new_content, result.count, "escape-normalized", None));
-        }
-    }
-
-    // Strategy 8: Trimmed boundary (trim first/last lines only)
-    {
-        let old_lines: Vec<&str> = old_string.lines().collect();
-        if old_lines.len() >= 2 {
-            let content_lines: Vec<&str> = content.lines().collect();
-            if let Some(matches) = find_trimmed_boundary_matches(&content_lines, &old_lines) {
-                if !replace_all && matches.len() > 1 {
+        let norm_old = normalise_unicode(old_string);
+        let norm_content = normalise_unicode(content);
+        if norm_old != old_string || norm_content != content {
+            let norm_matches = find_all_exact(&norm_content, &norm_old);
+            if !norm_matches.is_empty() {
+                if !replace_all && norm_matches.len() > 1 {
                     return Ok((
                         content.to_string(),
                         0,
-                        "trimmed-boundary",
+                        "unicode-normalized",
                         Some(format!(
-                            "Found {} matches (trimmed-boundary). Provide more context or use replace_all=True.",
-                            matches.len()
+                            "Found {} matches for old_string (unicode-normalized). Provide more context or use replace_all=True.",
+                            norm_matches.len()
                         )),
                     ));
                 }
-                let new_c =
-                    apply_line_matches(content, &content_lines, &matches, new_string, old_string);
-                return Ok((new_c, matches.len(), "trimmed-boundary", None));
+                if let Some((new_content, count)) = map_normalized_to_original(
+                    content,
+                    &norm_content,
+                    &norm_matches,
+                    new_string,
+                    replace_all,
+                    /*expand_trailing_ws*/ false,
+                )? {
+                    return Ok((new_content, count, "unicode-normalized", None));
+                }
             }
         }
     }
 
-    // Strategy 9: Block anchor (first+last line exact, middle similarity)
+    // Strategy 6: Escape sequence normalization (\\n → real newline, etc.)
+    {
+        let unescaped = unescape_common(old_string);
+        if unescaped != old_string
+            && let Some((new_content, count)) =
+                try_exact_replace(content, &unescaped, new_string, replace_all)?
+        {
+            return Ok((new_content, count, "escape-normalized", None));
+        }
+    }
+
+    // Strategy 7: Block anchor (first+last line exact trimmed, middle similarity)
     {
         let old_lines: Vec<&str> = old_string.lines().collect();
         if old_lines.len() >= 3 {
@@ -384,29 +383,19 @@ pub(crate) fn fuzzy_find_and_replace(
 // Exact matching
 // ===========================================================================
 
-struct ReplaceResult {
-    new_content: String,
-    count: usize,
-    method: &'static str,
-}
-
 fn try_exact_replace(
     content: &str,
     old_string: &str,
     new_string: &str,
     replace_all: bool,
-) -> Result<Option<ReplaceResult>, ToolError> {
+) -> Result<Option<(String, usize)>, ToolError> {
     if replace_all {
         let matches = content.matches(old_string).count();
         if matches == 0 {
             return Ok(None);
         }
         let new_content = content.replace(old_string, new_string);
-        Ok(Some(ReplaceResult {
-            new_content,
-            count: matches,
-            method: "exact",
-        }))
+        Ok(Some((new_content, matches)))
     } else {
         match content.find(old_string) {
             None => Ok(None),
@@ -421,11 +410,7 @@ fn try_exact_replace(
                 new_content.push_str(&content[..idx]);
                 new_content.push_str(new_string);
                 new_content.push_str(&content[idx + old_string.len()..]);
-                Ok(Some(ReplaceResult {
-                    new_content,
-                    count: 1,
-                    method: "exact",
-                }))
+                Ok(Some((new_content, 1)))
             }
         }
     }
@@ -521,19 +506,6 @@ fn strip_line_numbers_manual(s: &str) -> Option<String> {
     }
 }
 
-/// Remove trailing whitespace from each line.
-fn normalize_trailing_whitespace(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    for line in s.lines() {
-        result.push_str(line.trim_end());
-        result.push('\n');
-    }
-    if !s.ends_with('\n') && result.ends_with('\n') {
-        result.pop();
-    }
-    result
-}
-
 /// Collapse multiple spaces/tabs to single space (preserve newlines).
 fn collapse_whitespace(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
@@ -557,6 +529,30 @@ fn collapse_whitespace(s: &str) -> String {
         }
     }
     result
+}
+
+/// Normalise common Unicode typographic characters to ASCII equivalents.
+/// Handles fancy quotes, dashes, non-breaking spaces, etc. This allows diffs
+/// authored with plain ASCII to still match source files containing Unicode
+/// typography (e.g., copied from web pages or generated by some editors).
+/// Inspired by codex's seek_sequence normalise pass.
+fn normalise_unicode(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            // Various dash / hyphen code-points → ASCII '-'
+            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
+            | '\u{2212}' => '-',
+            // Fancy single quotes → '\''
+            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => '\'',
+            // Fancy double quotes → '"'
+            '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => '"',
+            // Non-breaking space and other odd spaces → normal space
+            '\u{00A0}' | '\u{2002}' | '\u{2003}' | '\u{2004}' | '\u{2005}' | '\u{2006}'
+            | '\u{2007}' | '\u{2008}' | '\u{2009}' | '\u{200A}' | '\u{202F}' | '\u{205F}'
+            | '\u{3000}' => ' ',
+            other => other,
+        })
+        .collect()
 }
 
 /// Unescape common escape sequences: \\n → newline, \\t → tab, \\r → CR.
@@ -591,92 +587,11 @@ fn unescape_common(s: &str) -> String {
     result
 }
 
-/// Try adjusting indentation of old_string by adding/removing leading spaces.
-/// Scans indent_delta from -8 to +8. Also tries on tab→space normalized content.
-fn try_indent_fuzzy(
-    content: &str,
-    old_string: &str,
-    new_string: &str,
-    replace_all: bool,
-) -> Result<Option<ReplaceResult>, ToolError> {
-    let old_lines: Vec<&str> = old_string.lines().collect();
-    if old_lines.is_empty() {
-        return Ok(None);
-    }
-
-    let min_indent = old_lines
-        .iter()
-        .filter(|l| !l.is_empty())
-        .map(|l| l.chars().take_while(|c| *c == ' ' || *c == '\t').count())
-        .min()
-        .unwrap_or(0);
-
-    for delta in -8i32..=8 {
-        if delta == 0 {
-            continue;
-        }
-        if (min_indent as i32 + delta) < 0 {
-            continue;
-        }
-
-        let shifted = shift_indent(old_string, delta);
-        // When old_string is shifted by delta to match the file, new_string
-        // must also be shifted by the same delta to preserve the file's indentation.
-        let shifted_new = shift_indent(new_string, delta);
-        if let Some(result) =
-            try_apply_on_original(content, &shifted, &shifted_new, replace_all, "indent-shift")?
-        {
-            return Ok(Some(result));
-        }
-    }
-
-    // If content has tabs but old_string uses spaces, try on normalized content
-    if content.contains('\t') && !old_string.contains('\t') {
-        let norm_content = content.replace('\t', "    ");
-        for delta in -8i32..=8 {
-            if delta == 0 {
-                continue;
-            }
-            if (min_indent as i32 + delta) < 0 {
-                continue;
-            }
-
-            let shifted = shift_indent(old_string, delta);
-            // When old_string is shifted by delta to match the file, new_string
-            // must also be shifted by the same delta to preserve the file's indentation.
-            let shifted_new = shift_indent(new_string, delta);
-            if let Some(idx) = norm_content.find(&shifted) {
-                if !replace_all && norm_content[idx + shifted.len()..].contains(&shifted) {
-                    continue;
-                }
-                let new_content = if replace_all {
-                    norm_content.replace(&shifted, &shifted_new)
-                } else {
-                    norm_content.replacen(&shifted, &shifted_new, 1)
-                };
-                let count = if replace_all {
-                    norm_content.matches(&shifted).count()
-                } else {
-                    1
-                };
-                return Ok(Some(ReplaceResult {
-                    new_content,
-                    count,
-                    method: "indent-shift+tab→space",
-                }));
-            }
-        }
-    }
-
-    Ok(None)
-}
-
 fn shift_indent(s: &str, delta: i32) -> String {
-    let extra = if delta > 0 {
-        (delta as usize).max(10) * 10
-    } else {
-        10
-    };
+    // Estimate extra capacity: |delta| extra spaces per line, ~50 lines estimate
+    let abs_delta = delta.unsigned_abs() as usize;
+    let line_count = s.lines().count().max(1);
+    let extra = abs_delta.saturating_mul(line_count);
     let mut result = String::with_capacity(s.len() + extra);
     for line in s.lines() {
         if line.is_empty() {
@@ -702,112 +617,23 @@ fn shift_indent(s: &str, delta: i32) -> String {
     result
 }
 
-fn try_tab_space_normalize(
-    content: &str,
-    old_string: &str,
-    new_string: &str,
-    replace_all: bool,
-) -> Result<Option<ReplaceResult>, ToolError> {
-    let content_has_tabs = content.contains('\t');
-    let old_has_tabs = old_string.contains('\t');
-    if content_has_tabs == old_has_tabs {
-        return Ok(None);
-    }
-
-    let norm_content = content.replace('\t', "    ");
-    let norm_old = old_string.replace('\t', "    ");
-
-    if try_exact_replace(&norm_content, &norm_old, new_string, replace_all)?.is_some() {
-        if let Some(result) = try_apply_on_original(
-            content,
-            &norm_old,
-            new_string,
-            replace_all,
-            "tab-space-norm",
-        )? {
-            return Ok(Some(result));
-        }
-
-        let new_content = if replace_all {
-            norm_content.replace(&norm_old, new_string)
-        } else {
-            norm_content.replacen(&norm_old, new_string, 1)
-        };
-        let count = if replace_all {
-            norm_content.matches(&norm_old).count()
-        } else {
-            1
-        };
-        return Ok(Some(ReplaceResult {
-            new_content,
-            count,
-            method: "tab→space-normalize",
-        }));
-    }
-
-    Ok(None)
-}
-
-fn try_apply_on_original(
-    content: &str,
-    fuzzy_old: &str,
-    new_string: &str,
-    replace_all: bool,
-    method: &'static str,
-) -> Result<Option<ReplaceResult>, ToolError> {
-    if replace_all {
-        let matches = content.matches(fuzzy_old).count();
-        if matches == 0 {
-            return Ok(None);
-        }
-        if matches > 1 {
-            return Err(ToolError::Execution(
-                "old_string is not unique in the file (fuzzy match). Use replace_all=true to replace all occurrences.".into(),
-            ));
-        }
-        let new_content = content.replace(fuzzy_old, new_string);
-        Ok(Some(ReplaceResult {
-            new_content,
-            count: matches,
-            method,
-        }))
-    } else {
-        match content.find(fuzzy_old) {
-            None => Ok(None),
-            Some(idx) => {
-                if content[idx + fuzzy_old.len()..].contains(fuzzy_old) {
-                    return Err(ToolError::Execution(
-                        "old_string is not unique in the file (fuzzy match). Use replace_all=true to replace all occurrences.".into(),
-                    ));
-                }
-                let mut new_content =
-                    String::with_capacity(content.len() - fuzzy_old.len() + new_string.len());
-                new_content.push_str(&content[..idx]);
-                new_content.push_str(new_string);
-                new_content.push_str(&content[idx + fuzzy_old.len()..]);
-                Ok(Some(ReplaceResult {
-                    new_content,
-                    count: 1,
-                    method,
-                }))
-            }
-        }
-    }
-}
-
 // ===========================================================================
-// Strategy 6: Whitespace collapse — position mapping
+// Position mapping: normalized content → original content
 // ===========================================================================
 
 /// Try to map normalized-content matches back to original content positions.
+///
+/// When `expand_trailing_ws` is true (used for whitespace collapse), the match
+/// range is expanded to include trailing whitespace that was collapsed. This
+/// must be false for Unicode normalization where the mapping is 1-to-1.
 fn map_normalized_to_original(
     content: &str,
     norm_content: &str,
     norm_matches: &[(usize, usize)],
     new_string: &str,
     replace_all: bool,
-    _method: &str,
-) -> Result<Option<ReplaceResult>, ToolError> {
+    expand_trailing_ws: bool,
+) -> Result<Option<(String, usize)>, ToolError> {
     // Build a mapping: for each char in norm_content, which range in original it came from.
     // Since collapse_whitespace only collapses spaces/tabs, we can build a char-offset map.
     let mut norm_to_orig: Vec<usize> = Vec::with_capacity(norm_content.len() + 1);
@@ -862,13 +688,17 @@ fn map_normalized_to_original(
             continue;
         };
 
-        // Expand orig_end to include trailing whitespace that was collapsed
-        let mut expanded_end = orig_end;
-        while expanded_end < orig_chars.len()
-            && (orig_chars[expanded_end] == ' ' || orig_chars[expanded_end] == '\t')
-        {
-            expanded_end += 1;
-        }
+        // Expand orig_end to include trailing whitespace that was collapsed.
+        // Only applies to whitespace collapse (not Unicode normalization).
+        let expanded_end = if expand_trailing_ws {
+            let mut end = orig_end;
+            while end < orig_chars.len() && (orig_chars[end] == ' ' || orig_chars[end] == '\t') {
+                end += 1;
+            }
+            end
+        } else {
+            orig_end
+        };
 
         orig_matches.push((
             char_offset_to_byte(content, orig_start),
@@ -886,21 +716,9 @@ fn map_normalized_to_original(
         ));
     }
 
-    // Apply replacements from end to start to preserve positions
-    let mut result = content.to_string();
-    orig_matches.sort_by_key(|m| m.0);
-    for (start, end) in orig_matches.iter().rev() {
-        if *end > result.len() || *start > *end {
-            continue;
-        }
-        result = format!("{}{}{}", &result[..*start], new_string, &result[*end..]);
-    }
-
-    Ok(Some(ReplaceResult {
-        new_content: result,
-        count: orig_matches.len(),
-        method: "whitespace-normalized",
-    }))
+    // Apply replacements using apply_byte_matches (O(n) single forward pass)
+    let new_content = apply_byte_matches(content, &orig_matches, new_string);
+    Ok(Some((new_content, orig_matches.len())))
 }
 
 /// Convert a char index to a byte offset in a string.
@@ -912,55 +730,82 @@ fn char_offset_to_byte(s: &str, char_idx: usize) -> usize {
 }
 
 // ===========================================================================
-// Strategy 8: Trimmed boundary matching
+// Strategy 3: Line-sequence matching (inspired by codex's seek_sequence)
 // ===========================================================================
 
-/// Find matches where first and last lines match after trimming, middle lines match exactly.
-fn find_trimmed_boundary_matches(
+/// Find contiguous line sequences in `content_lines` that match `old_lines`
+/// using progressively less strict per-line comparison:
+///   1. Exact match
+///   2. Ignore trailing whitespace
+///   3. Trim both sides (handles indentation differences)
+///   4. Unicode-normalize after trim (handles fancy quotes/dashes)
+///
+/// This is inspired by codex's `seek_sequence` which uses the same
+/// progressive-strictness approach for locating diff hunks in source files.
+///
+/// Returns line-range matches `(start_line, end_line)` in 0-based indices.
+fn find_line_sequence_matches(
     content_lines: &[&str],
     old_lines: &[&str],
+    replace_all: bool,
 ) -> Option<Vec<(usize, usize)>> {
     let n = old_lines.len();
-    if content_lines.len() < n || n < 2 {
+    if n == 0 || content_lines.len() < n {
         return None;
     }
 
-    // Build the pattern: first and last lines trimmed, middle lines exact
-    let first_trimmed = old_lines[0].trim();
-    let last_trimmed = old_lines[n - 1].trim();
-
-    let mut matches = Vec::new();
-    for i in 0..=content_lines.len() - n {
-        // Check first line (trimmed)
-        if content_lines[i].trim() != first_trimmed {
-            continue;
-        }
-        // Check last line (trimmed)
-        if content_lines[i + n - 1].trim() != last_trimmed {
-            continue;
-        }
-        // Check middle lines (exact)
-        let mut middle_ok = true;
-        for j in 1..n - 1 {
-            if content_lines[i + j] != old_lines[j] {
-                middle_ok = false;
-                break;
+    // Each pass collects non-overlapping matches. When replace_all=false,
+    // return None if more than one match is found (ambiguous).
+    // When replace_all=true, skip positions covered by a previous match.
+    let run_pass = |comparator: &dyn Fn(usize, usize) -> bool| -> Option<Vec<(usize, usize)>> {
+        let mut matches = Vec::new();
+        let mut last_end = 0usize;
+        for i in 0..=content_lines.len() - n {
+            if i < last_end {
+                continue; // skip overlapping position
+            }
+            if (0..n).all(|j| comparator(i + j, j)) {
+                matches.push((i, i + n));
+                last_end = i + n;
+                if !replace_all && matches.len() > 1 {
+                    return None;
+                }
             }
         }
-        if middle_ok {
-            matches.push((i, i + n));
+        if matches.is_empty() {
+            None
+        } else {
+            Some(matches)
         }
+    };
+
+    // Pass 1: Exact line match
+    if let Some(m) = run_pass(&|ci, oi| content_lines[ci] == old_lines[oi]) {
+        return Some(m);
     }
 
-    if matches.is_empty() {
-        None
-    } else {
-        Some(matches)
+    // Pass 2: Ignore trailing whitespace
+    if let Some(m) = run_pass(&|ci, oi| content_lines[ci].trim_end() == old_lines[oi].trim_end()) {
+        return Some(m);
     }
+
+    // Pass 3: Trim both sides (handles indentation differences)
+    if let Some(m) = run_pass(&|ci, oi| content_lines[ci].trim() == old_lines[oi].trim()) {
+        return Some(m);
+    }
+
+    // Pass 4: Unicode-normalize after trim (handles fancy quotes/dashes/spaces)
+    if let Some(m) = run_pass(&|ci, oi| {
+        normalise_unicode(content_lines[ci].trim()) == normalise_unicode(old_lines[oi].trim())
+    }) {
+        return Some(m);
+    }
+
+    None
 }
 
 // ===========================================================================
-// Strategy 9: Block anchor matching
+// Strategy 10: Block anchor matching
 // ===========================================================================
 
 /// Find matches by anchoring on first and last lines (trimmed exact),
@@ -1082,6 +927,11 @@ fn apply_line_matches(
         let start_byte = line_byte_offset(content, content_lines, start_line);
         // Calculate byte offset for end_line (start of the line AFTER the match)
         let end_byte = line_end_byte_offset(content, content_lines, end_line);
+
+        // Safety: skip overlapping matches (should not happen after dedup)
+        if start_byte < last_end {
+            continue;
+        }
 
         result.push_str(&content[last_end..start_byte]);
 
@@ -1303,7 +1153,7 @@ fn find_closest_lines(old_string: &str, content: &str) -> String {
 mod tests {
     use super::*;
 
-    // --- Strategy 6: Whitespace collapse ---
+    // --- Strategy 4: Whitespace collapse ---
 
     #[test]
     fn test_collapse_whitespace() {
@@ -1331,7 +1181,7 @@ mod tests {
         );
     }
 
-    // --- Strategy 7: Escape normalization ---
+    // --- Strategy 6: Escape normalization ---
 
     #[test]
     fn test_unescape_common() {
@@ -1353,7 +1203,7 @@ mod tests {
         assert_eq!(new_content, "goodbye\nworld");
     }
 
-    // --- Strategy 8: Trimmed boundary ---
+    // --- Strategy 3: Line-sequence (trimmed boundary) ---
 
     #[test]
     fn test_trimmed_boundary_match() {
@@ -1363,12 +1213,12 @@ mod tests {
         let (new_content, count, strategy, error) =
             fuzzy_find_and_replace(content, old_string, new_string, false).unwrap();
         assert!(error.is_none(), "Expected no error, got: {:?}", error);
-        assert_eq!(strategy, "trimmed-boundary");
+        assert_eq!(strategy, "line-sequence");
         assert_eq!(count, 1);
         assert!(new_content.contains("fn bar()"));
     }
 
-    // --- Strategy 9: Block anchor ---
+    // --- Strategy 7: Block anchor ---
 
     #[test]
     fn test_block_anchor_match() {
@@ -1567,7 +1417,7 @@ mod tests {
         );
     }
 
-    // --- Strategy 2: Line number stripping ---
+    // --- Strategy 2: Strip line-number prefixes ---
 
     #[test]
     fn test_strip_line_number_prefixes() {
@@ -1576,7 +1426,7 @@ mod tests {
         assert_eq!(result, "fn main() {\n    println!(\"hi\");\n}");
     }
 
-    // --- Strategy 3: Trailing whitespace ---
+    // --- Strategy 3: Line-sequence (trailing whitespace) ---
 
     #[test]
     fn test_trailing_whitespace_match() {
@@ -1588,5 +1438,68 @@ mod tests {
         assert!(error.is_none(), "Expected no error, got: {:?}", error);
         assert_eq!(count, 1);
         assert!(new_content.contains("fn bar()"));
+    }
+
+    // --- Strategy 5: Unicode normalization ---
+
+    #[test]
+    fn test_normalise_unicode_fancy_quotes() {
+        // File has fancy Unicode quotes, old_string uses ASCII quotes
+        let content = "let s = \u{201c}hello\u{201d};";
+        let old_string = "let s = \"hello\";";
+        let new_string = "let s = \"world\";";
+        let (new_content, count, strategy, error) =
+            fuzzy_find_and_replace(content, old_string, new_string, false).unwrap();
+        assert!(error.is_none(), "Expected no error, got: {:?}", error);
+        assert_eq!(strategy, "unicode-normalized");
+        assert_eq!(count, 1);
+        assert!(new_content.contains("world"));
+    }
+
+    #[test]
+    fn test_normalise_unicode_fancy_dashes() {
+        // File has em-dash, old_string uses regular dash
+        let content = "foo \u{2014} bar";
+        let old_string = "foo - bar";
+        let new_string = "foo + bar";
+        let (new_content, count, strategy, error) =
+            fuzzy_find_and_replace(content, old_string, new_string, false).unwrap();
+        assert!(error.is_none(), "Expected no error, got: {:?}", error);
+        assert_eq!(strategy, "unicode-normalized");
+        assert_eq!(count, 1);
+        assert!(new_content.contains("foo + bar"));
+    }
+
+    #[test]
+    fn test_normalise_unicode_non_breaking_space() {
+        // File has non-breaking space, old_string uses regular space
+        let content = "hello\u{00a0}world";
+        let old_string = "hello world";
+        let new_string = "hello there";
+        let (new_content, count, strategy, error) =
+            fuzzy_find_and_replace(content, old_string, new_string, false).unwrap();
+        assert!(error.is_none(), "Expected no error, got: {:?}", error);
+        assert_eq!(strategy, "unicode-normalized");
+        assert_eq!(count, 1);
+        assert!(new_content.contains("hello there"));
+    }
+
+    // --- Trailing newline normalization ---
+
+    #[test]
+    fn test_trailing_newline_mismatch() {
+        // File doesn't end with \n, but old_string does — the old_string is the
+        // entire content, so no exact match is possible without normalization.
+        let content = "return 1;";
+        let old_string = "return 1;\n";
+        let new_string = "return 2;\n";
+        let (new_content, count, strategy, error) =
+            fuzzy_find_and_replace(content, old_string, new_string, false).unwrap();
+        assert!(error.is_none(), "Expected no error, got: {:?}", error);
+        assert_eq!(strategy, "trailing-newline-norm");
+        assert_eq!(count, 1);
+        assert_eq!(new_content, "return 2;");
+        // Result should NOT end with \n since the original didn't
+        assert!(!new_content.ends_with('\n'));
     }
 }
