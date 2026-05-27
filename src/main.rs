@@ -466,6 +466,11 @@ async fn main() -> anyhow::Result<()> {
 
     let registry = Arc::new(registry); // wrap for shared access by sub-agents
 
+    // Per-process unique task_id — scopes graph store edges so multiple zeno
+    // processes don't see each other's sub-agent topology.
+    let session_task_id = engine::session::generate_session_id();
+    tracing::info!(session_task_id = %session_task_id, "Generated session task ID");
+
     let mut engine = QueryEngine::new(
         client,
         model.to_string(),
@@ -477,7 +482,7 @@ async fn main() -> anyhow::Result<()> {
         permission_mode.clone(),
         settings.clone(),
         cwd.clone(),
-        String::from("main"),
+        session_task_id.clone(),
     );
     engine.mcp_manager = Some(mcp_manager.clone());
     engine.memory_manager = Some(memory_manager.clone());
@@ -561,7 +566,7 @@ async fn main() -> anyhow::Result<()> {
     // Share the todo state so the TUI can render the side panel
     app.set_todo_state(todo_state.clone());
     // Share the graph store so the TUI can render the sub-agent tree
-    app.set_graph_store(graph_store.clone(), String::from("main"));
+    app.set_graph_store(graph_store.clone(), session_task_id.clone());
     // Share the sub-agent progress sender with the engine so delegate_task
     // can report sub-agent progress to the TUI.
     {

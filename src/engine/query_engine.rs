@@ -93,9 +93,11 @@ pub struct QueryEngine {
 
     /// Identifier for this agent session.
     ///
-    /// `"main"` for the primary user-facing agent, UUID for sub-agents.
-    /// Used as the parent_id when recording spawn edges and when querying
-    /// the graph store for child sub-agents in system prompt injection.
+    /// A unique per-process ID (generated via `generate_session_id()`) for the
+    /// primary user-facing agent, UUID for sub-agents. Used as the parent_id
+    /// when recording spawn edges and when querying the graph store for child
+    /// sub-agents in system prompt injection. The unique ID prevents graph store
+    /// state leakage between concurrent zeno processes.
     pub task_id: String,
 }
 

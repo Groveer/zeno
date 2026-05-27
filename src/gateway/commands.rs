@@ -872,7 +872,7 @@ mod tests {
             Default::default(),
             settings.clone(),
             tmp.path().to_path_buf(),
-            String::from("main"),
+            crate::engine::session::generate_session_id(),
         )));
 
         // Memory store + manager

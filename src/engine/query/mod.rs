@@ -750,6 +750,7 @@ impl QueryEngine {
                 self.cwd.clone(),
                 sender.clone(),
                 self.mcp_manager.clone(),
+                self.task_id.clone(),
             )
             .with_cancel_token(cancel.clone())
             .with_rate_limiter(self.rate_limiter.clone())

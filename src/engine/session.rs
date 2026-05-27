@@ -48,7 +48,7 @@ pub fn utc_to_local_display(utc_str: &str) -> String {
 pub fn generate_session_id() -> String {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
+        .expect("system clock is before UNIX epoch");
     let micros = duration.as_micros();
     let pid = std::process::id();
     format!("{}-{}", micros, pid)

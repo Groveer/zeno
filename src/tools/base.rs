@@ -198,7 +198,8 @@ pub struct ToolContext {
     /// Current working directory (wrapped in Arc<RwLock> so bash `cd` updates it).
     pub cwd: Arc<RwLock<PathBuf>>,
     /// Agent identifier for file-staleness tracking.
-    /// "main" for the primary query, task-specific ID for sub-agents.
+    /// "main" for the primary query (legacy default — prefer unique session ID),
+    /// task-specific ID for sub-agents.
     pub task_id: String,
     /// For ask_user tool: channel to send the question to the TUI and receive the answer.
     pub ask_sender:
@@ -223,14 +224,18 @@ pub struct ToolContext {
 
 impl ToolContext {
     /// Create a context with an ask channel (for TUI mode).
+    ///
+    /// `task_id` should be a unique session ID (see `generate_session_id()`)
+    /// to scope graph store edges per-process and prevent cross-process state leakage.
     pub fn with_ask_sender(
         cwd: PathBuf,
         sender: tokio::sync::mpsc::UnboundedSender<crate::engine::tui_events::EngineEvent>,
         mcp_manager: Option<std::sync::Arc<tokio::sync::Mutex<crate::mcp::manager::McpManager>>>,
+        task_id: String,
     ) -> Self {
         Self {
             cwd: Arc::new(RwLock::new(cwd)),
-            task_id: String::from("main"),
+            task_id,
             ask_sender: Some(sender),
             mcp_manager,
             sub_agent_deps: None,

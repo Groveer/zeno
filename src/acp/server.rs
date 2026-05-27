@@ -113,7 +113,7 @@ impl SessionState {
             config.permission_mode.clone(),
             config.settings.clone(),
             config.cwd.clone(),
-            String::from("main"),
+            crate::engine::session::generate_session_id(),
         );
 
         // Wire up shared engine services (same as main.rs TUI path)
