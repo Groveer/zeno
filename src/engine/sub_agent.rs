@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use crate::api::client::SupportsStreamingMessages;
+use crate::api::retry::{RetryConfig, get_retry_delay};
 use crate::api::types::{ContentBlock, Role, StreamEvent, Usage};
 use crate::engine::messages::ConversationHistory;
 use crate::engine::tui_events::EngineEvent;
@@ -48,7 +49,7 @@ const BUILTIN_SUBAGENT_BLOCKED_TOOLS: &[&str] = &[
 ];
 
 /// Maximum consecutive API/stream errors before aborting the sub-agent loop.
-/// Exponential backoff is applied between retries: 500ms, 1s, 2s, 4s, 8s cap.
+/// Exponential backoff with jitter is applied between retries via unified retry infrastructure.
 const MAX_CONSECUTIVE_ERRORS: u32 = 5;
 
 // ---------------------------------------------------------------------------
@@ -449,6 +450,7 @@ async fn run_single_sub_agent(
     let mut modified_files: Vec<String> = Vec::new();
     let mut has_executed_tools = false; // Track whether any tools were executed
     let mut consecutive_errors = 0u32; // Track consecutive API/stream errors for backoff
+    let retry_config = RetryConfig::default();
 
     loop {
         // Check cancellation
@@ -495,9 +497,9 @@ async fn run_single_sub_agent(
                     );
                     break;
                 }
-                // Exponential backoff: 500ms, 1s, 2s, 4s, capped at 8s
-                let backoff_ms = (500u64 * 2u64.saturating_pow(consecutive_errors - 1)).min(8000);
-                tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+                // Exponential backoff with jitter using unified retry infrastructure
+                let delay = get_retry_delay(consecutive_errors, &retry_config, None, None);
+                tokio::time::sleep(tokio::time::Duration::from_secs_f64(delay)).await;
                 continue;
             }
         };
@@ -604,8 +606,9 @@ async fn run_single_sub_agent(
                 );
                 break;
             }
-            let backoff_ms = (500u64 * 2u64.saturating_pow(consecutive_errors - 1)).min(8000);
-            tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+            // Exponential backoff with jitter using unified retry infrastructure
+            let delay = get_retry_delay(consecutive_errors, &retry_config, None, None);
+            tokio::time::sleep(tokio::time::Duration::from_secs_f64(delay)).await;
             continue;
         }
 
