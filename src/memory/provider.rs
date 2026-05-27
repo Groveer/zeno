@@ -146,4 +146,16 @@ pub trait MemoryProvider: Send + Sync {
     fn on_memory_change(&self, action: &str, target: &str, content: &str) {
         let _ = (action, target, content);
     }
+
+    /// Called on the PARENT agent when a sub-agent completes.
+    ///
+    /// The parent's memory provider gets the task+result pair as an
+    /// observation of what was delegated and what came back.
+    ///
+    /// - `task`: the delegation prompt
+    /// - `result`: the sub-agent's final response
+    /// - `child_session_id`: the sub-agent's session_id
+    fn on_delegation(&self, task: &str, result: &str, child_session_id: &str) {
+        let _ = (task, result, child_session_id);
+    }
 }

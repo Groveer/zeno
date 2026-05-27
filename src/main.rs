@@ -778,7 +778,7 @@ async fn main() -> anyhow::Result<()> {
             let deps = {
                 let eng = engine.lock().await;
                 eng.client_factory.as_ref().map(|factory| {
-                    crate::tools::base::SubAgentDeps::new(
+                    let deps = crate::tools::base::SubAgentDeps::new(
                         factory.clone(),
                         eng.tools.clone(),
                         settings.clone(),
@@ -792,7 +792,12 @@ async fn main() -> anyhow::Result<()> {
                     .with_write_origin(crate::skills::provenance::BACKGROUND_REVIEW)
                     .with_graph_store_opt(eng.graph_store.clone())
                     .with_tui_event_sender(gateway.engine_event_sender())
-                    .with_permission_allow_all(eng.permission_allow_all.clone())
+                    .with_permission_allow_all(eng.permission_allow_all.clone());
+                    if let Some(ref mm) = eng.memory_manager {
+                        deps.with_memory_manager(mm.clone())
+                    } else {
+                        deps
+                    }
                 })
             };
 

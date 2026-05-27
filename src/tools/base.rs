@@ -101,6 +101,9 @@ pub struct SubAgentDeps {
     /// Sub-agent spawn topology store — records parent/child relationships.
     /// When set, `delegate_task` automatically logs each spawn as an edge.
     pub graph_store: Option<Arc<dyn SubAgentGraphStore>>,
+    /// Shared memory manager — enables on_delegation notification to external
+    /// memory providers when sub-agents complete.
+    pub memory_manager: Option<crate::memory::manager::SharedMemoryManager>,
 }
 
 impl std::fmt::Debug for SubAgentDeps {
@@ -145,6 +148,7 @@ impl SubAgentDeps {
             permission_allow_all: None,
             exec_policy: None,
             graph_store: None,
+            memory_manager: None,
         }
     }
 
@@ -184,6 +188,12 @@ impl SubAgentDeps {
     /// Convenience for call sites that already hold `Option<Arc<...>>`.
     pub fn with_graph_store_opt(mut self, store: Option<Arc<dyn SubAgentGraphStore>>) -> Self {
         self.graph_store = store;
+        self
+    }
+
+    /// Attach the shared memory manager for on_delegation notifications.
+    pub fn with_memory_manager(mut self, mm: crate::memory::manager::SharedMemoryManager) -> Self {
+        self.memory_manager = Some(mm);
         self
     }
 }

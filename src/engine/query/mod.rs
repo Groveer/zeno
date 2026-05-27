@@ -296,8 +296,10 @@ impl QueryEngine {
                     let mut mm = mm.lock().await;
                     let prefetch_text = mm.prefetch(&effective_input).await;
                     if !prefetch_text.is_empty() {
-                        effective_system_prompt.push_str("\n\n## Relevant Memory\n\n");
-                        effective_system_prompt.push_str(&prefetch_text);
+                        let fenced =
+                            crate::memory::manager::build_memory_context_block(&prefetch_text);
+                        effective_system_prompt.push_str("\n\n");
+                        effective_system_prompt.push_str(&fenced);
                     }
                 }
 
@@ -779,6 +781,11 @@ impl QueryEngine {
                 .with_permission_allow_all(self.permission_allow_all.clone())
                 .with_exec_policy(self.exec_policy.clone())
                 .with_graph_store_opt(self.graph_store.clone());
+                let deps = if let Some(ref mm) = self.memory_manager {
+                    deps.with_memory_manager(mm.clone())
+                } else {
+                    deps
+                };
                 ctx = ctx.with_sub_agent_deps(deps);
             }
             let mut tool_results: Vec<ContentBlock> = Vec::new();
@@ -1002,6 +1009,11 @@ impl QueryEngine {
         .with_graph_store_opt(self.graph_store.clone())
         .with_tui_event_sender(sender.clone())
         .with_permission_allow_all(self.permission_allow_all.clone());
+        let deps = if let Some(ref mm) = self.memory_manager {
+            deps.with_memory_manager(mm.clone())
+        } else {
+            deps
+        };
 
         crate::engine::review::spawn_background_review(
             deps,

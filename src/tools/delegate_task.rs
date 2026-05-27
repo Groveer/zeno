@@ -291,6 +291,11 @@ impl Tool for DelegateTaskTool {
             // own Arc<Mutex<...>>, so the snapshot is independent).
             let child_ids = recorded_ids.lock().unwrap().clone();
 
+            // Save references for on_delegation notification after the move
+            let mm_ref = deps.memory_manager.clone();
+            let task_goals: Vec<String> = task_pairs.iter().map(|(g, _)| g.clone()).collect();
+            let child_ids_for_notify = child_ids.clone();
+
             let progress_tx = deps.progress_tx.clone();
             let max_concurrent = deps.delegation_config.max_concurrent_children.max(1) as usize;
             let results = run_delegated_tasks_batch(
@@ -307,6 +312,19 @@ impl Tool for DelegateTaskTool {
             // Mark all edges as closed. guard.close() takes graph_store,
             // making the eventual Drop a no-op (no leak, no redundant write).
             guard.close().await;
+
+            // Notify memory provider of batch delegation outcomes
+            if let Some(mm) = mm_ref {
+                let mm = mm.lock().await;
+                for (i, result) in results.iter().enumerate() {
+                    let goal = task_goals.get(i).map(|s| s.as_str()).unwrap_or("");
+                    let cid = child_ids_for_notify
+                        .get(i)
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    mm.on_delegation(goal, &result.summary, cid);
+                }
+            }
 
             return Ok(Box::new(JsonToolOutput::success(
                 serde_json::to_string(&results)
@@ -366,6 +384,13 @@ impl Tool for DelegateTaskTool {
         // eventual Drop a no-op (no leak, no redundant write).
         // If we panicked before this line, Drop handles it best-effort.
         guard.close().await;
+
+        // Notify memory provider of delegation outcome
+        if let Some(ref mm) = deps.memory_manager {
+            mm.lock()
+                .await
+                .on_delegation(goal, &result.summary, &child_id);
+        }
 
         Ok(Box::new(JsonToolOutput::success(
             serde_json::to_string(&result)

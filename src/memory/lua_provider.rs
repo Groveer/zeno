@@ -80,6 +80,10 @@
 //!     -- Return a string with insights to preserve, or "" for no contribution.
 //!     on_pre_compress = function(messages_json) return "" end,
 //!
+//!     -- Called when a sub-agent completes on the parent agent (optional)
+//!     -- Use to observe delegation outcomes, extract facts, etc.
+//!     on_delegation = function(task, result, child_session_id) end,
+//!
 //!     -- Shutdown (optional)
 //!     shutdown = function() end,
 //! }
@@ -369,6 +373,23 @@ impl MemoryProvider for LuaMemoryProvider {
                     provider = %self.config.name,
                     error = %e,
                     "Memory provider on_memory_change failed"
+                );
+            }
+        }
+    }
+
+    fn on_delegation(&self, task: &str, result: &str, child_session_id: &str) {
+        // Best-effort synchronous call — skip if VM is busy
+        if let Ok(lua) = self.lua.try_lock() {
+            let globals = lua.globals();
+            if let Ok(provider) = globals.get::<mlua::Table>("_provider")
+                && let Ok(func) = provider.get::<mlua::Function>("on_delegation")
+                && let Err(e) = func.call::<()>((task, result, child_session_id))
+            {
+                tracing::debug!(
+                    provider = %self.config.name,
+                    error = %e,
+                    "Memory provider on_delegation failed"
                 );
             }
         }
