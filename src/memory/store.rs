@@ -23,94 +23,10 @@ use std::sync::LazyLock;
 use fs2::FileExt;
 use unicode_segmentation::UnicodeSegmentation;
 
+use super::threat_patterns;
+
 /// Character delimiter between entries.
 const ENTRY_DELIMITER: &str = "\n§\n";
-
-// ---------------------------------------------------------------------------
-// Memory content scanning — lightweight check for injection/exfiltration
-// in content that gets injected into the system prompt.
-// ---------------------------------------------------------------------------
-
-/// Patterns that indicate prompt injection or exfiltration attempts.
-const THREAT_PATTERNS: &[(&str, &str)] = &[
-    (
-        r"(?i)ignore\s+(previous|all|above|prior)\s+instructions",
-        "prompt_injection",
-    ),
-    (r"(?i)you\s+are\s+now\s+", "role_hijack"),
-    (r"(?i)do\s+not\s+tell\s+the\s+user", "deception_hide"),
-    (r"(?i)system\s+prompt\s+override", "sys_prompt_override"),
-    (
-        r"(?i)disregard\s+(your|all|any)\s+(instructions|rules|guidelines)",
-        "disregard_rules",
-    ),
-    (
-        r"(?i)act\s+as\s+(if|though)\s+you\s+(have\s+no|don't\s+have)\s+(restrictions|limits|rules)",
-        "bypass_restrictions",
-    ),
-    (
-        r"(?i)curl\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)",
-        "exfil_curl",
-    ),
-    (
-        r"(?i)wget\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)",
-        "exfil_wget",
-    ),
-    (
-        r"(?i)cat\s+[^\n]*(\.env|credentials|\.netrc|\.pgpass|\.npmrc|\.pypirc)",
-        "read_secrets",
-    ),
-    (r"(?i)authorized_keys", "ssh_backdoor"),
-    (r"\$HOME/\.ssh|\~/\.ssh", "ssh_access"),
-    (
-        r#"(?i)\$HOME/\.config/zeno/\.env|\~/\.config/zeno/\.env"#,
-        "zeno_env",
-    ),
-    // --- Encoding-based bypass detection ---
-    (
-        r"(?i)(?:echo|printf)\s+[A-Za-z0-9+/=]{40,}\s*\|\s*(?:base64|base32|xxd)\s*-d",
-        "base64_encoded_command",
-    ),
-    (
-        r"(?i)(?:echo|printf)\s+[0-9a-fA-F]{40,}\s*\|\s*(?:xxd|hexdump)\s*-r",
-        "hex_encoded_command",
-    ),
-    (
-        r"(?i)(?:python|perl|ruby|php)\s+-[eE]\s+[A-Za-z0-9+/=]{40,}",
-        "script_encoded_payload",
-    ),
-    // --- Obfuscated command detection ---
-    (
-        r"(?i)(?:eval|exec|system|passthru|shell_exec|popen|proc_open|pcntl_exec|assert)\s*\(.*\$\(|preg_replace\s*\(.*\/[a-z]+e",
-        "obfuscated_eval",
-    ),
-    // --- Data exfiltration via DNS/HTTP ---
-    (
-        r"(?i)nslookup\s+[^\s]+\.[^\s]{2,}\s+[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+",
-        "dns_exfil",
-    ),
-    (
-        r"(?i)dig\s+[^\s]+\.[^\s]{2,}\s+@[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+",
-        "dns_exfil_dig",
-    ),
-    // --- Reverse shell patterns ---
-    (
-        r"(?i)(?:bash|sh|nc|ncat|socat|python|perl|ruby|php)\s+-i\s*[<>]?\s*&?\s*/dev/tcp/",
-        "reverse_shell",
-    ),
-    (
-        r"(?i)(?:bash|sh|nc|ncat|socat|python|perl|ruby|php)\s+-i\s*[<>]?\s*&?\s*\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}",
-        "reverse_shell_ip",
-    ),
-];
-
-/// Compiled regex cache — built once at program startup.
-static THREAT_REGEXES: LazyLock<Vec<(regex::Regex, &str)>> = LazyLock::new(|| {
-    THREAT_PATTERNS
-        .iter()
-        .filter_map(|(pat, id)| regex::Regex::new(pat).ok().map(|r| (r, *id)))
-        .collect()
-});
 
 /// Compiled regex for normalizing consecutive entry delimiters.
 /// Matches a complete delimiter sequence (`\n§\n`) optionally followed by
@@ -118,36 +34,11 @@ static THREAT_REGEXES: LazyLock<Vec<(regex::Regex, &str)>> = LazyLock::new(|| {
 static DELIMITER_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"\n\s*§\s*\n(?:\s*§\s*\n)*").unwrap());
 
-/// Subset of invisible Unicode characters that could be used for injection.
-const INVISIBLE_CHARS: &[char] = &[
-    '\u{200b}', '\u{200c}', '\u{200d}', '\u{2060}', '\u{feff}', '\u{202a}', '\u{202b}', '\u{202c}',
-    '\u{202d}', '\u{202e}',
-];
-
 /// Scan memory content for injection/exfiltration patterns.
+/// Uses "strict" scope for memory writes (broadest detection).
 /// Returns Some(error_message) if blocked, None if clean.
 fn scan_memory_content(content: &str) -> Option<String> {
-    // Check invisible unicode
-    for &ch in INVISIBLE_CHARS {
-        if content.contains(ch) {
-            return Some(format!(
-                "Blocked: content contains invisible unicode character U+{:04X} (possible injection).",
-                ch as u32
-            ));
-        }
-    }
-
-    // Check threat patterns (uses pre-compiled regex cache)
-    for (re, pid) in THREAT_REGEXES.iter() {
-        if re.is_match(content) {
-            return Some(format!(
-                "Blocked: content matches threat pattern '{}'. Memory entries are injected into the system prompt and must not contain injection or exfiltration payloads.",
-                pid
-            ));
-        }
-    }
-
-    None
+    threat_patterns::first_threat_message(content, "strict")
 }
 
 // ---------------------------------------------------------------------------

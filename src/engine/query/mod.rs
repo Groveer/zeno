@@ -23,6 +23,7 @@ use crate::engine::compact::{auto_compact_if_needed, is_prompt_too_long_error};
 use crate::engine::query_engine::QueryEngine;
 use crate::engine::tui_events::EngineEvent;
 use crate::hooks::types::HookEvent;
+use crate::memory::manager::StreamingContextScrubber;
 use crate::prompts::system_prompt::{MEMORY_GUIDANCE, session_files_block};
 use crate::store::EdgeStatus;
 use crate::tools::base::{SubAgentDeps, ToolContext};
@@ -181,6 +182,7 @@ impl QueryEngine {
             let last_failed_tool_input: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
             let max_retries = self.settings.llm.max_retries;
             let retry_config = RetryConfig::default();
+            let mut mem_scrubber = StreamingContextScrubber::new();
 
             'retry: for retry_attempt in 0..=max_retries {
                 assistant_text.clear();
@@ -189,6 +191,7 @@ impl QueryEngine {
                 let mut current_tool: Option<CollectedToolUse> = None;
                 let mut pending_usage: Option<Usage> = None;
                 last_stop_reason = None;
+                mem_scrubber.reset();
 
                 if retry_attempt > 0 {
                     tracing::info!(
@@ -446,8 +449,12 @@ impl QueryEngine {
 
                     match event {
                         Ok(StreamEvent::TextDelta(delta)) => {
-                            let _ = sender.send(EngineEvent::TextDelta(delta.clone()));
-                            assistant_text.push_str(&delta);
+                            // Scrub memory-context spans that may leak from
+                            // prefetched context into the LLM's response.
+                            if let Some(visible) = mem_scrubber.feed(&delta) {
+                                let _ = sender.send(EngineEvent::TextDelta(visible.clone()));
+                                assistant_text.push_str(&visible);
+                            }
                         }
                         Ok(StreamEvent::ReasoningDelta(delta)) => {
                             let _ = sender.send(EngineEvent::ReasoningDelta(delta.clone()));
@@ -557,6 +564,12 @@ impl QueryEngine {
 
                 break 'retry;
             } // end 'retry loop
+
+            // Flush any held-back partial tag fragments from the scrubber
+            if let Some(trailing) = mem_scrubber.flush() {
+                let _ = sender.send(EngineEvent::TextDelta(trailing.clone()));
+                assistant_text.push_str(&trailing);
+            }
 
             // --- [DONE] sentinel detection ---
             let done_signaled = assistant_text.contains("[DONE]");

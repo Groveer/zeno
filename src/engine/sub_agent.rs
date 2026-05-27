@@ -28,6 +28,7 @@ use crate::api::retry::{RetryConfig, get_retry_delay};
 use crate::api::types::{ContentBlock, Role, StreamEvent, Usage};
 use crate::engine::messages::ConversationHistory;
 use crate::engine::tui_events::EngineEvent;
+use crate::memory::manager::StreamingContextScrubber;
 use crate::permissions::checker;
 use crate::tools::base::{SubAgentDeps, ToolContext};
 
@@ -512,6 +513,7 @@ async fn run_single_sub_agent(
         let mut current_tool: Option<CollectedToolUse> = None;
         let mut stream_failed = false;
         let mut pending_usage: Option<Usage> = None;
+        let mut mem_scrubber = StreamingContextScrubber::new();
 
         loop {
             tokio::select! {
@@ -525,7 +527,10 @@ async fn run_single_sub_agent(
                 event = stream.next() => {
                     match event {
                         Some(Ok(StreamEvent::TextDelta(delta))) => {
-                            assistant_text.push_str(&delta);
+                            // Scrub memory-context spans from sub-agent responses
+                            if let Some(visible) = mem_scrubber.feed(&delta) {
+                                assistant_text.push_str(&visible);
+                            }
                         }
                         Some(Ok(StreamEvent::ReasoningDelta(delta))) => {
                             reasoning_text.push_str(&delta);
@@ -584,6 +589,11 @@ async fn run_single_sub_agent(
                     }
                 }
             }
+        }
+
+        // Flush any held-back partial tag fragments from the scrubber
+        if let Some(trailing) = mem_scrubber.flush() {
+            assistant_text.push_str(&trailing);
         }
 
         if let Some(tool) = current_tool.take() {

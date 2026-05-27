@@ -140,11 +140,21 @@ and `skill_view` to load a specific skill's full instructions.",
 pub const MEMORY_GUIDANCE: &str = "\
 You have persistent memory across sessions. Use the `memory` tool to save durable \
 facts: user preferences, environment details, tool quirks, and stable conventions. \
-Memory is injected into every turn, so keep it compact.\n\
-Prioritize what prevents the user from having to correct or remind you again. \
+Memory is injected into every turn, so keep it compact and focused on facts that will \
+still matter later.\n\
+Prioritize what prevents the user from having to correct or remind you again — \
+the most valuable memory is one that reduces future user steering. \
+User preferences and recurring corrections matter more than procedural task details.\n\
 Do NOT save task progress, session outcomes, or anything that will be stale in a week. \
-Write declarative facts, not instructions — 'User prefers concise responses' ✓, \
-'Always respond concisely' ✗.";
+If a fact will be stale in a week, it does not belong in memory. \
+If you've discovered a new way to do something, solved a problem that could be \
+necessary later, save it as a skill using the `skill_manage` tool.\n\
+Write memories as declarative facts, not instructions to yourself — \
+'User prefers concise responses' ✓, 'Always respond concisely' ✗. \
+'Project uses pytest with xdist' ✓, 'Run tests with pytest -n 4' ✗. \
+Imperative phrasing gets re-read as a directive in later sessions and can \
+cause repeated work or override the user's current request. \
+Procedures and workflows belong in skills, not memory.";
 
 /// Format the "Session Files Already Read" context block for the system prompt.
 ///
