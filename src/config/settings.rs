@@ -759,7 +759,7 @@ impl Default for DelegationConfig {
     fn default() -> Self {
         Self {
             max_concurrent_children: 3,
-            max_turns: 30,
+            max_turns: 200,
             max_auto_continue: 2,
         }
     }
