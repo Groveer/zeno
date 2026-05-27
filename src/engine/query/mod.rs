@@ -714,6 +714,10 @@ impl QueryEngine {
 
                 self.carryover.clear_goal();
                 self.clear_steer();
+
+                // Background skill review — also trigger on text-only exit
+                self.maybe_spawn_background_review(sender);
+
                 let _ = sender.send(EngineEvent::QueryDone {
                     text: String::new(),
                     tool_calls: 0,
@@ -910,7 +914,7 @@ impl QueryEngine {
         }
 
         // Background skill review
-        self.maybe_spawn_background_review();
+        self.maybe_spawn_background_review(sender);
 
         Ok(())
     }
@@ -968,7 +972,10 @@ impl QueryEngine {
     }
 
     /// Check if a background skill review should run, and spawn it if so.
-    fn maybe_spawn_background_review(&mut self) {
+    fn maybe_spawn_background_review(
+        &mut self,
+        sender: &tokio::sync::mpsc::UnboundedSender<EngineEvent>,
+    ) {
         self.turns_since_skill_review += 1;
         if !crate::engine::review::should_run_review(
             self.turns_since_skill_review,
@@ -992,7 +999,9 @@ impl QueryEngine {
             self.sub_agent_cost_tracker.clone(),
         )
         .with_write_origin(crate::skills::provenance::BACKGROUND_REVIEW)
-        .with_graph_store_opt(self.graph_store.clone());
+        .with_graph_store_opt(self.graph_store.clone())
+        .with_tui_event_sender(sender.clone())
+        .with_permission_allow_all(self.permission_allow_all.clone());
 
         crate::engine::review::spawn_background_review(
             deps,

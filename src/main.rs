@@ -791,6 +791,8 @@ async fn main() -> anyhow::Result<()> {
                     )
                     .with_write_origin(crate::skills::provenance::BACKGROUND_REVIEW)
                     .with_graph_store_opt(eng.graph_store.clone())
+                    .with_tui_event_sender(gateway.engine_event_sender())
+                    .with_permission_allow_all(eng.permission_allow_all.clone())
                 })
             };
 
