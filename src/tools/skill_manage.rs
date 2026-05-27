@@ -366,8 +366,53 @@ impl SkillManageTool {
             skill_dir.join("SKILL.md")
         };
 
+        // If target file doesn't exist and file_path is provided with empty
+        // old_string, treat this as a file creation (like write_file).
         if !target.exists() {
-            return Err(ToolError::NotFound(format!("{}", target.display())));
+            if file_path.is_some() && old_string.is_empty() {
+                // Guard against creating empty files via patch (likely unintended)
+                if new_string.is_empty() {
+                    return Err(ToolError::InvalidArguments(
+                        "Cannot create a file with empty content via patch. \
+                         Use 'write_file' instead."
+                            .into(),
+                    ));
+                }
+                // Auto-create parent directories (including skill_dir if removed externally).
+                // Note: target.parent() is always Some here because
+                // validate_and_resolve_file_path enforces a multi-component path.
+                if let Some(parent) = target.parent() {
+                    tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                        ToolError::Execution(format!("Failed to create directory: {}", e))
+                    })?;
+                }
+                tokio::fs::write(&target, new_string)
+                    .await
+                    .map_err(|e| ToolError::Execution(format!("Failed to write file: {}", e)))?;
+
+                self.reload_skill_registry().await;
+                crate::skills::usage::bump_patch(name);
+
+                return Ok(format!(
+                    "Created supporting file: {} ({} bytes)",
+                    target.display(),
+                    new_string.len(),
+                ));
+            }
+            // Differentiate SKILL.md vs supporting file not found
+            let message = if file_path.is_none() {
+                format!(
+                    "SKILL.md not found for skill '{}'. It may have been deleted externally. \
+                     Use 'edit' to recreate it.",
+                    name,
+                )
+            } else {
+                format!(
+                    "File not found: {}. To create it, use patch with empty old_string or write_file.",
+                    target.display(),
+                )
+            };
+            return Err(ToolError::NotFound(message));
         }
 
         // Read current content
@@ -435,6 +480,11 @@ impl SkillManageTool {
         })?;
 
         let skill_md = skill_dir.join("SKILL.md");
+
+        // Ensure skill directory exists (defensive — may have been removed externally)
+        tokio::fs::create_dir_all(&skill_dir).await.map_err(|e| {
+            ToolError::Execution(format!("Failed to create skill directory: {}", e))
+        })?;
 
         // Write the new content
         tokio::fs::write(&skill_md, content)
