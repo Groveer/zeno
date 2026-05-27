@@ -55,12 +55,18 @@ impl Gateway {
             SubAgentEvent::ToolCompleted {
                 task_index,
                 tool,
+                input_summary,
                 is_error,
             } => {
                 if is_error {
+                    let display = if input_summary.is_empty() {
+                        format!("{} failed", tool)
+                    } else {
+                        format!("{} ({}) failed", tool, input_summary)
+                    };
                     vec![UiCommand::SubAgentProgress {
                         task_index,
-                        line: format!("{} failed", tool),
+                        line: display,
                     }]
                 } else {
                     // Successful tool completion is too noisy — skip.

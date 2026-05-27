@@ -47,6 +47,10 @@ const BUILTIN_SUBAGENT_BLOCKED_TOOLS: &[&str] = &[
     "delegate_task", // No recursive delegation
 ];
 
+/// Maximum consecutive API/stream errors before aborting the sub-agent loop.
+/// Exponential backoff is applied between retries: 500ms, 1s, 2s, 4s, 8s cap.
+const MAX_CONSECUTIVE_ERRORS: u32 = 5;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -110,6 +114,7 @@ pub enum SubAgentEvent {
     ToolCompleted {
         task_index: usize,
         tool: String,
+        input_summary: String,
         is_error: bool,
     },
     Status {
@@ -253,34 +258,21 @@ pub async fn run_delegated_tasks_batch(
         if cancel.is_cancelled() {
             match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
                 Ok(Ok(result)) => results.push(result),
-                _ => results.push(SubAgentResult {
-                    summary: String::new(),
-                    api_calls: 0,
-                    exit_reason: "interrupted".into(),
-                    tokens: SubAgentTokenUsage::default(),
-                    tool_trace: vec![],
-                    interrupted: true,
-                    error: None,
-                    duration_seconds: 0.0,
-                    modified_files: vec![],
-                }),
+                // Task didn't complete — use builder with now() for duration tracking
+                _ => results.push(
+                    SubAgentResultBuilder::new(std::time::Instant::now())
+                        .interrupted()
+                        .build(),
+                ),
             }
         } else {
             match handle.await {
                 Ok(result) => results.push(result),
-                Err(e) => {
-                    results.push(SubAgentResult {
-                        summary: String::new(),
-                        api_calls: 0,
-                        exit_reason: "error".into(),
-                        tokens: SubAgentTokenUsage::default(),
-                        tool_trace: vec![],
-                        interrupted: false,
-                        error: Some(format!("Sub-agent task panicked: {}", e)),
-                        duration_seconds: 0.0,
-                        modified_files: vec![],
-                    });
-                }
+                Err(e) => results.push(
+                    SubAgentResultBuilder::new(std::time::Instant::now())
+                        .error(format!("Sub-agent task panicked: {}", e))
+                        .build(),
+                ),
             }
         }
     }
@@ -298,6 +290,97 @@ struct CollectedToolUse {
     id: String,
     name: String,
     input_json: String,
+}
+
+// ---------------------------------------------------------------------------
+// SubAgentResult builder — reduces repetition across cancel/error paths
+// ---------------------------------------------------------------------------
+
+struct SubAgentResultBuilder {
+    summary: String,
+    api_calls: u32,
+    exit_reason: &'static str,
+    tokens: SubAgentTokenUsage,
+    tool_trace: Vec<ToolTraceEntry>,
+    interrupted: bool,
+    error: Option<String>,
+    start: std::time::Instant,
+    modified_files: Vec<String>,
+}
+
+impl SubAgentResultBuilder {
+    fn new(start: std::time::Instant) -> Self {
+        Self {
+            summary: String::new(),
+            api_calls: 0,
+            exit_reason: "completed",
+            tokens: SubAgentTokenUsage::default(),
+            tool_trace: Vec::new(),
+            interrupted: false,
+            error: None,
+            start,
+            modified_files: Vec::new(),
+        }
+    }
+
+    /// Pre-fill fields from loop state (call once after entering the loop).
+    fn with_loop_state(
+        mut self,
+        turn: u32,
+        input_tokens: u64,
+        output_tokens: u64,
+        tool_trace: Vec<ToolTraceEntry>,
+        modified_files: Vec<String>,
+    ) -> Self {
+        self.api_calls = turn;
+        self.tokens = SubAgentTokenUsage {
+            input_tokens,
+            output_tokens,
+        };
+        self.tool_trace = tool_trace;
+        self.modified_files = modified_files;
+        self
+    }
+
+    /// Mark as interrupted.
+    fn interrupted(mut self) -> Self {
+        self.interrupted = true;
+        self.exit_reason = "interrupted";
+        self
+    }
+
+    /// Mark as error.
+    fn error(mut self, msg: String) -> Self {
+        self.error = Some(msg);
+        self.exit_reason = "error";
+        self
+    }
+
+    /// Set exit_reason explicitly (e.g. "max_turns").
+    fn exit_reason(mut self, reason: &'static str) -> Self {
+        self.exit_reason = reason;
+        self
+    }
+
+    /// Set summary.
+    fn summary(mut self, summary: String) -> Self {
+        self.summary = summary;
+        self
+    }
+
+    fn build(self) -> SubAgentResult {
+        SubAgentResult {
+            summary: self.summary,
+            api_calls: self.api_calls,
+            exit_reason: self.exit_reason.into(),
+            tokens: self.tokens,
+            tool_trace: self.tool_trace,
+            interrupted: self.interrupted,
+            error: self.error,
+            duration_seconds: self.start.elapsed().as_secs_f64(),
+            modified_files: self.modified_files,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -342,17 +425,9 @@ async fn run_single_sub_agent(
     let (client, model) = match create_subagent_client(deps).await {
         Ok((c, m)) => (c, m),
         Err(e) => {
-            return SubAgentResult {
-                summary: String::new(),
-                api_calls: 0,
-                exit_reason: "error".into(),
-                tokens: SubAgentTokenUsage::default(),
-                tool_trace: vec![],
-                interrupted: false,
-                error: Some(format!("Failed to create sub-agent client: {}", e)),
-                duration_seconds: start.elapsed().as_secs_f64(),
-                modified_files: vec![],
-            };
+            return SubAgentResultBuilder::new(start)
+                .error(format!("Failed to create sub-agent client: {}", e))
+                .build();
         }
     };
 
@@ -367,24 +442,21 @@ async fn run_single_sub_agent(
     let mut tool_trace: Vec<ToolTraceEntry> = Vec::new();
     let mut modified_files: Vec<String> = Vec::new();
     let mut has_executed_tools = false; // Track whether any tools were executed
+    let mut consecutive_errors = 0u32; // Track consecutive API/stream errors for backoff
 
     loop {
         // Check cancellation
         if cancel.is_cancelled() {
-            return SubAgentResult {
-                summary: String::new(),
-                api_calls: turn,
-                exit_reason: "interrupted".into(),
-                tokens: SubAgentTokenUsage {
-                    input_tokens: total_input_tokens,
-                    output_tokens: total_output_tokens,
-                },
-                tool_trace,
-                interrupted: true,
-                error: None,
-                duration_seconds: start.elapsed().as_secs_f64(),
-                modified_files: vec![],
-            };
+            return SubAgentResultBuilder::new(start)
+                .with_loop_state(
+                    turn,
+                    total_input_tokens,
+                    total_output_tokens,
+                    tool_trace,
+                    modified_files.clone(), // clone required: compiler needs modified_files alive for the non-cancel branch
+                )
+                .interrupted()
+                .build();
         }
 
         turn += 1;
@@ -402,11 +474,24 @@ async fn run_single_sub_agent(
         {
             Ok(s) => s,
             Err(e) => {
+                consecutive_errors += 1;
                 let _ = progress_tx.send(SubAgentEvent::Status {
                     task_index,
-                    message: format!("API error: {}", e),
+                    message: format!(
+                        "API error ({}/{}): {}",
+                        consecutive_errors, MAX_CONSECUTIVE_ERRORS, e
+                    ),
                 });
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                    tracing::warn!(
+                        consecutive_errors,
+                        "Sub-agent hit max consecutive API errors, aborting"
+                    );
+                    break;
+                }
+                // Exponential backoff: 500ms, 1s, 2s, 4s, capped at 8s
+                let backoff_ms = (500u64 * 2u64.saturating_pow(consecutive_errors - 1)).min(8000);
+                tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
                 continue;
             }
         };
@@ -424,20 +509,10 @@ async fn run_single_sub_agent(
             tokio::select! {
                 _ = cancel.cancelled() => {
                     tracing::info!(event = "cancelled", phase = "sub_agent_stream", "Sub-agent stream cancelled");
-                    return SubAgentResult {
-                        summary: String::new(),
-                        api_calls: turn,
-                        exit_reason: "interrupted".into(),
-                        tokens: SubAgentTokenUsage {
-                            input_tokens: total_input_tokens,
-                            output_tokens: total_output_tokens,
-                        },
-                        tool_trace,
-                        interrupted: true,
-                        error: None,
-                        duration_seconds: start.elapsed().as_secs_f64(),
-                        modified_files: vec![],
-                    };
+                    return SubAgentResultBuilder::new(start)
+                        .with_loop_state(turn, total_input_tokens, total_output_tokens, tool_trace, modified_files)
+                        .interrupted()
+                        .build();
                 }
                 event = stream.next() => {
                     match event {
@@ -508,13 +583,32 @@ async fn run_single_sub_agent(
         }
 
         if stream_failed {
+            consecutive_errors += 1;
             let _ = progress_tx.send(SubAgentEvent::Status {
                 task_index,
-                message: "Stream error, retrying...".into(),
+                message: format!(
+                    "Stream error ({}/{}), retrying...",
+                    consecutive_errors, MAX_CONSECUTIVE_ERRORS
+                ),
             });
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                tracing::warn!(
+                    consecutive_errors,
+                    "Sub-agent hit max consecutive stream errors, aborting"
+                );
+                break;
+            }
+            let backoff_ms = (500u64 * 2u64.saturating_pow(consecutive_errors - 1)).min(8000);
+            tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
             continue;
         }
+
+        // Successful stream — reset consecutive error counter.
+        // Note: this resets on stream success, NOT on tool success. Tool execution
+        // failures (e.g. permission denied) are not network errors and should not
+        // count toward the consecutive-error abort threshold. Only consecutive
+        // stream/API failures (with no successful stream in between) trigger abort.
+        consecutive_errors = 0;
 
         // Empty response
         if assistant_text.trim().is_empty()
@@ -598,20 +692,16 @@ async fn run_single_sub_agent(
         let mut tool_results: Vec<ContentBlock> = Vec::new();
         for tu in &collected_tool_uses {
             if cancel.is_cancelled() {
-                return SubAgentResult {
-                    summary: String::new(),
-                    api_calls: turn,
-                    exit_reason: "interrupted".into(),
-                    tokens: SubAgentTokenUsage {
-                        input_tokens: total_input_tokens,
-                        output_tokens: total_output_tokens,
-                    },
-                    tool_trace,
-                    interrupted: true,
-                    error: None,
-                    duration_seconds: start.elapsed().as_secs_f64(),
-                    modified_files: vec![],
-                };
+                return SubAgentResultBuilder::new(start)
+                    .with_loop_state(
+                        turn,
+                        total_input_tokens,
+                        total_output_tokens,
+                        tool_trace,
+                        modified_files,
+                    )
+                    .interrupted()
+                    .build();
             }
 
             // Safety check: block tools that sub-agents must never use (e.g. recursive delegation)
@@ -630,6 +720,7 @@ async fn run_single_sub_agent(
                 let _ = progress_tx.send(SubAgentEvent::ToolCompleted {
                     task_index,
                     tool: tu.name.clone(),
+                    input_summary: format_tool_input_summary(&tu.name, &tu.input_json),
                     is_error: true,
                 });
                 continue;
@@ -709,6 +800,7 @@ async fn run_single_sub_agent(
             let _ = progress_tx.send(SubAgentEvent::ToolCompleted {
                 task_index,
                 tool: tu.name.clone(),
+                input_summary: format_tool_input_summary(&tu.name, &tu.input_json),
                 is_error,
             });
 
@@ -720,7 +812,6 @@ async fn run_single_sub_agent(
 
     // Extract summary from the final assistant text
     let summary = extract_subagent_summary(&history);
-    let duration = start.elapsed().as_secs_f64();
 
     // Record sub-agent token usage into shared cost tracker
     if (total_input_tokens > 0 || total_output_tokens > 0)
@@ -744,25 +835,21 @@ async fn run_single_sub_agent(
         String::new()
     };
 
-    SubAgentResult {
-        summary: summary + &file_warning,
-        api_calls: turn,
-        exit_reason: if turn >= deps.delegation_config.max_turns {
+    SubAgentResultBuilder::new(start)
+        .with_loop_state(
+            turn,
+            total_input_tokens,
+            total_output_tokens,
+            tool_trace,
+            modified_files,
+        )
+        .exit_reason(if turn >= deps.delegation_config.max_turns {
             "max_turns"
         } else {
             "completed"
-        }
-        .into(),
-        tokens: SubAgentTokenUsage {
-            input_tokens: total_input_tokens,
-            output_tokens: total_output_tokens,
-        },
-        tool_trace,
-        interrupted: false,
-        error: None,
-        duration_seconds: duration,
-        modified_files,
-    }
+        })
+        .summary(summary + &file_warning)
+        .build()
 }
 
 // ---------------------------------------------------------------------------
