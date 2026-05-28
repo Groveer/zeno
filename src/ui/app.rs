@@ -516,30 +516,11 @@ impl App {
         // ── Mode-specific input via InputPanel ─────────────────
         let action = self.input.dispatch_key(key, self.mode);
 
-        // Scroll fallback: if input didn't consume Up/Down, scroll output
-        if matches!(action, input::InputAction::Consumed) {
-            match key {
-                KeyEvent {
-                    code: KeyCode::Up,
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    self.output.scroll_up(3);
-                }
-                KeyEvent {
-                    code: KeyCode::Down,
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    self.output.scroll_down(3);
-                }
-                _ => {}
-            }
-        }
-
         // ── Route InputAction ──────────────────────────────────
         match action {
-            input::InputAction::Consumed | input::InputAction::HardQuit => {
+            input::InputAction::Consumed
+            | input::InputAction::NotConsumed
+            | input::InputAction::HardQuit => {
                 if matches!(action, input::InputAction::HardQuit) {
                     self.should_quit = true;
                     self.cancel_token.cancel();

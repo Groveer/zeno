@@ -43,6 +43,8 @@ use super::theme;
 pub enum InputAction {
     /// Key was consumed by the editor (no routing needed).
     Consumed,
+    /// Key was NOT consumed (e.g. Up/Down with no history) — allow fallback.
+    NotConsumed,
     /// User submitted a query (Idle mode Enter).
     SubmitQuery {
         text: String,
@@ -485,7 +487,9 @@ impl InputState {
 
         match mode {
             AppMode::Running => {
-                let _ = self.handle_key(key);
+                if !self.handle_key(key) {
+                    return InputAction::NotConsumed;
+                }
                 if self.submitted {
                     let text = self.expand_and_extract_text();
                     self.reset();
@@ -499,7 +503,9 @@ impl InputState {
                 }
             }
             AppMode::WaitingInput => {
-                let _ = self.handle_key(key);
+                if !self.handle_key(key) {
+                    return InputAction::NotConsumed;
+                }
                 if self.submitted {
                     let text = self.expand_and_extract_text();
                     self.reset_without_history();
@@ -509,7 +515,9 @@ impl InputState {
                 }
             }
             AppMode::Idle => {
-                let _ = self.handle_key(key);
+                if !self.handle_key(key) {
+                    return InputAction::NotConsumed;
+                }
                 if self.submitted {
                     let (images, text) = self.extract_images();
                     let text = text.trim().to_string();
