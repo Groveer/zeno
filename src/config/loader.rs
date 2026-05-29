@@ -463,7 +463,17 @@ fn register_zeno_api(lua: &Lua, table: &mlua::Table) -> anyhow::Result<()> {
     table.set(
         "set_provider",
         lua.create_function(move |lua, name: String| {
-            get_overrides(lua)?.set("active_provider", name)?;
+            let overrides = get_overrides(lua)?;
+            overrides.set("active_provider", name.clone())?;
+            if let Ok(providers) = overrides.get::<mlua::Table>("providers") {
+                if let Ok(provider) = providers.get::<mlua::Table>(name.as_str()) {
+                    if let Ok(default_model) = provider.get::<String>("default_model") {
+                        if !default_model.is_empty() {
+                            overrides.set("model", default_model)?;
+                        }
+                    }
+                }
+            }
             Ok(())
         })?,
     )?;
